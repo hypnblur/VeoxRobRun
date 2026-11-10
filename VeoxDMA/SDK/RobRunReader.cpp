@@ -137,6 +137,10 @@ static void PublishSnapshot()
     snapshot->localCharacter = cachedLocalCharacter;
     snapshot->cameraModel = cachedCameraModel;
     snapshot->failureCount = failureCount;
+    for (const auto& entity : entities) {
+        if (!entity.bones.empty()) ++snapshot->skeletonCount;
+        if (entity.bonePoints.valid) ++snapshot->poseCount;
+    }
     snapshot->fallbackViewProjection = fallbackViewProjection;
     snapshot->fallbackViewProjectionValid = fallbackViewProjectionValid;
 

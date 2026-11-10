@@ -841,6 +841,15 @@ there is no per-bone culling. Any movement in the skeleton therefore marks the
 whole character as animating, and all segments receive the same color. A pose
 that stays frozen for 150 ms is treated as culled.
 
+**Partial rigs.** A character can expose a short IK chain, a missing limb view
+or a single bad bone while the rest of the hierarchy is valid. The layout
+builder therefore treats limbs as optional, resolves each head/torso anchor
+independently and only requires two connected anchors with at least one from the
+head/torso chain. Pose sampling validates each bone separately and drops only
+the segments that touch a bad bone. Rejecting the whole rig for one bad limb was
+why some players never rendered a skeleton. The menu diagnostics show
+`skeletons/players` and `aim pose/players` so coverage is measurable.
+
 **Why walls are not detected.** Occlusion is a GPU depth-buffer result. A
 read-only DMA overlay never sees the game's back buffer, depth buffer, camera
 frustum traversal or static occluder mesh, and the managed game classes do not

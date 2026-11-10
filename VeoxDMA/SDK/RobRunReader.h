@@ -59,6 +59,11 @@ struct Snapshot {
     std::uintptr_t localCharacter = 0;
     std::uintptr_t cameraModel = 0;
     std::uint32_t failureCount = 0;
+    // Coverage diagnostics: how many players actually produced drawable bones
+    // or a usable named aim pose this pass. These make "some skeletons do not
+    // render" measurable from the menu instead of guessed.
+    std::uint32_t skeletonCount = 0;
+    std::uint32_t poseCount = 0;
     Matrix4x4 fallbackViewProjection{};
     bool fallbackViewProjectionValid = false;
 };

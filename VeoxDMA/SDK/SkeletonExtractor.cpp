@@ -136,11 +136,9 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     };
     int root = indexOf(native);
     if (root < 0) return false;
-    for (auto& t : local) {
-        float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
-        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
-            n < 0.5f || n > 1.5f) return false;
-    }
+    // Pose validity is handled per bone in SampleLayout. Rejecting the whole
+    // layout because one bone had a bad quaternion at build time made some
+    // characters permanently skeletonless while the animator was settling.
     auto resolve = [&](U transform) {
         if (!m.is(transform,"Transform")) return -1;
         U n = m.ptr(transform,0x10);
@@ -149,55 +147,122 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         return index >= 0 && ancestor(root,index) ? index : -1;
     };
     U animation = m.ptr(view,0x28), weapon = m.ptr(view,0x30);
-    if (!m.isOneOf(animation,{"CharacterAnimationView","AnimationView"}) ||
-        !m.isOneOf(weapon,{"CharacterWithWeaponAnimationView","WithWeaponView"})) return false;
+    const bool animationOk = m.isOneOf(animation,{"CharacterAnimationView","AnimationView"});
+    const bool weaponOk = m.isOneOf(weapon,{"CharacterWithWeaponAnimationView","WithWeaponView"});
+
     std::vector<int> anchors;
-    int limbCounter = 0;
-    for (U offset : {U(0x58),U(0x60),U(0x68),U(0x70)}) {
-        U limb = m.ptr(weapon,offset);
-        if (!m.isOneOf(limb,{"LimbIKView","LimbIK"})) return false;
-        U array = m.ptr(limb,0x40), length = 0;
-        if (array <= 0x10000 || !m.get(array+0x18,length) ||
-            length < 2 || length > static_cast<U>(count)) return false;
-        std::vector<U> bones(static_cast<std::size_t>(length));
-        if (!m.array(array+0x20,bones,true)) return false;
-        std::vector<int> limbIndices;
-        for (U bone : bones) {
-            int index = resolve(bone);
-            if (index < 0) return false;
-            for (int other : limbIndices)
-                if (other == index || (!ancestor(other,index) &&
-                    !ancestor(index,other))) return false;
-            limbIndices.push_back(index); anchors.push_back(index);
-        }
-        if (limbIndices.size() >= 3) {
-            switch (limbCounter) {
-            case 0: out.leftShoulder = limbIndices[0]; out.leftElbow = limbIndices[1]; out.leftHand = limbIndices[2]; break;
-            case 1: out.rightShoulder = limbIndices[0]; out.rightElbow = limbIndices[1]; out.rightHand = limbIndices[2]; break;
-            case 2: out.leftHip = limbIndices[0]; out.leftKnee = limbIndices[1]; out.leftFoot = limbIndices[2]; break;
-            case 3: out.rightHip = limbIndices[0]; out.rightKnee = limbIndices[1]; out.rightFoot = limbIndices[2]; break;
+    auto pushAnchor = [&](int index) {
+        if (index < 0) return;
+        for (int other : anchors) if (other == index) return;
+        anchors.push_back(index);
+    };
+
+    // Limbs are optional. Previously a single short IK chain, a missing limb
+    // view or one bone that failed to resolve rejected the whole layout, which
+    // is why some characters never received a skeleton at all. Collect what
+    // validates and let the shared ancestor walk connect it.
+    if (weaponOk) {
+        int limbCounter = 0;
+        for (U offset : {U(0x58),U(0x60),U(0x68),U(0x70)}) {
+            const int slot = limbCounter++;
+            U limb = m.ptr(weapon,offset);
+            if (!m.isOneOf(limb,{"LimbIKView","LimbIK"})) continue;
+            U array = m.ptr(limb,0x40), length = 0;
+            if (array <= 0x10000 || !m.get(array+0x18,length) ||
+                length < 1 || length > static_cast<U>(count)) continue;
+            std::vector<U> bones(static_cast<std::size_t>(length));
+            if (!m.array(array+0x20,bones,true)) continue;
+            std::vector<int> limbIndices;
+            for (U bone : bones) {
+                int index = resolve(bone);
+                if (index < 0) continue;
+                bool duplicate = false;
+                for (int other : limbIndices)
+                    if (other == index) { duplicate = true; break; }
+                if (duplicate) continue;
+                limbIndices.push_back(index);
+            }
+            for (int index : limbIndices) pushAnchor(index);
+            auto assign = [&](std::int32_t& a, std::int32_t& b, std::int32_t& c) {
+                if (limbIndices.size() > 0) a = limbIndices[0];
+                if (limbIndices.size() > 1) b = limbIndices[1];
+                if (limbIndices.size() > 2) c = limbIndices[2];
+            };
+            switch (slot) {
+            case 0: assign(out.leftShoulder, out.leftElbow, out.leftHand); break;
+            case 1: assign(out.rightShoulder, out.rightElbow, out.rightHand); break;
+            case 2: assign(out.leftHip, out.leftKnee, out.leftFoot); break;
+            case 3: assign(out.rightHip, out.rightKnee, out.rightFoot); break;
             }
         }
-        ++limbCounter;
     }
-    U head = m.ptr(animation,0x28), torso = m.ptr(animation,0x30);
-    if (!m.isOneOf(head,{"CharacterHeadManualControlView","HeadView"}) ||
-        !m.isOneOf(torso,{"CharacterTorsoDeformationView","TorsoView"})) return false;
-    int neck = resolve(m.ptr(head,0x20)), skull = resolve(m.ptr(head,0x28));
-    int top = resolve(m.ptr(head,0x30));
-    int spine2 = resolve(m.ptr(torso,0x28)), spine3 = resolve(m.ptr(torso,0x30));
-    if (neck < 0 || skull < 0 || top < 0 || spine2 < 0 || spine3 < 0 ||
-        neck == skull || !ancestor(neck,skull) || !ancestor(top,neck)) return false;
-    for (int index : {neck,skull,top,spine2,spine3}) anchors.push_back(index);
+
+    // The head/torso chain provides the spine, which every useful skeleton
+    // needs. Resolve each anchor independently so a missing upper-spine or
+    // head-top bone does not discard the rest of the rig.
+    int centralAnchors = 0;
+    if (animationOk) {
+        U head = m.ptr(animation,0x28), torso = m.ptr(animation,0x30);
+        if (m.isOneOf(head,{"CharacterHeadManualControlView","HeadView"})) {
+            const int neck = resolve(m.ptr(head,0x20));
+            const int skull = resolve(m.ptr(head,0x28));
+            const int top = resolve(m.ptr(head,0x30));
+            if (neck >= 0 && skull >= 0 && neck != skull && ancestor(neck,skull)) {
+                out.neck = neck;
+                out.head = skull;
+                pushAnchor(neck);
+                pushAnchor(skull);
+                ++centralAnchors;
+                if (top >= 0 && ancestor(top,neck)) {
+                    pushAnchor(top);
+                    ++centralAnchors;
+                }
+            } else if (skull >= 0) {
+                out.head = skull;
+                pushAnchor(skull);
+                ++centralAnchors;
+            } else if (neck >= 0) {
+                out.neck = neck;
+                pushAnchor(neck);
+                ++centralAnchors;
+            }
+        }
+        if (m.isOneOf(torso,{"CharacterTorsoDeformationView","TorsoView"})) {
+            const int spine2 = resolve(m.ptr(torso,0x28));
+            const int spine3 = resolve(m.ptr(torso,0x30));
+            if (spine2 >= 0 && spine3 >= 0 && spine2 != spine3 && ancestor(spine2,spine3)) {
+                out.pelvis = spine2;
+                out.chest = spine3;
+                pushAnchor(spine2);
+                pushAnchor(spine3);
+                ++centralAnchors;
+            } else if (spine3 >= 0) {
+                out.chest = spine3;
+                pushAnchor(spine3);
+                ++centralAnchors;
+            } else if (spine2 >= 0) {
+                out.pelvis = spine2;
+                pushAnchor(spine2);
+                ++centralAnchors;
+            }
+        }
+    }
+
+    // Two connected anchors are the minimum for a line, and at least one must
+    // come from the head/torso chain; limb-only data would draw floating arms.
+    if (anchors.size() < 2 || centralAnchors == 0) return false;
+
     int lca = anchors.front();
     for (int index : anchors) {
         while (lca != -1 && !ancestor(lca,index)) lca = parent[lca];
         if (lca == -1) return false;
     }
+    if (lca < 0) return false;
+
     std::vector<unsigned char> selected(count,0);
     for (int index : anchors) {
         for (int p = index;; p = parent[p]) {
-            if (!ancestor(root,p)) return false;
+            if (p < 0 || !ancestor(root,p)) return false;
             selected[p] = 1;
             if (p == lca) break;
         }
@@ -208,10 +273,6 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     out.count = count;
     out.parent = std::move(parent);
     out.selected = std::move(selected);
-    out.head = skull;
-    out.neck = neck;
-    out.chest = spine3;
-    out.pelvis = spine2;
     out.segments.clear();
     for (int b = 0; b < count; ++b) {
         const int p = out.parent[b];
@@ -237,33 +298,59 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     if (!read(layout.matrices, local.data(), local.size() * sizeof(TRS)))
         return false;
 
-    for (auto& t : local) {
+    // A pose read can contain a handful of bad bones during spawn, ragdoll
+    // transitions or a partially paged-out matrix array. Rejecting the whole
+    // sample made the entire character lose its skeleton; instead, mark bad
+    // bones and drop only the segments that touch them.
+    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        auto& t = local[b];
         const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
         if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
             n < 0.5f || n > 1.5f)
-            return false;
+            continue;
         const float inv = 1.0f/std::sqrt(n);
         t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
+        boneValid[b] = 1;
     }
 
     std::vector<Vec> world(static_cast<std::size_t>(count));
+    std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
     for (int b = 0; b < count; ++b) {
+        if (!boneValid[b]) continue;
         Vec v = local[b].p;
-        for (int p = layout.parent[b]; p != -1; p = layout.parent[p])
+        bool ok = true;
+        for (int p = layout.parent[b]; p != -1; p = layout.parent[p]) {
+            if (!boneValid[p]) { ok = false; break; }
             v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
-        if (!Finite(v)) return false;
+        }
+        if (!ok || !Finite(v)) continue;
         world[b] = v;
+        worldValid[b] = 1;
     }
 
     std::vector<BoneSegment> result;
     result.reserve(layout.segments.size());
     for (const auto& seg : layout.segments) {
+        if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
         result.push_back({world[seg.first], world[seg.second]});
     }
     out = std::move(result);
 
     if (localOut) {
         for (int b = 0; b < count; ++b) {
+            // Invalid bones are written as a neutral pose instead of raw
+            // memory so the animator-motion comparison never sees NaN/garbage
+            // and does not freeze the character for one bad read.
+            if (!boneValid[b]) {
+                localOut[b].position = {};
+                localOut[b].rotation[0] = 0.f;
+                localOut[b].rotation[1] = 0.f;
+                localOut[b].rotation[2] = 0.f;
+                localOut[b].rotation[3] = 1.f;
+                localOut[b].scale = {1.f, 1.f, 1.f};
+                continue;
+            }
             localOut[b].position = local[b].p;
             localOut[b].rotation[0] = local[b].q.x;
             localOut[b].rotation[1] = local[b].q.y;
@@ -274,18 +361,23 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     }
 
     if (points) {
-        points->valid = layout.head >= 0 && layout.head < count &&
-            layout.neck >= 0 && layout.neck < count &&
-            layout.chest >= 0 && layout.chest < count &&
-            layout.pelvis >= 0 && layout.pelvis < count;
+        // A tolerant layout may only resolve some of the four central anchors.
+        // Expose the pose as valid when at least one of them sampled, and leave
+        // the missing points at the origin so the caller's sanity distance
+        // check falls back to the body-relative height.
+        auto anchorOk = [&](int idx) {
+            return idx >= 0 && idx < count && worldValid[idx] != 0;
+        };
+        points->valid = anchorOk(layout.head) || anchorOk(layout.neck) ||
+            anchorOk(layout.chest) || anchorOk(layout.pelvis);
         if (points->valid) {
-            points->head = world[layout.head];
-            points->neck = world[layout.neck];
-            points->chest = world[layout.chest];
-            points->pelvis = world[layout.pelvis];
             auto fill = [&](int idx, Vec& dst) {
-                if (idx >= 0 && idx < count) dst = world[idx];
+                if (anchorOk(idx)) dst = world[idx];
             };
+            fill(layout.head, points->head);
+            fill(layout.neck, points->neck);
+            fill(layout.chest, points->chest);
+            fill(layout.pelvis, points->pelvis);
             fill(layout.leftShoulder, points->leftShoulder);
             fill(layout.leftElbow, points->leftElbow);
             fill(layout.leftHand, points->leftHand);

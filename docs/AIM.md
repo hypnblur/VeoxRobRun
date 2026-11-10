@@ -41,10 +41,11 @@ tab and records why "silent aim" is not part of the feature set.
 - The closest candidate wins, with a small hysteresis bonus for the previously
   selected entity to stop target flicker.
 - The aim point is sampled from the animation pose: head, neck, chest or
-  pelvis. A bone sample is only trusted when it is finite and within a few
-  metres of the entity's transform root; otherwise a body-relative height above
-  the root is used. This keeps a stale rig layout from pointing the aim at the
-  world origin.
+  pelvis. Anchors resolve independently, so a partial rig still contributes
+  whichever central points it exposed. A bone sample is only trusted when it is
+  finite and within a few metres of the entity's transform root; otherwise a
+  body-relative height above the root is used. This keeps a stale rig layout
+  from pointing the aim at the world origin.
 - Aim is suspended while the menu is open and whenever the activation key is
   not held.
 - The activation key is polled from **all** sources and OR-ed: the game-PC
@@ -68,7 +69,10 @@ Common cases:
 - **`menu open`**: aim is paused while the menu is visible. Close it before
   testing.
 - **`no target in FOV`**: no entity projects inside the circle. Check the FOV
-  slider and whether the player ESP is actually drawing targets.
+  slider and whether the player ESP is actually drawing targets. The diagnostics
+  panel also shows `skeletons/players` and `aim pose/players`; if skeletons is
+  lower than players, those rigs are partial or still failing to resolve, and aim
+  falls back to body-relative heights for them.
 - **`hardware device not ready`**: Hardware Aim needs a connected device; the
   device panel shows the link state and error.
 - **`moving (memory)` with no view change**: Memory Aim uses `SendInput` on the
