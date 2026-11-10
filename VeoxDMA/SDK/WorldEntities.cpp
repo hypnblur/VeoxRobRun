@@ -86,6 +86,18 @@ bool ReadVehiclePosition(std::uintptr_t transform, Vector3& out)
 
 using PositionReader = std::function<bool(std::uintptr_t model, Vector3& out)>;
 
+bool WorldLooksValid(std::uintptr_t world)
+{
+    if (world <= 0x10000) return false;
+
+    // Probe a few collections that exist in every loaded scene. A wrong base
+    // pointer normally fails the dictionary structure checks.
+    std::vector<RobRunMemory::DictEntry> entries;
+    return RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Containers, entries) ||
+        RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Loots, entries) ||
+        RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Vehicles, entries);
+}
+
 void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
     const PositionReader& readPosition, State& out, int& kindCounter)
 {
@@ -118,8 +130,14 @@ bool Read(std::uintptr_t battleModel, State& out)
     out = State{};
     if (battleModel <= 0x10000) return false;
 
-    const std::uintptr_t world = RobRunMemory::ReadPtr(
+    std::uintptr_t world = RobRunMemory::ReadPtr(
         battleModel + rr::BattleModel::WorldEntitiesModel);
+    if (!WorldLooksValid(world)) {
+        const std::uintptr_t legacy = RobRunMemory::ReadPtr(
+            battleModel + rr::BattleModel::WorldEntitiesModelLegacy);
+        if (WorldLooksValid(legacy))
+            world = legacy;
+    }
     if (world <= 0x10000) return false;
 
     out.valid = true;

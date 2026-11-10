@@ -458,17 +458,33 @@ static void UpdateInternal()
     }
 
     std::unordered_map<std::int32_t, std::uintptr_t> slots;
-    const std::uintptr_t slotsRoot = ReadPtr(
-        cachedBattleEntities + rr::BattleEntitiesModel::CharacterSlotsRoot);
-    if (slotsRoot > 0x10000) {
+    std::vector<RobRunMemory::DictEntry> slotEntries;
+    bool slotsRead = false;
+
+    // New offset set: BattleModel+0x4C8 -> slots model +0x10 -> dictionary.
+    const std::uintptr_t slotsModel = ReadPtr(
+        cachedBattleModel + rr::BattleModel::CharacterSlotsModel);
+    if (slotsModel > 0x10000) {
         const std::uintptr_t slotDictionary = ReadPtr(
-            slotsRoot + rr::CharacterSlotsRoot::SlotDict);
-        std::vector<RobRunMemory::DictEntry> slotEntries;
-        if (RobRunMemory::ReadDictInt(slotDictionary, slotEntries)) {
-            slots.reserve(slotEntries.size());
-            for (const auto& entry : slotEntries)
-                slots[entry.key] = entry.value;
+            slotsModel + rr::CharacterSlotsModel::SlotDict);
+        slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+    }
+
+    // Legacy fallback: BattleEntitiesModel+0x80 -> root +0x18 -> dictionary.
+    if (!slotsRead) {
+        const std::uintptr_t slotsRoot = ReadPtr(
+            cachedBattleEntities + rr::BattleEntitiesModel::CharacterSlotsRoot);
+        if (slotsRoot > 0x10000) {
+            const std::uintptr_t slotDictionary = ReadPtr(
+                slotsRoot + rr::CharacterSlotsRoot::SlotDict);
+            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
         }
+    }
+
+    if (slotsRead) {
+        slots.reserve(slotEntries.size());
+        for (const auto& entry : slotEntries)
+            slots[entry.key] = entry.value;
     }
 
     const std::uintptr_t entityDictionary = ReadPtr(
@@ -501,7 +517,7 @@ static void UpdateInternal()
             const float pitch = RobRunMemory::ReadFloat(
                 transform + rr::CharacterTransformModel::Position + 0x0C);
             const float yaw = RobRunMemory::ReadFloat(
-                transform + rr::CharacterTransformModel::Position + 0x10);
+                transform + rr::CharacterTransformModel::Yaw);
             if (std::isfinite(pitch)) entity.pitch = pitch;
             if (std::isfinite(yaw)) {
                 entity.yaw = yaw;

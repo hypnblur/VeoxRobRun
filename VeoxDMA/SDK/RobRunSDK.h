@@ -143,17 +143,31 @@ inline constexpr std::uintptr_t BattleModel = 0x10;
 namespace BattleModel {
 inline constexpr std::uintptr_t BattleEntitiesModel = 0x90;
 inline constexpr std::uintptr_t BattleCameraModel   = 0x358;
-inline constexpr std::uintptr_t WorldEntitiesModel  = 0x510;
+
+// New offset set: WorldEntitiesModel is reached directly from BattleModel.
+// The older +0x510 path is kept as a validated fallback for sessions where the
+// direct field is null.
+inline constexpr std::uintptr_t WorldEntitiesModel       = 0x60;
+inline constexpr std::uintptr_t WorldEntitiesModelLegacy = 0x510;
+
+// New offset set: character slots live on BattleModel, not under
+// BattleEntitiesModel. The old root is retained as a fallback.
+inline constexpr std::uintptr_t CharacterSlotsModel = 0x4C8;
 }
 
 namespace BattleEntitiesModel {
 inline constexpr std::uintptr_t EntityDict             = 0x50; // Dictionary<int, entity>
-inline constexpr std::uintptr_t CharacterSlotsRoot     = 0x80;
+inline constexpr std::uintptr_t CharacterSlotsRoot     = 0x80; // legacy fallback
 inline constexpr std::uintptr_t LocalPlayerEntityModel = 0xD0;
+inline constexpr std::uintptr_t Player                 = 0xD0; // new offset set alias
 }
 
 namespace CharacterSlotsRoot {
 inline constexpr std::uintptr_t SlotDict = 0x18; // Dictionary<int, slot>
+}
+
+namespace CharacterSlotsModel {
+inline constexpr std::uintptr_t SlotDict = 0x10; // Dictionary<int, slot>
 }
 
 namespace BattleCharacterSlotModel {
@@ -171,7 +185,9 @@ inline constexpr std::uintptr_t wrapper_value = 0x18;
 
 namespace PlayerEntityModel {
 inline constexpr std::uintptr_t EntityId             = 0x10; // int32 local id
-inline constexpr std::uintptr_t BattleCharacterModel = 0x20;
+inline constexpr std::uintptr_t Client               = 0x18; // new offset set
+inline constexpr std::uintptr_t Server               = 0x20; // new offset set
+inline constexpr std::uintptr_t BattleCharacterModel = 0x20; // server-side character
 }
 
 namespace BattleCharacterEntityModel {
@@ -180,15 +196,24 @@ inline constexpr std::uintptr_t BattleCharacterModel = 0x30;
 
 namespace BattleCharacterModel {
 inline constexpr std::uintptr_t PrivateModel            = 0x10;
+inline constexpr std::uintptr_t Id                      = 0x38; // new offset set
+inline constexpr std::uintptr_t Data                    = 0x40; // new offset set
 inline constexpr std::uintptr_t CharacterTransformModel = 0x58;
 inline constexpr std::uintptr_t IsDeadWrapper           = 0xF0;
-inline constexpr std::uintptr_t ItemInHands             = 0x170;
+inline constexpr std::uintptr_t Weapon                  = 0x150; // new offset set
+inline constexpr std::uintptr_t ItemInHands             = 0x170; // legacy path
 inline constexpr std::uintptr_t InVehicle               = 0x1C8;
 inline constexpr std::uintptr_t PlayerRole              = 0x208;
+inline constexpr std::uintptr_t Pbm                     = 0x258; // new offset set
+inline constexpr std::uintptr_t Knockout                = 0x298; // new offset set
 }
 
 namespace CharacterTransformModel {
 inline constexpr std::uintptr_t Position = 0x10; // V3 + pitch/yaw/roll (radians)
+inline constexpr std::uintptr_t X        = 0x10; // new offset set
+inline constexpr std::uintptr_t Y        = 0x14; // new offset set
+inline constexpr std::uintptr_t Z        = 0x18; // new offset set
+inline constexpr std::uintptr_t Yaw      = 0x20; // new offset set
 }
 
 namespace BattleCharacterPrivateModel {
@@ -201,6 +226,60 @@ inline constexpr std::uintptr_t Health    = 0x10; // primitive wrapper
 inline constexpr std::uintptr_t IsDead    = 0x18; // primitive wrapper
 inline constexpr std::uintptr_t MaxAmount = 0x20; // int32
 }
+
+// ------------------------------------------------------------------
+// New offset set: character data, knockout and player-client fields
+// ------------------------------------------------------------------
+namespace BattleData {
+inline constexpr std::uintptr_t Common = 0x20; // BattleCharacterModel+0x40 -> +0x20
+}
+
+namespace CommonModel {
+inline constexpr std::uintptr_t Role = 0x20;
+}
+
+namespace ReferenceData {
+inline constexpr std::uintptr_t Value = 0x18;
+}
+
+namespace Description {
+inline constexpr std::uintptr_t Name = 0x10;
+}
+
+namespace WeaponModel {
+inline constexpr std::uintptr_t ItemInHands = 0x10;
+}
+
+namespace KnockoutModel {
+inline constexpr std::uintptr_t Phase            = 0x18;
+inline constexpr std::uintptr_t PhaseDescription = 0x18;
+inline constexpr std::uintptr_t DescriptionId    = 0x10;
+}
+
+namespace PlayerClient {
+inline constexpr std::uintptr_t AimAssist  = 0x2A0;
+inline constexpr std::uintptr_t AutoFire   = 0x2A8;
+inline constexpr std::uintptr_t Recoil     = 0x2B8;
+inline constexpr std::uintptr_t FakeSpread = 0x2C0;
+}
+
+namespace AimAssist {
+inline constexpr std::uintptr_t IsActive   = 0x10;
+inline constexpr std::uintptr_t HasTarget  = 0x12;
+inline constexpr std::uintptr_t Correction = 0x28;
+}
+
+namespace RecoilModel {
+inline constexpr std::uintptr_t OffsetVec = 0x10;
+}
+
+namespace FakeSpreadModel {
+inline constexpr std::uintptr_t Spread = 0x10;
+inline constexpr std::uintptr_t Air    = 0x14;
+inline constexpr std::uintptr_t Move   = 0x18;
+}
+
+inline constexpr std::uint32_t BattlePlayerCapacity = 320;
 
 // ------------------------------------------------------------------
 // Active view updater (live verified)
@@ -303,6 +382,8 @@ inline constexpr std::uintptr_t Forward     = 0x3C; // V3
 inline constexpr std::uintptr_t Right       = 0x48; // V3
 inline constexpr std::uintptr_t Up          = 0x54; // V3
 inline constexpr std::uintptr_t Distance    = 0x60; // float
+inline constexpr std::uintptr_t BlockEnd    = 0x60; // new offset set: end of camera block
+inline constexpr float DefaultFovDeg        = 60.0f;
 }
 
 namespace Cinemachine {
@@ -310,6 +391,7 @@ namespace Cinemachine {
 inline constexpr std::uintptr_t CoreInstance = 0x08;
 inline constexpr std::uintptr_t BrainList    = 0x10; // List<CinemachineBrain>
 inline constexpr std::uintptr_t BrainFov      = 0xB0; // vertical FOV degrees
+inline constexpr std::uintptr_t BrainStateLensFov = 0xB0; // new offset set alias
 }
 
 // ------------------------------------------------------------------
@@ -353,6 +435,7 @@ inline constexpr std::uintptr_t Value = 0x18; // inherited packed uint32
 }
 
 namespace PrimitiveData {
+inline constexpr std::uintptr_t ModelData = 0x10; // new offset set: primitive model -> data
 inline constexpr std::uintptr_t value = 0x18; // verified inflated wrapper
 }
 
@@ -380,6 +463,7 @@ inline constexpr std::uintptr_t StackValueGetter    = 0x048D1130;
 namespace InventoryItemDescription {
 inline constexpr std::uintptr_t Id          = 0x10; // inherited string Id
 inline constexpr std::uintptr_t Index       = 0x18; // int32
+inline constexpr std::uintptr_t EnumItemIndex = 0x18; // new offset set alias
 inline constexpr std::uintptr_t CellWidth   = 0x24; // int32
 inline constexpr std::uintptr_t CellHeight  = 0x28; // int32
 inline constexpr std::uintptr_t StackSize   = 0x2C; // int32
@@ -584,6 +668,7 @@ inline constexpr std::uintptr_t PlayerEntityModel          = 0x81F8398;
 inline constexpr std::uintptr_t BattleCameraModel          = 0x81B8DB8;
 inline constexpr std::uintptr_t ClientCharacterSlotsModel  = 0x816E270;
 inline constexpr std::uintptr_t GlobalModel                = 0x813B310;
+inline constexpr std::uintptr_t BlindedEffect              = 0x81DC358; // new offset set
 }
 
 } // namespace rr

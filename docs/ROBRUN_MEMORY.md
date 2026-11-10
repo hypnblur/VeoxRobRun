@@ -131,20 +131,69 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `Game.Game +0x20` | active updater `List<reference>` |
 | `Game.Game +0xD0` | `Game.GameModel*` |
 | `Game.GameModel +0x10` | `Game.Battle.BattleModel*` |
+| `BattleModel +0x60` | `WorldEntitiesModel*` (new offset set) |
+| `BattleModel +0x510` | `WorldEntitiesModel*` legacy fallback |
 | `BattleModel +0x90` | `Game.Battle.BattleEntitiesModel*` |
+| `BattleModel +0x4C8` | character slots model (new offset set) |
+| `Character slots model +0x10` | slot dictionary, keyed by entity ID |
 | `BattleEntitiesModel +0x50` | entity dictionary, keyed by entity ID |
-| `BattleEntitiesModel +0x80` | character slots root |
+| `BattleEntitiesModel +0x80` | character slots root (legacy fallback) |
 | `Character slots root +0x18` | slot dictionary, keyed by entity ID |
 | `BattleEntitiesModel +0xD0` | local `PlayerEntityModel*` |
 | `PlayerEntityModel +0x10` | local `int32` entity ID |
-| `PlayerEntityModel +0x20` | local `BattleCharacterModel*` |
+| `PlayerEntityModel +0x18` | local client `BattleCharacterModel*` |
+| `PlayerEntityModel +0x20` | local server `BattleCharacterModel*` |
 | `BattleCharacterEntityModel +0x30` | `BattleCharacterModel*` |
+| `BattleCharacterModel +0x38` | character ID (new offset set) |
+| `BattleCharacterModel +0x40` | character data (new offset set) |
 | `BattleCharacterModel +0x58` | `CharacterTransformModel*` |
-| `CharacterTransformModel +0x10` | position `V3` followed by pitch/yaw/roll |
+| `BattleCharacterModel +0x150` | weapon model (new offset set) |
+| `BattleCharacterModel +0x258` | PBM (new offset set) |
+| `BattleCharacterModel +0x298` | knockout model (new offset set) |
+| `CharacterTransformModel +0x10` | position `V3` (`x`/`y`/`z`) |
+| `CharacterTransformModel +0x20` | yaw in radians (new offset set) |
 
-Character rotation values are radians.
+Character rotation values are radians. The reader prefers the new offset set
+and falls back to the legacy slots root / world-entities offset only when the
+new path fails dictionary validation.
 
 Implementation: `RobRunReader::ResolveBattleModel`, `RobRunReader::Update`.
+
+---
+
+## New offset set: gameplay fields
+
+**Metadata** — the read-only overlay does not act on these, but they are part of
+the canonical offset map.
+
+| Address / field | Value |
+| --- | --- |
+| `BattleCharacterModel +0x40` -> `+0x20` | battle data |
+| `BattleData +0x20` | common model |
+| `CommonModel +0x20` | role |
+| `BattleCharacterModel +0x298` | knockout model |
+| `KnockoutModel +0x18` | phase / phase description |
+| `KnockoutDescription +0x10` | description ID |
+| `PlayerEntityModel +0x18` | client |
+| `PlayerEntityModel +0x20` | server |
+| `PlayerClient +0x2A0` | aim-assist model |
+| `PlayerClient +0x2A8` | auto-fire model |
+| `PlayerClient +0x2B8` | recoil model |
+| `PlayerClient +0x2C0` | fake-spread model |
+| `AimAssist +0x10` | is active |
+| `AimAssist +0x12` | has target |
+| `AimAssist +0x28` | correction |
+| `RecoilModel +0x10` | offset vector |
+| `FakeSpreadModel +0x10` | spread |
+| `FakeSpreadModel +0x14` | air |
+| `FakeSpreadModel +0x18` | move |
+| `BattlePlayerCapacity` | `320` |
+| `TypeInfo.BlindedEffect` | RVA `0x81DC358` |
+
+Other aliases from the new set: `PrimitiveData.ModelData = 0x10`,
+`InventoryItemDescription.EnumItemIndex = 0x18`,
+`ReferenceData.Value = 0x18`, `Description.Name = 0x10`,
+`WeaponModel.ItemInHands = 0x10`.
 
 ---
 
@@ -228,7 +277,7 @@ Implementation: `Il2Cpp::ReadPrimitiveBool`.
 | `BattleCameraModel +0x3C` | forward `V3` |
 | `BattleCameraModel +0x48` | right `V3` |
 | `BattleCameraModel +0x54` | up `V3` |
-| `BattleCameraModel +0x60` | `float distance` |
+| `BattleCameraModel +0x60` | `float distance` / end of camera block |
 
 Cinemachine:
 
