@@ -72,7 +72,8 @@ Common cases:
   slider and whether the player ESP is actually drawing targets. The diagnostics
   panel also shows `skeletons/players` and `aim pose/players`; if skeletons is
   lower than players, those rigs are partial or still failing to resolve, and aim
-  falls back to body-relative heights for them.
+  falls back to body-relative heights for them. `Pose read retries` counts fresh
+  pose reads that failed and kept the previous pose for that pass.
 - **`hardware device not ready`**: Hardware Aim needs a connected device; the
   device panel shows the link state and error.
 - **`moving (memory)` with no view change**: Memory Aim uses `SendInput` on the

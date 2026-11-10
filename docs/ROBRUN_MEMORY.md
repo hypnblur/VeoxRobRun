@@ -823,8 +823,9 @@ The ESP VisCheck option colors each skeleton segment from a single
 per-character animator state. It does **not** test geometry between the camera
 and the character.
 
-**What is measured.** Every pass reads the animation matrix array once and
-compares each bone's full local TRS against the previous sample:
+**What is measured.** Every pass reads the animation matrix array with uncached
+reads, split into page-sized chunks, and compares each bone's full local TRS
+against the previous sample:
 
 - local position (squared distance, epsilon `1e-6`, i.e. 1 mm),
 - local rotation (`|dot(q_prev, q_cur)|`, epsilon `1e-6`, about 0.16 degrees;
@@ -849,6 +850,14 @@ head/torso chain. Pose sampling validates each bone separately and drops only
 the segments that touch a bad bone. Rejecting the whole rig for one bad limb was
 why some players never rendered a skeleton. The menu diagnostics show
 `skeletons/players` and `aim pose/players` so coverage is measurable.
+
+**Pose freshness.** The pose is read with `VMMDLL_FLAG_NOCACHE` and split into
+4 KB chunks so a large rig cannot exceed the transport's per-transaction limit.
+A failed fresh read is retried once, then the previous pose is kept for that
+pass. The cached read is never substituted: VMM's cache window (~200 ms) made
+the pose trail the fresh transform position, which is exactly what made
+skeletons drift behind the player body. A pose that keeps failing for 750 ms
+invalidates the layout so it can be rebuilt.
 
 **Why walls are not detected.** Occlusion is a GPU depth-buffer result. A
 read-only DMA overlay never sees the game's back buffer, depth buffer, camera

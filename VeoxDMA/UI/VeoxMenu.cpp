@@ -214,10 +214,13 @@ static void DrawPanelESP()
 	const bool worldValid = snapshot && snapshot->world.valid;
 	const unsigned skeletonCount = snapshot ? snapshot->skeletonCount : 0;
 	const unsigned poseCount = snapshot ? snapshot->poseCount : 0;
+	const unsigned poseFailures = snapshot ? snapshot->poseFailures : 0;
 	ImGui::Text("Players: %d   World: %d%s   Local ID: %d",
 		playerCount, worldCount, worldValid ? "" : " (root not found)", localId);
 	ImGui::Text("Skeletons: %u/%d   Aim pose: %u/%d",
 		skeletonCount, playerCount, poseCount, playerCount);
+	if (poseFailures)
+		ImGui::Text("Pose read retries: %u", poseFailures);
 	ImGui::Text("DMA keyboard: %s", Keyboard::IsReady() ? "ready" : "unavailable");
 	ImGui::Text("Aim device: %s",
 		Base::Hardware::StateLabel(Base::Hardware::Session().GetStatus().state));
@@ -473,8 +476,8 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 		ImGui::Text("Entities: %zu | C:%d L:%d V:%d G:%d",
 			snapshot->entities.size(), world.containers, world.loots,
 			world.vehicles, world.grenades);
-		ImGui::Text("Skeletons: %u | Aim pose: %u",
-			snapshot->skeletonCount, snapshot->poseCount);
+		ImGui::Text("Skeletons: %u | Aim pose: %u | Pose retries: %u",
+			snapshot->skeletonCount, snapshot->poseCount, snapshot->poseFailures);
 		ImGui::Text("Read failures: %u", snapshot->failureCount);
 	}
 	else

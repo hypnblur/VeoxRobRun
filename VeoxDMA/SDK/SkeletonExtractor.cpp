@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "SkeletonExtractor.h"
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
@@ -294,9 +295,20 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
 
     // One read of the animation pose. This is the only DMA access needed to
     // refresh the skeleton, and it is issued uncached by the caller.
+    //
+    // Read in page-sized chunks. A single NOCACHE read of a large rig can
+    // exceed the transport's per-transaction limit and fail; the caller used to
+    // fall back to a cached pose, which trails a fresh position by the VMM
+    // cache window (~200 ms) and makes the skeleton visibly lag the body.
     std::vector<TRS> local(static_cast<std::size_t>(count));
-    if (!read(layout.matrices, local.data(), local.size() * sizeof(TRS)))
-        return false;
+    constexpr std::size_t kPoseChunk = 0x1000;
+    auto* poseBytes = reinterpret_cast<unsigned char*>(local.data());
+    const std::size_t poseSize = local.size() * sizeof(TRS);
+    for (std::size_t offset = 0; offset < poseSize; offset += kPoseChunk) {
+        const std::size_t chunk = std::min(kPoseChunk, poseSize - offset);
+        if (!read(layout.matrices + offset, poseBytes + offset, chunk))
+            return false;
+    }
 
     // A pose read can contain a handful of bad bones during spawn, ragdoll
     // transitions or a partially paged-out matrix array. Rejecting the whole

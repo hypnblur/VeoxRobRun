@@ -64,6 +64,9 @@ struct Snapshot {
     // render" measurable from the menu instead of guessed.
     std::uint32_t skeletonCount = 0;
     std::uint32_t poseCount = 0;
+    // Players whose fresh pose read failed on the last pass. They keep their
+    // previous bones instead of accepting a cached (visibly trailing) pose.
+    std::uint32_t poseFailures = 0;
     Matrix4x4 fallbackViewProjection{};
     bool fallbackViewProjectionValid = false;
 };

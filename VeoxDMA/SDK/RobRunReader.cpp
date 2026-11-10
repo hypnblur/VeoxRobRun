@@ -33,6 +33,7 @@ static RobRunCamera::CameraState cameraState;
 static int32_t localEntityId = -1;
 static Vector3 localPosition{};
 static std::uint32_t failureCount = 0;
+static std::uint32_t poseFailureCount = 0;
 static std::atomic<bool> readCatalog{ false };
 static int updateCounter = 0;
 static int gameRetryCountdown = 0;
@@ -85,6 +86,11 @@ struct RigCacheEntry {
     // this single result so the ESP cannot show a half-visible body.
     std::uint64_t lastMotionTick = 0;
     bool animatorActive = true;
+    // Consecutive failed fresh pose reads. A single device hiccup must not
+    // discard the rig, but a persistent failure means the matrix array moved
+    // and the layout needs rebuilding.
+    int poseFailures = 0;
+    std::uint64_t poseFailureSince = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -137,6 +143,7 @@ static void PublishSnapshot()
     snapshot->localCharacter = cachedLocalCharacter;
     snapshot->cameraModel = cachedCameraModel;
     snapshot->failureCount = failureCount;
+    snapshot->poseFailures = poseFailureCount;
     for (const auto& entity : entities) {
         if (!entity.bones.empty()) ++snapshot->skeletonCount;
         if (entity.bonePoints.valid) ++snapshot->poseCount;
@@ -512,6 +519,8 @@ static void ReadSlotIdentity(std::uintptr_t slotValue, EntityData& entity)
     }
 }
 
+static int fingerprintFailures = 0;
+
 static void RevalidateSession()
 {
     if (!gaBase) return;
@@ -520,6 +529,10 @@ static void RevalidateSession()
     // they surface unexpected toolchain changes without forcing repeated
     // re-resolution when a signature prefix differs.
     if (!Il2Cpp::VerifyFingerprint()) {
+        // A single failed read of the PE header can be a DMA hiccup. Clearing
+        // the whole session on the first miss forces a full re-resolve and
+        // drops every cached rig, which shows up as a skeleton stutter.
+        if (++fingerprintFailures < 2) return;
         ++failureCount;
         cachedGame = 0;
         cachedBattleModel = 0;
@@ -527,8 +540,10 @@ static void RevalidateSession()
         cachedCameraModel = 0;
         cachedLocalCharacter = 0;
         cachedUpdater = 0;
+        fingerprintFailures = 0;
         return;
     }
+    fingerprintFailures = 0;
     (void)Il2Cpp::VerifyAccessors();
 
     if (cachedGame && !IsClass(cachedGame, "Game"))
@@ -548,6 +563,7 @@ static void UpdateInternal()
     localPosition = Vector3{};
     fallbackViewProjection = Matrix4x4{};
     fallbackViewProjectionValid = false;
+    poseFailureCount = 0;
 
     if (!gaBase) return;
 
@@ -858,10 +874,32 @@ static void UpdateInternal()
 
             if (rig.layoutValid) {
                 rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
-                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones, &rig.points, rig.curLocal.data()) &&
-                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones, &rig.points, rig.curLocal.data())) {
-                    rig.layoutValid = false;
+                // Only fresh poses are accepted. A cached read can trail the
+                // fresh transform position by the VMM cache window, which is
+                // exactly what made skeletons drift behind the body. Retry once
+                // so a single transient device error does not freeze the pose.
+                bool sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
+                    rig.bones, &rig.points, rig.curLocal.data());
+                if (!sampled)
+                    sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
+                        rig.bones, &rig.points, rig.curLocal.data());
+
+                if (!sampled) {
+                    // Keep the last good pose for this pass instead of
+                    // substituting cached data. Only a persistent failure means
+                    // the matrix array moved, so the layout is rebuilt then.
+                    if (rig.poseFailures == 0)
+                        rig.poseFailureSince = now;
+                    ++rig.poseFailures;
+                    ++poseFailureCount;
+                    if (now - rig.poseFailureSince >= 750) {
+                        rig.layoutValid = false;
+                        rig.bones.clear();
+                        rig.points = Skeleton::BonePoints{};
+                        rig.poseFailures = 0;
+                    }
                 } else {
+                    rig.poseFailures = 0;
                     // Any meaningful change in local TRS across the whole
                     // skeleton means the animator is still updating this
                     // character. Quaternions are compared with |dot| because
