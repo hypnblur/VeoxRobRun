@@ -3,6 +3,7 @@
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "DeviceSession.h"
+#include "InputManager.h"
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../ImGUI/imgui.h"
@@ -201,6 +202,22 @@ static void DrawPanelESP()
 	worldColour("Vehicle Color", ConfigInstance.World.VehicleColour);
 	worldColour("Grenade Color", ConfigInstance.World.GrenadeColour);
 
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::Text("Diagnostics");
+
+	const auto snapshot = RobRunReader::GetSnapshot();
+	const int playerCount = snapshot ? static_cast<int>(snapshot->entities.size()) : 0;
+	const int worldCount = snapshot ? static_cast<int>(snapshot->world.entities.size()) : 0;
+	const int localId = snapshot ? snapshot->localEntityId : -1;
+	const bool worldValid = snapshot && snapshot->world.valid;
+	ImGui::Text("Players: %d   World: %d%s   Local ID: %d",
+		playerCount, worldCount, worldValid ? "" : " (root not found)", localId);
+	ImGui::Text("DMA keyboard: %s", Keyboard::IsReady() ? "ready" : "unavailable");
+	ImGui::Text("Aim device: %s",
+		Base::Hardware::StateLabel(Base::Hardware::Session().GetStatus().state));
+
 	ImGui::EndChild();
 	ImGui::PopStyleVar();
 }
@@ -248,6 +265,14 @@ static void DrawPanelDevices()
 	ImGui::SetNextItemWidth(180.f);
 	ImGui::Combo("Target bone", &ConfigInstance.Aim.TargetBone, boneNames,
 		IM_ARRAYSIZE(boneNames));
+
+	ImGui::Checkbox("Visible bones only", &ConfigInstance.Aim.VisibleBonesOnly);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Only target characters whose animator is still updating its pose.\n"
+			"This is the same per-character state the ESP colours as active.\n\n"
+			"Read-only DMA cannot see geometry, so this is NOT wall occlusion:\n"
+			"a character animating behind cover still counts as visible.");
 
 	ImGui::SliderInt("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
 	ImGui::SliderInt("FOV", &ConfigInstance.Aim.Fov, 5, 180, "%d deg");

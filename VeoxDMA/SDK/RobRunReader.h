@@ -30,6 +30,10 @@ struct EntityData {
     float criticalHealth = -1.f;
     std::wstring nickname;
     std::wstring clanTag;
+    // Aggregated animator/cull state for this character. All skeleton segments
+    // share it, so it doubles as the "visible bones only" aim gate. This is an
+    // animator check, not wall occlusion.
+    bool visible = true;
     std::uintptr_t viewPtr = 0;
     std::uintptr_t characterModel = 0;
     std::uintptr_t privateModel = 0;

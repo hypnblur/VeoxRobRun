@@ -6,6 +6,7 @@
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Aim/AimController.h"
+#include "Input/InputManager.h"
 #include "UI/VeoxMenu.h"
 #include "Overlay/Overlay.h"
 #include <atomic>
@@ -50,6 +51,12 @@ static bool AttachGame()
 	CameraFinder::Init(unityBase);
 	RobRunReader::Init(gaBase, unityBase);
 	printf("GameAssembly @ 0x%llX | UnityPlayer @ 0x%llX\n", gaBase, unityBase);
+	// Resolve the game PC's gafAsyncKeyState once the DMA process context is
+	// live. This can take a few seconds (kernel module scans), so it belongs on
+	// the attach thread. Without it every aim key read returns false.
+	const bool keyboardReady = Keyboard::InitKeyboard();
+	printf("[Input] game PC keyboard %s\n",
+		keyboardReady ? "ready" : "unavailable (host/device input only)");
 	SetAttachStatus("Attached.");
 	g_attached.store(true, std::memory_order_release);
 	g_pendingAttachToast.store(true);

@@ -32,7 +32,21 @@ bool Held(int keyIndex)
     if (keyIndex < 0 || keyIndex >= kKeyCount) keyIndex = 0;
     const int vk = kKeys[keyIndex];
     if (vk == 0) return true;
-    return Keyboard::IsKeyDown(static_cast<std::uint32_t>(vk));
+
+    // The DMA keyboard reads the game PC's real state, so it is the primary
+    // source and the only one that stays correct on a two-PC setup. It was
+    // never initialised before, which is why the aim key never registered.
+    if (Keyboard::IsReady())
+        return Keyboard::IsKeyDown(static_cast<std::uint32_t>(vk));
+
+    // DMA keyboard unavailable: a connected aim device can still report the
+    // game PC's mouse buttons.
+    bool deviceDown = false;
+    if (Base::Hardware::MouseDown(vk, deviceDown) && deviceDown)
+        return true;
+
+    // Last resort for single-PC setups: this machine's input state.
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
 float Distance(const Vector3& a, const Vector3& b)
@@ -133,11 +147,20 @@ void Tick()
     int bestId = -1;
     Vector2 bestScreen{};
     float bestScore = 0.f;
+    // If the local transform could not be resolved the origin would reject
+    // every target on distance, so only apply the range filter when we have a
+    // real local position.
+    const bool haveLocalPosition = !snapshot->localPosition.IsZero();
 
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
-        if (Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
+        // Animator/cull gate: skip characters whose pose has frozen, which is
+        // the closest read-only equivalent of "not visible". This is not wall
+        // occlusion.
+        if (cfg.VisibleBonesOnly && !ent.visible) continue;
+        if (haveLocalPosition &&
+            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 
         const Vector3 point = BonePoint(ent, cfg.TargetBone);
         Vector2 screen{};

@@ -69,6 +69,7 @@ void DrawPlayers()
 
 	const int32_t localId = snapshot->localEntityId;
 	const Vector3 localPos = snapshot->localPosition;
+	const bool haveLocalPosition = !localPos.IsZero();
 
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	const ImU32 espCol = D2DColorToImU32(ConfigInstance.Player.TextColour);
@@ -83,7 +84,7 @@ void DrawPlayers()
 			continue;
 
 		const int distance = (int)DistanceTo(ent.position, localPos);
-		if (distance > ConfigInstance.Player.MaxDistance)
+		if (haveLocalPosition && distance > ConfigInstance.Player.MaxDistance)
 			continue;
 
 		ImVec2 screenPos{};

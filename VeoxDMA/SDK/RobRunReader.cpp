@@ -460,17 +460,52 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     }
 }
 
-static void ReadSlotIdentity(std::uintptr_t slotModel, EntityData& entity)
+// Read a slot identity string. The new offset set stores Il2CppString*
+// directly on BattleCharacterSlotData (+0x30 / +0x38); older sessions put a
+// reference wrapper at that field whose value is +0x18. Validate the runtime
+// class so a wrapper cannot be mistaken for a string.
+static bool ReadSlotString(std::uintptr_t owner, std::uintptr_t field, std::wstring& out)
 {
-    if (slotModel <= 0x10000) return;
-    const std::uintptr_t slotData = ReadPtr(slotModel + rr::BattleCharacterSlotModel::_data);
-    if (slotData <= 0x10000) return;
+    out.clear();
+    if (owner <= 0x10000) return false;
 
-    const std::uintptr_t nickname = ReadPtr(slotData + rr::BattleCharacterSlotData::Nickname);
-    RobRunMemory::ReadWrapperString(nickname, entity.nickname);
+    const std::uintptr_t value = ReadPtr(owner + field);
+    if (value <= 0x10000) return false;
 
-    const std::uintptr_t clan = ReadPtr(slotData + rr::BattleCharacterSlotData::ClanTag);
-    RobRunMemory::ReadWrapperString(clan, entity.clanTag);
+    if (RobRunMemory::IsClass(value, "String") &&
+        RobRunMemory::ReadString(value, out) && !out.empty())
+        return true;
+
+    const std::uintptr_t wrapped = ReadPtr(value + rr::BattleCharacterSlotData::wrapper_value);
+    if (wrapped > 0x10000 && wrapped != value &&
+        RobRunMemory::IsClass(wrapped, "String") &&
+        RobRunMemory::ReadString(wrapped, out) && !out.empty())
+        return true;
+
+    out.clear();
+    return false;
+}
+
+static void ReadSlotIdentity(std::uintptr_t slotValue, EntityData& entity)
+{
+    if (slotValue <= 0x10000) return;
+
+    // New offset set: the dictionary value is BattleCharacterSlotData itself.
+    ReadSlotString(slotValue, rr::BattleCharacterSlotData::Nickname, entity.nickname);
+    ReadSlotString(slotValue, rr::BattleCharacterSlotData::ClanTag, entity.clanTag);
+
+    // Legacy: the dictionary value is BattleCharacterSlotModel, which points at
+    // its data object at +0x10.
+    if (entity.nickname.empty() || entity.clanTag.empty()) {
+        const std::uintptr_t slotData = ReadPtr(
+            slotValue + rr::BattleCharacterSlotModel::_data);
+        if (slotData > 0x10000 && slotData != slotValue) {
+            if (entity.nickname.empty())
+                ReadSlotString(slotData, rr::BattleCharacterSlotData::Nickname, entity.nickname);
+            if (entity.clanTag.empty())
+                ReadSlotString(slotData, rr::BattleCharacterSlotData::ClanTag, entity.clanTag);
+        }
+    }
 }
 
 static void RevalidateSession()
@@ -884,6 +919,7 @@ static void UpdateInternal()
             }
             entity.bones = rig.bones;
             entity.bonePoints = rig.points;
+            entity.visible = rig.animatorActive;
 
             if (entity.entityId == localEntityId && localPosition.IsZero() &&
                 !entity.position.IsZero()) {

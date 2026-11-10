@@ -146,6 +146,8 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `PlayerEntityModel +0x10` | local `int32` entity ID |
 | `PlayerEntityModel +0x18` | local client `BattleCharacterModel*` |
 | `PlayerEntityModel +0x20` | local server `BattleCharacterModel*` |
+| `PlayerEntityModel +0x28` | `PublicId` (`int64`) |
+| `BattleCharacterEntityModel +0x18` | `Slots` array |
 | `BattleCharacterEntityModel +0x20` | client `BattleCharacterModel*` (dump path) |
 | `BattleCharacterEntityModel +0x30` | simulated `BattleCharacterModel*` fallback |
 | `BattleCharacterModel +0x38` | character ID (new offset set) |
@@ -153,7 +155,8 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `BattleCharacterModel +0x58` | `CharacterTransformModel*` |
 | `BattleCharacterModel +0x150` | weapon model (new offset set) |
 | `BattleCharacterModel +0x258` | PBM (new offset set) |
-| `BattleCharacterModel +0x298` | knockout model (new offset set) |
+| `BattleCharacterModel +0x290` | `CenterPosition` (`IPositionModel*`) |
+| `BattleCharacterModel +0x298` | knockout model (unverified; not in current list) |
 | `CharacterTransformModel +0x10` | position `V3` (`x`/`y`/`z`) |
 | `CharacterTransformModel +0x20` | yaw in radians (new offset set) |
 
@@ -182,7 +185,8 @@ the canonical offset map.
 | `CommonModel +0xE0` | `IsDead` primitive |
 | `CommonModel +0xF0` | `VehicleEntityId` primitive |
 | `HealthModel +0x24` | critical-health `int32` |
-| `BattleCharacterModel +0x298` | knockout model |
+| `BattleCharacterModel +0x290` | `CenterPosition` (`IPositionModel*`) |
+| `BattleCharacterModel +0x298` | knockout model (unverified; not in current list) |
 | `KnockoutModel +0x18` | phase / phase description |
 | `KnockoutDescription +0x10` | description ID |
 | `PlayerEntityModel +0x18` | client |
@@ -238,20 +242,33 @@ Implementation: `RobRunReader::FindUpdater`,
 
 ## Names and clan tags
 
-**Live verified**
+**Live verified (current offset set)**
 
 ```text
-slotData = Q(slot + 0x10)
+slotValue = dictionary entry value (BattleCharacterSlotData*)
+nicknameString = Q(slotValue + 0x30)   // Il2CppString* directly
+clanString     = Q(slotValue + 0x38)   // Il2CppString* directly
+```
+
+The current slot value is the data object itself; there is no `+0x10`
+indirection and the strings are not wrapped.
+
+Older sessions exposed `BattleCharacterSlotModel` as the dictionary value:
+
+```text
+slotData = Q(slotValue + 0x10)
 nicknameWrapper = Q(slotData + 0x30)
 nicknameString = Q(nicknameWrapper + 0x18)
 clanWrapper = Q(slotData + 0x38)
 clanString = Q(clanWrapper + 0x18)
 ```
 
-The `+0x18` wrapper value offset applies to these verified concrete wrappers.
+The reader tries the direct form first, then the wrapper form, then the legacy
+`+0x10` indirection. Each candidate is validated as an `Il2CppString` before it
+is accepted.
 
-Implementation: `RobRunReader::ReadSlotIdentity`,
-`RobRunMemory::ReadWrapperString`.
+Implementation: `RobRunReader::ReadSlotString`,
+`RobRunReader::ReadSlotIdentity`.
 
 ---
 
@@ -581,7 +598,9 @@ Implementation: `RobRunReader::ReadHealth`, `ReadRoleAndVehicle`.
 
 | Address / field | Value |
 | --- | --- |
-| `BattleModel +0x510` | `WorldEntitiesModel*` |
+| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` (current offset set) |
+| `BattleModel +0x510` | `WorldEntitiesModel*` (legacy fallback) |
+| `WorldEntitiesModel +0x18` | battleCharacters dictionary |
 | `WorldEntitiesModel +0x20` | containers dictionary |
 | `WorldEntitiesModel +0x38` | loots dictionary |
 | `WorldEntitiesModel +0x40` | vehicleLoots dictionary |
@@ -591,6 +610,11 @@ Implementation: `RobRunReader::ReadHealth`, `ReadRoleAndVehicle`.
 | `WorldEntitiesModel +0x98` | staticLootObjects dictionary |
 | `WorldEntitiesModel +0xA0` | randomLootObjects dictionary |
 | `WorldEntitiesModel +0x1A0` | grenades dictionary |
+
+Each collection is resolved directly first, then through the common `+0x10`
+and `+0x18` reference-wrapper slots. Root validation accepts any of
+battleCharacters, containers, loots, vehicles or cars, so an empty early-match
+scene does not look like a bad pointer.
 
 Additional dictionaries exist at `+0x10` through `+0x8D0`; the commonly used
 ones are exposed in `rr::WorldEntitiesModel`.
@@ -836,6 +860,27 @@ Achieving real wall occlusion would require one of:
 
 Until one of those exists, the option is labeled "Animator / Cull Check" and
 should not be described as wall visibility.
+
+The aim option **Visible bones only** uses the same per-character state: when it
+is enabled the aimbot skips characters whose pose has frozen. It is an
+animator/cull gate, not wall occlusion.
+
+---
+
+## Aim input activation
+
+The aim key is read from the game PC's `gafAsyncKeyState` through
+`Keyboard::InitKeyboard()` / `Keyboard::IsKeyDown()`. `InitKeyboard()` is called
+once on the attach thread; it was previously never called, so every key read
+returned false and the aimbot never activated.
+
+If the DMA keyboard cannot be resolved, the aim key falls back to:
+
+1. the connected aim device's button report (`Base::Hardware::MouseDown`), then
+2. the host PC's `GetAsyncKeyState` (single-PC setups only).
+
+On a two-PC setup the DMA keyboard is the only correct source; Memory Aim also
+moves the host cursor, so use Hardware Aim to move the game PC.
 
 ---
 

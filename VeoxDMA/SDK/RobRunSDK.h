@@ -191,9 +191,11 @@ inline constexpr std::uintptr_t EntityId             = 0x10; // int32 local id
 inline constexpr std::uintptr_t Client               = 0x18; // new offset set
 inline constexpr std::uintptr_t Server               = 0x20; // new offset set
 inline constexpr std::uintptr_t BattleCharacterModel = 0x20; // server-side character
+inline constexpr std::uintptr_t PublicId             = 0x28; // int64
 }
 
 namespace BattleCharacterEntityModel {
+inline constexpr std::uintptr_t Slots          = 0x18; // array
 inline constexpr std::uintptr_t ClientModel    = 0x20; // new offset set
 inline constexpr std::uintptr_t ServerModel    = 0x28; // new offset set
 inline constexpr std::uintptr_t SimulatedModel = 0x30; // legacy path
@@ -211,7 +213,10 @@ inline constexpr std::uintptr_t ItemInHands             = 0x170; // legacy path
 inline constexpr std::uintptr_t InVehicle               = 0x1C8;
 inline constexpr std::uintptr_t PlayerRole              = 0x208;
 inline constexpr std::uintptr_t Pbm                     = 0x258; // new offset set
-inline constexpr std::uintptr_t Knockout                = 0x298; // new offset set
+inline constexpr std::uintptr_t CenterPosition          = 0x290; // IPositionModel*
+// Not present in the current offset list; retained only for older sessions and
+// never trusted without validation.
+inline constexpr std::uintptr_t Knockout                = 0x298; // unverified
 }
 
 namespace CharacterTransformModel {

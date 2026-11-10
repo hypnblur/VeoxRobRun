@@ -86,23 +86,63 @@ bool ReadVehiclePosition(std::uintptr_t transform, Vector3& out)
 
 using PositionReader = std::function<bool(std::uintptr_t model, Vector3& out)>;
 
+// Cheap structural probe. Used to avoid mistaking a real Dictionary's buckets
+// array for a wrapper object when a stable snapshot fails transiently.
+bool HasDictionaryHeader(std::uintptr_t dictionary)
+{
+    if (dictionary <= 0x10000) return false;
+    const std::uintptr_t entries = RobRunMemory::ReadPtr(dictionary + rr::Dict::entries);
+    const std::int32_t count = RobRunMemory::ReadInt32(dictionary + rr::Dict::count);
+    return entries > 0x10000 && count >= 0 && count <= 65536;
+}
+
+// Resolve a world collection field to a Dictionary. Most models expose the
+// dictionary directly, but a few wrap it in a reference object; try the direct
+// field first and then the common wrapper slots.
+bool ReadCollection(std::uintptr_t world, std::uintptr_t offset,
+    std::vector<RobRunMemory::DictEntry>& out)
+{
+    out.clear();
+    if (world <= 0x10000) return false;
+
+    const std::uintptr_t field = RobRunMemory::ReadPtr(world + offset);
+    if (field <= 0x10000) return false;
+
+    if (RobRunMemory::ReadDictInt(field, out)) return true;
+    if (HasDictionaryHeader(field)) return false;
+
+    const std::uintptr_t inner = RobRunMemory::ReadPtr(field + 0x10);
+    if (inner > 0x10000 && inner != field && RobRunMemory::ReadDictInt(inner, out))
+        return true;
+
+    const std::uintptr_t inner18 = RobRunMemory::ReadPtr(field + 0x18);
+    if (inner18 > 0x10000 && inner18 != field && inner18 != inner &&
+        RobRunMemory::ReadDictInt(inner18, out))
+        return true;
+
+    return false;
+}
+
 bool WorldLooksValid(std::uintptr_t world)
 {
     if (world <= 0x10000) return false;
 
-    // Probe a few collections that exist in every loaded scene. A wrong base
-    // pointer normally fails the dictionary structure checks.
+    // Probe collections that exist in every loaded scene. A wrong base pointer
+    // normally fails the dictionary structure checks. BattleCharacters is
+    // included because a fresh match may have no loot or vehicles yet.
     std::vector<RobRunMemory::DictEntry> entries;
-    return RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Containers, entries) ||
-        RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Loots, entries) ||
-        RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Vehicles, entries);
+    return ReadCollection(world, rr::WorldEntitiesModel::BattleCharacters, entries) ||
+        ReadCollection(world, rr::WorldEntitiesModel::Containers, entries) ||
+        ReadCollection(world, rr::WorldEntitiesModel::Loots, entries) ||
+        ReadCollection(world, rr::WorldEntitiesModel::Vehicles, entries) ||
+        ReadCollection(world, rr::WorldEntitiesModel::Cars, entries);
 }
 
 void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
     const PositionReader& readPosition, State& out, int& kindCounter)
 {
     std::vector<RobRunMemory::DictEntry> entries;
-    if (!RobRunMemory::ReadDictInt(world + dictionaryOffset, entries)) return;
+    if (!ReadCollection(world, dictionaryOffset, entries)) return;
 
     for (const auto& entry : entries) {
         const std::uintptr_t model = entry.value;
@@ -173,7 +213,7 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     // Container empty flag is read after the position pass so the ESP can
     // label searched containers without re-walking the dictionary.
     std::vector<RobRunMemory::DictEntry> containerEntries;
-    if (RobRunMemory::ReadDictInt(world + rr::WorldEntitiesModel::Containers, containerEntries)) {
+    if (ReadCollection(world, rr::WorldEntitiesModel::Containers, containerEntries)) {
         std::unordered_map<std::int32_t, std::size_t> containerIndex;
         for (std::size_t i = containerStart; i < out.entities.size(); ++i)
             containerIndex[out.entities[i].id] = i;

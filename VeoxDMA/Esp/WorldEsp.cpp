@@ -83,6 +83,7 @@ void DrawWorldEntities()
 		return;
 
 	const Vector3 localPos = snapshot->localPosition;
+	const bool haveLocalPosition = !localPos.IsZero();
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	ImFont* font = ImGui::GetFont();
 	const float fontSize = (float)ConfigInstance.World.FontSize;
@@ -96,7 +97,7 @@ void DrawWorldEntities()
 		const float dy = entity.position.y - localPos.y;
 		const float dz = entity.position.z - localPos.z;
 		const int distance = (int)std::sqrt(dx * dx + dy * dy + dz * dz);
-		if (distance > ConfigInstance.World.MaxDistance)
+		if (haveLocalPosition && distance > ConfigInstance.World.MaxDistance)
 			continue;
 
 		Vector2 screen;
