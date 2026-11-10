@@ -635,8 +635,15 @@ invocation path. The overlay is read-only and does not call them.
 - The render thread calls `GetSnapshot()` once per draw and only projects
   already-resolved data. It never performs a DMA read, a class-name scan, or a
   GameObjectManager walk.
-- Skeleton extraction is cached per entity and refreshed at ~120 ms, not every
-  pass.
+- Per pass the worker reads each entity's transform block (position, pitch,
+  yaw) with one uncached read, then samples the cached rig layout with one
+  uncached read of the animation matrix array. Health, role, vehicle and
+  identity are refreshed every `500 ms`; world markers every `250 ms`;
+  inventory every `1000 ms`.
+- A rig layout (matrix array, parent table, selected bones) is resolved once
+  per entity view and revalidated every `2 s`. This replaced the old
+  per-refresh walk of class names and pointer chains, which issued hundreds of
+  one-byte reads per character.
 - `Shutdown` stops and joins the worker; the attach thread is joined before the
   reader so `Init`/`Shutdown` cannot race.
 
@@ -650,27 +657,30 @@ invocation path. The overlay is read-only and does not call them.
   force repeated re-resolution on its own.
 - Validate class pointers, scene roots, dictionary versions and native
   Transform identities.
-- Hot-path `Memory::Read` uses VMM's data cache (`dwFlags = 0`). The reference's
-  scatter path can force device reads (`0x121`) because it batches them;
-  issuing one uncached USB transaction per 8-byte field is what made a read
-  pass take seconds. Background refresh keeps the cache current, and the
-  reader still validates dictionary version/count and class identity before
-  accepting a pass.
+- Static pointer chains use `Memory::Read` (VMM data cache, `dwFlags = 0`).
+- Fast-changing values use `Memory::ReadFresh`
+  (`VMMDLL_FLAG_NOCACHE`): the per-entity transform block, the animation matrix
+  array and the camera block. Uncached reads are only cheap when there are few
+  of them, so they are limited to one or two reads per entity per pass.
+- Earlier builds issued one uncached USB transaction per 8-byte field, which is
+  what made a pass take seconds. The fix is the rig-layout cache plus cadenced
+  detail reads, not routing everything through the cache.
 - VMM background refresh remains enabled; `-norefresh` is omitted.
-  Refresh intervals set at init: memory partial `100 ms`, memory full
-  `250 ms`, TLB partial `250 ms`, TLB full `500 ms`.
+  `VMMDLL_OPT_CONFIG_TICK_PERIOD = 100`, `READCACHE_TICKS = 2` (200 ms) and
+  `TLBCACHE_TICKS = 20` (2 s). `VMMDLL_OPT_REFRESH_FREQ_*` are one-shot refresh
+  commands, not interval settings.
 - The procinfo/CR3 plugin wait is bounded to `30 s`; a missing `info.db` or
   symbols can no longer hang the attach thread.
 
 ```text
-Partial TLB refresh: VMMDLL_OPT_REFRESH_FREQ_TLB_PARTIAL = 0x2001000400000000
-Full TLB refresh:    VMMDLL_OPT_REFRESH_FREQ_TLB         = 0x2001080000000000
-Memory refresh:      VMMDLL_OPT_REFRESH_FREQ_MEM         = 0x2001100000000000
-Specific process:    VMMDLL_OPT_REFRESH_SPECIFIC_PROCESS = 0x2002000300000000 | PID
+Tick period:        VMMDLL_OPT_CONFIG_TICK_PERIOD      = 0x2000000400000000
+Read cache ticks:   VMMDLL_OPT_CONFIG_READCACHE_TICKS  = 0x2000000500000000
+TLB cache ticks:    VMMDLL_OPT_CONFIG_TLBCACHE_TICKS   = 0x2000000600000000
+Manual mem refresh: VMMDLL_OPT_REFRESH_FREQ_MEM        = 0x2001100000000000
+Manual TLB refresh: VMMDLL_OPT_REFRESH_FREQ_TLB        = 0x2001080000000000
+Specific process:   VMMDLL_OPT_REFRESH_SPECIFIC_PROCESS = 0x2002000300000000 | PID
 ```
 
-- Partial refresh interval: `250 ms`; recovery refresh minimum interval:
-  `500 ms`.
 - Scene retry delay: `100 ms` increasing to `1000 ms`.
 - Persistent sample failures for `5000 ms` trigger a full VMM session reopen.
 - Failed reconnects retry after `2000 ms`.

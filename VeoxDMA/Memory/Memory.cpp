@@ -197,13 +197,19 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 		LOG("DEVICE ID: %llu\n", DEVICE_ID);
 		LOG("success!\n");
 
-		// Keep VMM's data/TLB cache fresh enough for a live ESP. Reads use the
-		// cache (see Memory::Read); these intervals bound how stale a cached
-		// page can be. Matches the reference's 250/500 ms recovery cadence.
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_MEM_PARTIAL, 100);
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_MEM, 250);
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_TLB_PARTIAL, 250);
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_TLB, 500);
+		// Configure VMM's background refresh intervals.
+		//
+		// VMMDLL_OPT_REFRESH_FREQ_* are one-shot "refresh now" commands, not
+		// interval settings. The real controls are the tick period plus the
+		// number of ticks each cache stays valid (see the MemProcFS timing
+		// FAQ). A 100 ms base tick with a 2-tick memory cache keeps cached
+		// pointer chains usable without letting them go seconds stale.
+		//
+		// Dynamic values (positions and animation poses) do not rely on this:
+		// they are read with VMMDLL_FLAG_NOCACHE via Memory::ReadFresh.
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_TICK_PERIOD, 100);
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_READCACHE_TICKS, 2);
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_TLBCACHE_TICKS, 20);
 
 		if (!this->SetFPGA())
 		{
@@ -762,6 +768,22 @@ bool Memory::Read(uintptr_t address, void* buffer, size_t size, int pid) const
 		return false;
 	return VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
 		NULL, 0) != 0;
+}
+
+bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size) const
+{
+	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
+		return false;
+	return VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+		(PBYTE)buffer, size, NULL, VMMDLL_FLAG_NOCACHE) != 0;
+}
+
+bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) const
+{
+	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
+		return false;
+	return VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
+		NULL, VMMDLL_FLAG_NOCACHE) != 0;
 }
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()

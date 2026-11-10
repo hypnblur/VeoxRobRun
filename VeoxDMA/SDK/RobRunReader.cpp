@@ -27,6 +27,8 @@ static std::uintptr_t cachedUpdater = 0;
 static std::vector<EntityData> entities;
 static RobRunWorld::State worldState;
 static RobRunInventory::State inventoryState;
+static std::uint64_t worldRefreshStamp = 0;
+static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
 static int32_t localEntityId = -1;
 static Vector3 localPosition{};
@@ -39,6 +41,46 @@ static int updaterRetryCountdown = 0;
 static Matrix4x4 fallbackViewProjection{};
 static bool fallbackViewProjectionValid = false;
 
+// Slow-changing per-entity data (health, role, vehicle, identity). Reading the
+// primitive wrappers and strings costs far more than a position read, so it is
+// refreshed a few times per second and copied into every snapshot.
+struct DetailCacheEntry {
+    std::uintptr_t characterModel = 0;
+    std::uint64_t stamp = 0;
+    float health = -1.f;
+    float maxHealth = -1.f;
+    bool healthKnown = false;
+    bool isDead = false;
+    bool inVehicle = false;
+    int vehicleId = 0;
+    int role = 0;
+    std::wstring nickname;
+    std::wstring clanTag;
+};
+static std::unordered_map<std::int32_t, DetailCacheEntry> detailCache;
+
+// Rig layout + last sampled pose. The layout (matrix array, parent table and
+// selected bones) only changes when the view changes, so it is resolved once
+// and then sampled with a single read per pass.
+struct RigCacheEntry {
+    std::uintptr_t view = 0;
+    std::uint64_t layoutStamp = 0;
+    std::uint64_t fallbackStamp = 0;
+    bool layoutValid = false;
+    Skeleton::RigLayout layout;
+    std::vector<Skeleton::BoneSegment> bones;
+};
+static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
+
+static void PruneCaches()
+{
+    // Entity IDs are stable within a match but the caches should not grow
+    // without bound across map changes. Clearing is cheap: layouts rebuild on
+    // the next pass.
+    if (rigCache.size() > 1024) rigCache.clear();
+    if (detailCache.size() > 1024) detailCache.clear();
+}
+
 // Worker-published snapshot. Only the worker writes; any thread may read.
 static std::mutex g_snapshotMutex;
 static std::shared_ptr<const Snapshot> g_snapshot = std::make_shared<Snapshot>();
@@ -48,6 +90,13 @@ static std::thread g_workerThread;
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
 {
     return TargetProcess.Read(static_cast<std::uintptr_t>(address), buffer, size);
+}
+
+// Uncached read for fast-changing values. Kept separate from DmaRead so
+// static pointer chains still benefit from VMM's cache.
+static bool DmaReadFresh(std::uint64_t address, void* buffer, std::size_t size)
+{
+    return TargetProcess.ReadFresh(static_cast<std::uintptr_t>(address), buffer, size);
 }
 
 static void PublishSnapshot()
@@ -99,8 +148,12 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     gameRetryCountdown = 0;
     updaterRetryCountdown = 0;
     entities.clear();
+    detailCache.clear();
+    rigCache.clear();
     worldState = RobRunWorld::State{};
     inventoryState = RobRunInventory::State{};
+    worldRefreshStamp = 0;
+    inventoryRefreshStamp = 0;
     cameraState = RobRunCamera::CameraState{};
     localEntityId = -1;
     localPosition = Vector3();
@@ -116,9 +169,9 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerThread = std::thread([] {
         while (!g_workerStop.load(std::memory_order_relaxed)) {
             Update();
-            // ~30 Hz target, but a slow DMA pass simply runs slower instead of
-            // blocking anything on the render thread.
-            for (int i = 0; i < 32 && !g_workerStop.load(std::memory_order_relaxed); ++i)
+            // Small fixed pause so a healthy pass runs at ~30 Hz while a slow
+            // one simply runs slower instead of blocking the render thread.
+            for (int i = 0; i < 10 && !g_workerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(1);
         }
     });
@@ -127,11 +180,6 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
 static std::uintptr_t ReadPtr(std::uintptr_t address)
 {
     return RobRunMemory::ReadPtr(address);
-}
-
-static bool ReadVector3(std::uintptr_t address, Vector3& out)
-{
-    return RobRunMemory::ReadVector3(address, out);
 }
 
 static bool IsClass(std::uintptr_t object, const char* name)
@@ -348,26 +396,17 @@ static void RevalidateSession()
         cachedUpdater = 0;
 }
 
-// Skeleton extraction is far more expensive than the scalar entity reads, so
-// it is refreshed at a lower rate and cached per entity between passes.
-struct BoneCacheEntry {
-    std::uintptr_t view = 0;
-    std::uint64_t stamp = 0;
-    std::vector<Skeleton::BoneSegment> bones;
-};
-static std::unordered_map<std::int32_t, BoneCacheEntry> boneCache;
-
 static void UpdateInternal()
 {
     entities.clear();
-    worldState = RobRunWorld::State{};
-    inventoryState = RobRunInventory::State{};
     localEntityId = -1;
     localPosition = Vector3{};
     fallbackViewProjection = Matrix4x4{};
     fallbackViewProjectionValid = false;
 
     if (!gaBase) return;
+
+    const std::uint64_t passNow = GetTickCount64();
 
     ++updateCounter;
     if ((updateCounter % 120) == 0)
@@ -389,6 +428,10 @@ static void UpdateInternal()
         cachedBattleModel = ResolveBattleModel(cachedGame);
 
     if (!cachedBattleModel) {
+        worldState = RobRunWorld::State{};
+        worldRefreshStamp = 0;
+        inventoryState = RobRunInventory::State{};
+        inventoryRefreshStamp = 0;
         ++failureCount;
         return;
     }
@@ -424,7 +467,14 @@ static void UpdateInternal()
         if (cachedLocalCharacter > 0x10000) {
             const std::uintptr_t transform = ReadPtr(
                 cachedLocalCharacter + rr::BattleCharacterModel::CharacterTransformModel);
-            ReadVector3(transform + rr::CharacterTransformModel::Position, localPosition);
+            Vector3 position{};
+            const std::uintptr_t positionAddress =
+                transform + rr::CharacterTransformModel::Position;
+            if ((RobRunMemory::ReadBytesFresh(positionAddress, &position, sizeof(position)) ||
+                 RobRunMemory::ReadBytes(positionAddress, &position, sizeof(position))) &&
+                RobRunMemory::Finite(position)) {
+                localPosition = position;
+            }
         }
     } else {
         cachedLocalCharacter = 0;
@@ -505,79 +555,155 @@ static void UpdateInternal()
 
             const std::uintptr_t transform = ReadPtr(
                 characterModel + rr::BattleCharacterModel::CharacterTransformModel);
-            Vector3 position{};
-            if (!ReadVector3(transform + rr::CharacterTransformModel::Position, position))
+            if (transform <= 0x10000) continue;
+
+            // Position (x/y/z), pitch and yaw are contiguous. One uncached
+            // read per entity keeps the box on the character instead of
+            // returning a VMM-cached sample that can trail by hundreds of ms.
+            struct TransformBlock {
+                Vector3 position;
+                float pitch;
+                float yaw;
+            };
+            static_assert(sizeof(TransformBlock) == 20, "transform block layout");
+            TransformBlock block{};
+            const std::uintptr_t blockAddress =
+                transform + rr::CharacterTransformModel::Position;
+            if ((!RobRunMemory::ReadBytesFresh(blockAddress, &block, sizeof(block)) &&
+                 !RobRunMemory::ReadBytes(blockAddress, &block, sizeof(block))) ||
+                !RobRunMemory::Finite(block.position)) {
                 continue;
+            }
 
             EntityData entity{};
             entity.entityId = entry.key;
-            entity.position = position;
+            entity.position = block.position;
             entity.characterModel = characterModel;
-
-            const float pitch = RobRunMemory::ReadFloat(
-                transform + rr::CharacterTransformModel::Position + 0x0C);
-            const float yaw = RobRunMemory::ReadFloat(
-                transform + rr::CharacterTransformModel::Yaw);
-            if (std::isfinite(pitch)) entity.pitch = pitch;
-            if (std::isfinite(yaw)) {
-                entity.yaw = yaw;
-                const float cosPitch = std::cos(pitch);
+            if (std::isfinite(block.pitch)) entity.pitch = block.pitch;
+            if (std::isfinite(block.yaw)) {
+                entity.yaw = block.yaw;
+                const float cosPitch = std::cos(block.pitch);
                 entity.lookDirection = Vector3(
-                    std::sin(yaw) * cosPitch,
-                    std::sin(pitch),
-                    std::cos(yaw) * cosPitch);
+                    std::sin(block.yaw) * cosPitch,
+                    std::sin(block.pitch),
+                    std::cos(block.yaw) * cosPitch);
             }
 
-            const std::uintptr_t deadWrapper = ReadPtr(
-                characterModel + rr::BattleCharacterModel::IsDeadWrapper);
-            bool dead = false;
-            if (Il2Cpp::ReadPrimitiveBool(deadWrapper, dead))
-                entity.isDead = dead;
+            const std::uint64_t now = GetTickCount64();
 
-            ReadHealth(characterModel, entity);
-            ReadRoleAndVehicle(characterModel, entity);
+            // Identity, health, role and vehicle state change slowly and are
+            // expensive to read (primitive wrappers + strings). Refresh them a
+            // few times per second and reuse the values in between.
+            auto& detail = detailCache[entity.entityId];
+            if (detail.characterModel != characterModel || now - detail.stamp > 500) {
+                detail = DetailCacheEntry{};
+                detail.characterModel = characterModel;
+                detail.stamp = now;
+
+                EntityData scratch{};
+                scratch.entityId = entity.entityId;
+
+                const std::uintptr_t deadWrapper = ReadPtr(
+                    characterModel + rr::BattleCharacterModel::IsDeadWrapper);
+                bool dead = false;
+                if (Il2Cpp::ReadPrimitiveBool(deadWrapper, dead))
+                    detail.isDead = dead;
+
+                ReadHealth(characterModel, scratch);
+                detail.health = scratch.health;
+                detail.maxHealth = scratch.maxHealth;
+                detail.healthKnown = scratch.healthKnown;
+
+                ReadRoleAndVehicle(characterModel, scratch);
+                detail.role = scratch.role;
+                detail.inVehicle = scratch.inVehicle;
+                detail.vehicleId = scratch.vehicleId;
+
+                const auto slotIt = slots.find(entry.key);
+                if (slotIt != slots.end()) {
+                    ReadSlotIdentity(slotIt->second, scratch);
+                    detail.nickname = std::move(scratch.nickname);
+                    detail.clanTag = std::move(scratch.clanTag);
+                }
+            }
+
+            entity.isDead = detail.isDead;
+            entity.health = detail.health;
+            entity.maxHealth = detail.maxHealth;
+            entity.healthKnown = detail.healthKnown;
+            entity.role = detail.role;
+            entity.inVehicle = detail.inVehicle;
+            entity.vehicleId = detail.vehicleId;
+            entity.nickname = detail.nickname;
+            entity.clanTag = detail.clanTag;
 
             const auto viewIt = views.find(entry.key);
             if (viewIt != views.end())
                 entity.viewPtr = viewIt->second;
 
-            const auto slotIt = slots.find(entry.key);
-            if (slotIt != slots.end())
-                ReadSlotIdentity(slotIt->second, entity);
-
-            // Refresh bones only when the view changed or the cache is stale.
-            // The render thread reads these cached segments directly.
-            const std::uint64_t now = GetTickCount64();
-            auto& cachedBones = boneCache[entity.entityId];
-            if (cachedBones.bones.empty() || cachedBones.view != entity.viewPtr ||
-                now - cachedBones.stamp > 120) {
-                std::vector<Skeleton::BoneSegment> bones;
-                if (entity.viewPtr > 0x10000)
-                    bones = Skeleton::BuildFromView(entity.viewPtr, DmaRead);
-                if (bones.empty() && cachedGame > 0x10000 && cachedBattleModel > 0x10000)
-                    bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
-                        entity.entityId, DmaRead);
-                cachedBones.view = entity.viewPtr;
-                cachedBones.stamp = now;
-                cachedBones.bones = std::move(bones);
+            // Resolve the rig layout once per view, then sample the animation
+            // pose every pass. Sampling is a single read of the matrix array,
+            // so bones stay in sync with the position instead of being served
+            // from a 100+ ms cache.
+            auto& rig = rigCache[entry.key];
+            if (rig.view != entity.viewPtr) {
+                rig.view = entity.viewPtr;
+                rig.layoutValid = false;
+                rig.layoutStamp = 0;
+                rig.bones.clear();
             }
-            entity.bones = cachedBones.bones;
+
+            const bool dueForRebuild = !rig.layoutValid
+                ? (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250)
+                : (now - rig.layoutStamp >= 2000);
+            if (dueForRebuild) {
+                rig.layoutStamp = now;
+                rig.layoutValid = entity.viewPtr > 0x10000 &&
+                    Skeleton::BuildLayoutFromView(entity.viewPtr, DmaRead, rig.layout);
+                if (!rig.layoutValid) rig.bones.clear();
+            }
+
+            if (rig.layoutValid) {
+                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones) &&
+                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones)) {
+                    // Keep the last good pose for this pass; the layout is
+                    // rebuilt after a short backoff.
+                    rig.layoutValid = false;
+                }
+            } else if (now - rig.fallbackStamp > 1000) {
+                // Last resort when the view layout cannot be validated: full
+                // extraction, at most once per second.
+                rig.fallbackStamp = now;
+                rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
+                    entity.entityId, DmaRead);
+            }
+            entity.bones = rig.bones;
 
             if (entity.entityId == localEntityId && localPosition.IsZero() &&
-                !position.IsZero()) {
-                localPosition = position;
+                !entity.position.IsZero()) {
+                localPosition = entity.position;
             }
 
             entities.push_back(std::move(entity));
         }
     }
 
-    if (cachedBattleModel > 0x10000)
+    // World markers and inventory are expensive (many dictionaries and
+    // per-item reads) and change slowly. Refresh them on their own cadence so
+    // the player pass stays short and positions/bones stay fresh.
+    if (cachedBattleModel > 0x10000 &&
+        (worldRefreshStamp == 0 || passNow - worldRefreshStamp >= 250)) {
         RobRunWorld::Read(cachedBattleModel, worldState);
+        worldRefreshStamp = passNow;
+    }
 
-    if (cachedLocalCharacter > 0x10000)
+    if (cachedLocalCharacter > 0x10000 &&
+        (inventoryRefreshStamp == 0 || passNow - inventoryRefreshStamp >= 1000)) {
         RobRunInventory::Read(cachedLocalCharacter, inventoryState, readCatalog.load());
+        inventoryRefreshStamp = passNow;
+    }
 
+    PruneCaches();
     failureCount = 0;
 }
 

@@ -24,6 +24,9 @@ struct RefDictEntry {
 static_assert(sizeof(RefDictEntry) == 0x18, "Dictionary<reference,reference> entry stride");
 
 bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size);
+// Bypasses VMM's data cache. Only for small, fast-changing values such as
+// entity positions and animation poses; each call is a device transaction.
+bool ReadBytesFresh(std::uintptr_t address, void* buffer, std::size_t size);
 std::uintptr_t ReadPtr(std::uintptr_t address);
 std::int32_t ReadInt32(std::uintptr_t address);
 std::uint32_t ReadUInt32(std::uintptr_t address);

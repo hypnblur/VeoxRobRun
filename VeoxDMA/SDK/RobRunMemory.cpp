@@ -14,6 +14,12 @@ bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
     return TargetProcess.Read(address, buffer, size);
 }
 
+bool ReadBytesFresh(std::uintptr_t address, void* buffer, std::size_t size)
+{
+    if (!address || !buffer || !size) return false;
+    return TargetProcess.ReadFresh(address, buffer, size);
+}
+
 std::uintptr_t ReadPtr(std::uintptr_t address)
 {
     std::uintptr_t value = 0;

@@ -17,6 +17,12 @@ static std::uintptr_t gaBase = 0;
 static std::mutex g_classCacheMutex;
 static std::unordered_map<std::string, std::uintptr_t> g_classCache;
 
+// Resolved primitive-value field offsets, keyed by Il2CppClass*. Walking the
+// field table (and its UTF-8 names) on every health/role read is far more
+// expensive than the read itself, so the offset is resolved once per class.
+static std::mutex g_primitiveMutex;
+static std::unordered_map<std::uintptr_t, std::uintptr_t> g_primitiveOffsets;
+
 static bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
 {
     if (!address || !buffer || !size) return false;
@@ -66,6 +72,8 @@ void Init(std::uintptr_t gameAssemblyBase)
     gaBase = gameAssemblyBase;
     std::lock_guard<std::mutex> lock(g_classCacheMutex);
     g_classCache.clear();
+    std::lock_guard<std::mutex> primitiveLock(g_primitiveMutex);
+    g_primitiveOffsets.clear();
 }
 
 std::uintptr_t Base()
@@ -287,6 +295,27 @@ bool ReadPrimitive(std::uintptr_t wrapper, PrimitiveKind kind, void* out, std::s
 {
     if (!ValidPtr(wrapper) || !out) return false;
 
+    // Fast path: the value field offset for this wrapper class was resolved on
+    // an earlier pass. This turns a field-table walk into one read.
+    const std::uintptr_t wrapperClass = ClassOf(wrapper);
+    if (wrapperClass) {
+        std::uintptr_t cachedOffset = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_primitiveMutex);
+            const auto it = g_primitiveOffsets.find(wrapperClass);
+            if (it != g_primitiveOffsets.end()) cachedOffset = it->second;
+        }
+        if (cachedOffset && cachedOffset < 0x1000) {
+            if (ReadBytes(wrapper + cachedOffset, out, size) &&
+                ValidatePrimitive(kind, out)) {
+                return true;
+            }
+            // The class layout changed; drop the cached offset and re-resolve.
+            std::lock_guard<std::mutex> lock(g_primitiveMutex);
+            g_primitiveOffsets.erase(wrapperClass);
+        }
+    }
+
     static const char* const kValueNames[] = {
         "<Value>k__BackingField", "_value", "value", "m_value"
     };
@@ -307,6 +336,10 @@ bool ReadPrimitive(std::uintptr_t wrapper, PrimitiveKind kind, void* out, std::s
         if (found) {
             if (ReadBytes(current + static_cast<std::uintptr_t>(valueField.offset), out, size) &&
                 ValidatePrimitive(kind, out)) {
+                if (klass) {
+                    std::lock_guard<std::mutex> lock(g_primitiveMutex);
+                    g_primitiveOffsets[klass] = static_cast<std::uintptr_t>(valueField.offset);
+                }
                 return true;
             }
         }

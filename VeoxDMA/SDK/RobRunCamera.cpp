@@ -4,15 +4,24 @@
 #include "Il2Cpp.h"
 #include "Memory.h"
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 
 namespace RobRunCamera {
 
 static std::uintptr_t gaBase = 0;
+static std::uintptr_t g_cachedBrain = 0;
 
 static bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
 {
     if (!address || !buffer || !size) return false;
     return TargetProcess.Read(address, buffer, size);
+}
+
+static bool ReadBytesFresh(std::uintptr_t address, void* buffer, std::size_t size)
+{
+    if (!address || !buffer || !size) return false;
+    return TargetProcess.ReadFresh(address, buffer, size);
 }
 
 static std::uintptr_t ReadPtr(std::uintptr_t address)
@@ -63,34 +72,27 @@ static Vector3 Rotate(const float q[4], const Vector3& v)
         v.z + w * t2.z + cross.z);
 }
 
-static bool ReadVector3(std::uintptr_t address, Vector3& out)
-{
-    if (!ReadBytes(address, &out, sizeof(out))) return false;
-    return Finite(out);
-}
-
-static bool ReadFloat(std::uintptr_t address, float& out)
-{
-    if (!ReadBytes(address, &out, sizeof(out))) return false;
-    return std::isfinite(out);
-}
-
-static bool ReadQuat(std::uintptr_t address, float out[4])
-{
-    if (!ReadBytes(address, out, sizeof(float) * 4)) return false;
-    return std::isfinite(out[0]) && std::isfinite(out[1]) &&
-        std::isfinite(out[2]) && std::isfinite(out[3]);
-}
-
 void Init(std::uintptr_t gameAssemblyBase)
 {
     gaBase = gameAssemblyBase;
+    g_cachedBrain = 0;
     Il2Cpp::Init(gameAssemblyBase);
 }
 
 float ReadCinemachineFov()
 {
     if (!gaBase) return 0.f;
+
+    // The brain instance is stable for a scene, so it is resolved once and
+    // then only the FOV value is re-read (uncached) each pass.
+    if (g_cachedBrain > 0x10000) {
+        float fov = 0.f;
+        if (ReadBytesFresh(g_cachedBrain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
+            std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
+            return fov;
+        }
+        g_cachedBrain = 0;
+    }
 
     const std::uintptr_t klass = Il2Cpp::GetClassByIndex(rr::ClassIndex::CinemachineCore);
     if (!klass) return 0.f;
@@ -115,8 +117,9 @@ float ReadCinemachineFov()
             static_cast<std::uintptr_t>(i) * rr::Array::stride);
         if (!brain || !Il2Cpp::IsClass(brain, "CinemachineBrain")) continue;
         float fov = 0.f;
-        if (ReadFloat(brain + rr::Cinemachine::BrainFov, fov) &&
-            fov >= 1.f && fov <= 179.f) {
+        if (ReadBytesFresh(brain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
+            std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
+            g_cachedBrain = brain;
             return fov;
         }
     }
@@ -128,16 +131,47 @@ CameraState Read(std::uintptr_t battleCameraModel)
     CameraState camera{};
     if (battleCameraModel <= 0x10000) return camera;
 
-    if (!ReadVector3(battleCameraModel + rr::BattleCameraModelOffsets::Position, camera.position))
+    // The whole camera block (position, both quaternions, basis vectors and
+    // distance) is contiguous. One uncached read keeps the projection aligned
+    // with the frame the game is rendering, instead of a cached sample that
+    // can trail by hundreds of milliseconds.
+    struct CameraBlock {
+        float position[3];    // +0x10
+        float orientation[4]; // +0x1C
+        float look[4];        // +0x2C
+        float forward[3];     // +0x3C
+        float right[3];       // +0x48
+        float up[3];          // +0x54
+        float distance;       // +0x60
+    };
+    static_assert(sizeof(CameraBlock) == 0x54, "camera block layout");
+    static_assert(offsetof(CameraBlock, orientation) == 0x0C, "orientation offset");
+    static_assert(offsetof(CameraBlock, look) == 0x1C, "look offset");
+    static_assert(offsetof(CameraBlock, forward) == 0x2C, "forward offset");
+    static_assert(offsetof(CameraBlock, right) == 0x38, "right offset");
+    static_assert(offsetof(CameraBlock, up) == 0x44, "up offset");
+    static_assert(offsetof(CameraBlock, distance) == 0x50, "distance offset");
+
+    CameraBlock block{};
+    if (!ReadBytesFresh(battleCameraModel + rr::BattleCameraModelOffsets::Position,
+            &block, sizeof(block)) &&
+        !ReadBytes(battleCameraModel + rr::BattleCameraModelOffsets::Position,
+            &block, sizeof(block))) {
         return camera;
+    }
 
-    ReadQuat(battleCameraModel + rr::BattleCameraModelOffsets::Orientation, camera.orientation);
-    ReadQuat(battleCameraModel + rr::BattleCameraModelOffsets::LookQuat, camera.look);
-    ReadFloat(battleCameraModel + rr::BattleCameraModelOffsets::Distance, camera.distance);
+    camera.position = Vector3(block.position[0], block.position[1], block.position[2]);
+    if (!Finite(camera.position)) return camera;
+    std::memcpy(camera.orientation, block.orientation, sizeof(camera.orientation));
+    std::memcpy(camera.look, block.look, sizeof(camera.look));
+    camera.forward = Vector3(block.forward[0], block.forward[1], block.forward[2]);
+    camera.right = Vector3(block.right[0], block.right[1], block.right[2]);
+    camera.up = Vector3(block.up[0], block.up[1], block.up[2]);
+    if (std::isfinite(block.distance)) camera.distance = block.distance;
 
-    const bool hasForward = ReadVector3(battleCameraModel + rr::BattleCameraModelOffsets::Forward, camera.forward);
-    const bool hasRight = ReadVector3(battleCameraModel + rr::BattleCameraModelOffsets::Right, camera.right);
-    const bool hasUp = ReadVector3(battleCameraModel + rr::BattleCameraModelOffsets::Up, camera.up);
+    const bool hasForward = Finite(camera.forward);
+    const bool hasRight = Finite(camera.right);
+    const bool hasUp = Finite(camera.up);
 
     if (!hasForward || !Normalize(camera.forward))
         camera.forward = Rotate(camera.look, Vector3(0.f, 0.f, 1.f));

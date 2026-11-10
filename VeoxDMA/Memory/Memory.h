@@ -191,6 +191,17 @@ public:
 	bool Read(uintptr_t address, void* buffer, size_t size, int pid) const;
 
 	/**
+	* brief Reads memory while bypassing VMM's data cache.
+	*
+	* Use this only for small, fast-changing values (positions, animation
+	* poses). Every call is a device transaction, so batch related fields into
+	* one read and keep the call count low. Static pointer chains should use
+	* Read() instead so they stay cached.
+	*/
+	bool ReadFresh(uintptr_t address, void* buffer, size_t size) const;
+	bool ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) const;
+
+	/**
 	* brief Reads memory from the process using a template
 	* @param address The address to read from
 	* @return the value read from the process
