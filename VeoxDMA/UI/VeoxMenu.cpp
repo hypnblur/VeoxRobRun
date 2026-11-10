@@ -152,6 +152,24 @@ static void DrawPanelESP()
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
+	ImGui::Text("Bone Visibility");
+	ImGui::Checkbox("Enable VisCheck", &ConfigInstance.Player.VisCheck);
+	if (ConfigInstance.Player.VisCheck)
+	{
+		auto visColour = [](const char* label, D2D1::ColorF& colour) {
+			float v[4] = { colour.r, colour.g, colour.b, colour.a };
+			if (ImGui::ColorEdit4(label, v,
+				ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+				colour = D2D1::ColorF(v[0], v[1], v[2], v[3]);
+			}
+		};
+		visColour("Visible Color", ConfigInstance.Player.VisibleColour);
+		visColour("Hidden Color", ConfigInstance.Player.HiddenColour);
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
 	ImGui::Text("World ESP");
 
 	ImGui::Checkbox("Enable World ESP", &ConfigInstance.World.Enabled);

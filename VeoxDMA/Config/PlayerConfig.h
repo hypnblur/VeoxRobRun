@@ -17,6 +17,9 @@ public:
 	bool SecondaryWeapon = false;
 	D2D1::ColorF TextColour = Colour(255, 255, 255);
 	int FontSize = 11;
+	bool VisCheck = false;
+	D2D1::ColorF VisibleColour = Colour(255, 50, 50);
+	D2D1::ColorF HiddenColour = Colour(255, 255, 255);
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -46,6 +49,9 @@ public:
         j[ConfigName][LIT("PrimaryWeapon")] = PrimaryWeapon;
         j[ConfigName][LIT("SecondaryWeapon")] = SecondaryWeapon;
         ToJsonColour(&j, LIT("TextColour"), &TextColour);
+        j[ConfigName][LIT("VisCheck")] = VisCheck;
+        ToJsonColour(&j, LIT("VisibleColour"), &VisibleColour);
+        ToJsonColour(&j, LIT("HiddenColour"), &HiddenColour);
 
         return j;
     }
@@ -66,6 +72,10 @@ public:
         if (j[ConfigName].contains(LIT("MaxDistance")))
             MaxDistance = j[ConfigName][LIT("MaxDistance")];
         FromJsonColour(j, LIT("TextColour"), &TextColour);
+        if (j[ConfigName].contains(LIT("VisCheck")))
+            VisCheck = j[ConfigName][LIT("VisCheck")];
+        FromJsonColour(j, LIT("VisibleColour"), &VisibleColour);
+        FromJsonColour(j, LIT("HiddenColour"), &HiddenColour);
     }
 };
 

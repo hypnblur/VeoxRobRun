@@ -102,9 +102,12 @@ void DrawPlayers()
 			if (!Project(viewProjection, Vector3(seg.b.x, seg.b.y, seg.b.z),
 					screenW, screenH, b)) continue;
 
-			const ImU32 segCol = seg.visible
-				? IM_COL32(255, 50, 50, 255)
-				: IM_COL32(255, 255, 255, 255);
+			ImU32 segCol = espCol;
+			if (ConfigInstance.Player.VisCheck) {
+				segCol = seg.visible
+					? D2DColorToImU32(ConfigInstance.Player.VisibleColour)
+					: D2DColorToImU32(ConfigInstance.Player.HiddenColour);
+			}
 			dl->AddLine(a, b, segCol, 2.f);
 			minX = std::min(minX, std::min(a.x, b.x));
 			maxX = std::max(maxX, std::max(a.x, b.x));
