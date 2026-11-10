@@ -73,9 +73,18 @@ struct RigCacheEntry {
     Skeleton::RigLayout layout;
     std::vector<Skeleton::BoneSegment> bones;
     Skeleton::BonePoints points;
-    std::vector<Skeleton::Vec> curLocal;
-    std::vector<Skeleton::Vec> prevLocal;
+    // Full local TRS of every bone, used to tell whether the animator is
+    // still evaluating this character. Unity skeletal animation is driven by
+    // local *rotations*; comparing positions alone marks most of the skeleton
+    // as frozen, which is why the old check only lit up the torso.
+    std::vector<Skeleton::BoneLocal> curLocal;
+    std::vector<Skeleton::BoneLocal> prevLocal;
     bool prevLocalValid = false;
+    // Animator state is character-wide: Unity culls whole renderers, never
+    // individual bones. Aggregate every bone, then colour all segments from
+    // this single result so the ESP cannot show a half-visible body.
+    std::uint64_t lastMotionTick = 0;
+    bool animatorActive = true;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -791,6 +800,8 @@ static void UpdateInternal()
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
+                rig.lastMotionTick = 0;
+                rig.animatorActive = true;
             }
 
             const bool dueForRebuild = !rig.layoutValid
@@ -812,20 +823,54 @@ static void UpdateInternal()
                     !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones, &rig.points, rig.curLocal.data())) {
                     rig.layoutValid = false;
                 } else {
-                    constexpr float kStaleThreshSq = 0.0001f * 0.0001f;
-                    if (rig.prevLocalValid && rig.prevLocal.size() == rig.curLocal.size()) {
-                        for (std::size_t i = 0; i < rig.bones.size() && i < rig.layout.segments.size(); ++i) {
-                            const int pi = rig.layout.segments[i].first;
-                            const int ci = rig.layout.segments[i].second;
-                            auto distSq = [&](int idx) {
-                                float dx = rig.curLocal[idx].x - rig.prevLocal[idx].x;
-                                float dy = rig.curLocal[idx].y - rig.prevLocal[idx].y;
-                                float dz = rig.curLocal[idx].z - rig.prevLocal[idx].z;
-                                return dx*dx + dy*dy + dz*dz;
-                            };
-                            rig.bones[i].visible = distSq(pi) > kStaleThreshSq || distSq(ci) > kStaleThreshSq;
+                    // Any meaningful change in local TRS across the whole
+                    // skeleton means the animator is still updating this
+                    // character. Quaternions are compared with |dot| because
+                    // q and -q describe the same rotation.
+                    constexpr float kPosEpsSq  = 1.0e-6f; // (1 mm)^2
+                    constexpr float kRotEps    = 1.0e-6f; // ~0.16 degrees
+                    constexpr float kScaleEps  = 1.0e-6f;
+                    constexpr std::uint64_t kFreezeMs = 150;
+
+                    bool moved = !rig.prevLocalValid ||
+                        rig.prevLocal.size() != rig.curLocal.size();
+                    if (!moved) {
+                        for (std::size_t b = 0; b < rig.curLocal.size(); ++b) {
+                            const auto& c = rig.curLocal[b];
+                            const auto& p = rig.prevLocal[b];
+
+                            const float dx = c.position.x - p.position.x;
+                            const float dy = c.position.y - p.position.y;
+                            const float dz = c.position.z - p.position.z;
+                            if (dx*dx + dy*dy + dz*dz > kPosEpsSq) { moved = true; break; }
+
+                            const float dot =
+                                c.rotation[0]*p.rotation[0] +
+                                c.rotation[1]*p.rotation[1] +
+                                c.rotation[2]*p.rotation[2] +
+                                c.rotation[3]*p.rotation[3];
+                            if (std::fabs(dot) < 1.0f - kRotEps) { moved = true; break; }
+
+                            if (std::fabs(c.scale.x - p.scale.x) > kScaleEps ||
+                                std::fabs(c.scale.y - p.scale.y) > kScaleEps ||
+                                std::fabs(c.scale.z - p.scale.z) > kScaleEps) {
+                                moved = true;
+                                break;
+                            }
                         }
                     }
+
+                    if (moved)
+                        rig.lastMotionTick = now;
+                    // Treat a character as visible until its pose has been
+                    // frozen for a short while. This debounces single stale
+                    // reads without flickering.
+                    rig.animatorActive = rig.lastMotionTick == 0 ||
+                        now - rig.lastMotionTick < kFreezeMs;
+
+                    for (auto& seg : rig.bones)
+                        seg.visible = rig.animatorActive;
+
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
                 }

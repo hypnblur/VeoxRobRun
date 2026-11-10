@@ -152,8 +152,15 @@ static void DrawPanelESP()
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
-	ImGui::Text("Bone Visibility");
+	ImGui::Text("Animator / Cull Check");
 	ImGui::Checkbox("Enable VisCheck", &ConfigInstance.Player.VisCheck);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Colors bones by whether the character's animator is still updating\n"
+			"its pose. A frozen pose means Unity culled the character.\n\n"
+			"This is NOT wall occlusion: geometry between the camera and the\n"
+			"character is not visible to read-only memory, so an animating\n"
+			"character behind cover still uses the active color.");
 	if (ConfigInstance.Player.VisCheck)
 	{
 		auto visColour = [](const char* label, D2D1::ColorF& colour) {
@@ -163,8 +170,8 @@ static void DrawPanelESP()
 				colour = D2D1::ColorF(v[0], v[1], v[2], v[3]);
 			}
 		};
-		visColour("Visible Color", ConfigInstance.Player.VisibleColour);
-		visColour("Hidden Color", ConfigInstance.Player.HiddenColour);
+		visColour("Active (animating)", ConfigInstance.Player.VisibleColour);
+		visColour("Frozen (culled)", ConfigInstance.Player.HiddenColour);
 	}
 
 	ImGui::Spacing();

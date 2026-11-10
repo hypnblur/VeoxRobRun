@@ -10,6 +10,15 @@ namespace Skeleton {
 struct Vec { float x, y, z; };
 struct BoneSegment { Vec a, b; bool visible = true; };
 
+// Full local pose of one bone. Animator-activity detection needs the rotation:
+// Unity skeletal animation changes local rotations while local positions often
+// stay constant, so a position-only comparison misses most movement.
+struct BoneLocal {
+    Vec position{};
+    float rotation[4]{}; // x y z w
+    Vec scale{1.f, 1.f, 1.f};
+};
+
 // Named aim points resolved from the same pose as the skeleton. Only valid when
 // the rig exposed all four anchors.
 struct BonePoints {
@@ -51,7 +60,7 @@ bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out)
 // corrupt pose), in which case the caller should rebuild it.
 bool SampleLayout(const RigLayout& layout, const ReadFn& read,
     std::vector<BoneSegment>& out, BonePoints* points = nullptr,
-    Vec* localPosOut = nullptr);
+    BoneLocal* localOut = nullptr);
 
 // Convenience one-shot extraction (layout build + sample).
 std::vector<BoneSegment> BuildFromView(

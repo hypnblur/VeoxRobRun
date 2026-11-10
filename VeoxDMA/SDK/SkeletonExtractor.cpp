@@ -223,7 +223,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 
 bool SampleLayout(const RigLayout& layout, const Read& read,
     std::vector<BoneSegment>& out, BonePoints* points,
-    Vec* localPosOut)
+    BoneLocal* localOut)
 {
     const int count = layout.count;
     if (!read || layout.matrices <= 0x10000 || count < 2 ||
@@ -262,9 +262,15 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     }
     out = std::move(result);
 
-    if (localPosOut) {
-        for (int b = 0; b < count; ++b)
-            localPosOut[b] = local[b].p;
+    if (localOut) {
+        for (int b = 0; b < count; ++b) {
+            localOut[b].position = local[b].p;
+            localOut[b].rotation[0] = local[b].q.x;
+            localOut[b].rotation[1] = local[b].q.y;
+            localOut[b].rotation[2] = local[b].q.z;
+            localOut[b].rotation[3] = local[b].q.w;
+            localOut[b].scale = local[b].s;
+        }
     }
 
     if (points) {

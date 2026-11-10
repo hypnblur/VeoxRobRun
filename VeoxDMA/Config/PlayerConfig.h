@@ -17,9 +17,12 @@ public:
 	bool SecondaryWeapon = false;
 	D2D1::ColorF TextColour = Colour(255, 255, 255);
 	int FontSize = 11;
+	// Animator/cull check, not wall occlusion. Unity animates local rotations,
+	// so the reader compares full local TRS across the whole skeleton and
+	// colours every segment from one per-character result.
 	bool VisCheck = false;
-	D2D1::ColorF VisibleColour = Colour(255, 50, 50);
-	D2D1::ColorF HiddenColour = Colour(255, 255, 255);
+	D2D1::ColorF VisibleColour = Colour(255, 50, 50);  // animator active
+	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // pose frozen / culled
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;

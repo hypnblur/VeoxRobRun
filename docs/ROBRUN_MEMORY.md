@@ -793,6 +793,52 @@ declaration dumps (`LodCharacterView`, `CharacterCustomizationView`,
 
 ---
 
+## Bone visibility ("VisCheck")
+
+The ESP VisCheck option colors each skeleton segment from a single
+per-character animator state. It does **not** test geometry between the camera
+and the character.
+
+**What is measured.** Every pass reads the animation matrix array once and
+compares each bone's full local TRS against the previous sample:
+
+- local position (squared distance, epsilon `1e-6`, i.e. 1 mm),
+- local rotation (`|dot(q_prev, q_cur)|`, epsilon `1e-6`, about 0.16 degrees;
+  `q` and `-q` are the same rotation),
+- local scale (epsilon `1e-6`).
+
+Unity skeletal animation changes local **rotations** while local positions
+usually stay at the bind offsets. The original check compared positions only,
+so most bones looked frozen even while the character was animating; that is
+why only the waist-to-chest area changed color.
+
+**Why the state is per-character.** Unity culls renderers/animators as a whole;
+there is no per-bone culling. Any movement in the skeleton therefore marks the
+whole character as animating, and all segments receive the same color. A pose
+that stays frozen for 150 ms is treated as culled.
+
+**Why walls are not detected.** Occlusion is a GPU depth-buffer result. A
+read-only DMA overlay never sees the game's back buffer, depth buffer, camera
+frustum traversal or static occluder mesh, and the managed game classes do not
+expose a per-character line-of-sight flag. A character standing behind cover
+whose animator keeps running is still "animating" and will use the active
+color. `Renderer.isVisible` is not a substitute: it reports camera visibility,
+not wall occlusion, and its native layout lives in `UnityPlayer.dll`, not in
+`GameAssembly.dll`.
+
+Achieving real wall occlusion would require one of:
+
+- reading the game's depth buffer or render-target data (not available over
+  this read-only path),
+- issuing engine-side physics raycasts (requires code execution in the game),
+- shipping a collision mesh for each map and raycasting it locally (large,
+  map-specific, and unverifiable without live data).
+
+Until one of those exists, the option is labeled "Animator / Cull Check" and
+should not be described as wall visibility.
+
+---
+
 ## Implementation map
 
 | File | Responsibility |
@@ -823,3 +869,5 @@ declaration dumps (`LodCharacterView`, `CharacterCustomizationView`,
   opt-in from the Misc tab.
 - Spawn messages are documented only. No write path or server command is
   implemented.
+- VisCheck detects animator/pose staleness, not wall occlusion; see
+  "Bone visibility" above.
