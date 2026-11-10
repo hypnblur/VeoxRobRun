@@ -113,6 +113,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		DrawPlayers();
 		DrawWorldEntities();
 		Aim::Draw();
+		Aim::DrawDebug();
 		if (Overlay::MenuOpen())
 			VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 	};

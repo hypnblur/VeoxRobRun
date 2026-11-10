@@ -283,6 +283,19 @@ static void DrawPanelDevices()
 
 	ImGui::SliderInt("Aim distance", &ConfigInstance.Aim.MaxDistance, 10, 1000, "%dm");
 	ImGui::Checkbox("Show FOV circle", &ConfigInstance.Aim.ShowFov);
+	ImGui::Checkbox("Show aim debug", &ConfigInstance.Aim.ShowDebug);
+
+	{
+		const Aim::DebugInfo info = Aim::GetDebug();
+		ImGui::Spacing();
+		ImGui::TextDisabled("Live: %s | key %s (%s)", info.reason,
+			info.held ? "held" : "up", info.keySource);
+		ImGui::TextDisabled("Targets %d/%d | target %d | delta %.1f, %.1f | device %s",
+			info.candidates, info.entities, info.target, info.dx, info.dy,
+			info.deviceReady ? "ready" : "not ready");
+		if (info.menuOpen)
+			ImGui::TextDisabled("Aim is paused while this menu is open.");
+	}
 
 	if (ConfigInstance.Aim.AimType == 1 && !Ready())
 		ImGui::TextDisabled("Hardware Aim needs a connected device below.");

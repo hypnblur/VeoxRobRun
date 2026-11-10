@@ -33,16 +33,47 @@ tab and records why "silent aim" is not part of the feature set.
 
 - Targets are filtered by distance (`MaxDistance`), dead state and the local
   entity.
-- FOV is 5-180 degrees. When the camera is valid the check is angular around
-  the camera forward vector; otherwise it falls back to a screen-space radius
-  derived from the camera's vertical FOV.
+- FOV is 5-180 degrees and is measured in **screen space**, exactly like the FOV
+  circle and the ESP. The vertical FOV used for the conversion is recovered from
+  the same view-projection matrix the ESP drew with, so the aim cone cannot
+  disagree with the on-screen projection (including the native Unity camera
+  fallback).
 - The closest candidate wins, with a small hysteresis bonus for the previously
   selected entity to stop target flicker.
 - The aim point is sampled from the animation pose: head, neck, chest or
-  pelvis. If the rig cannot be sampled, a body-relative height above the
-  transform root is used.
+  pelvis. A bone sample is only trusted when it is finite and within a few
+  metres of the entity's transform root; otherwise a body-relative height above
+  the root is used. This keeps a stale rig layout from pointing the aim at the
+  world origin.
 - Aim is suspended while the menu is open and whenever the activation key is
   not held.
+- The activation key is polled from **all** sources and OR-ed: the game-PC
+  keyboard bitmap over DMA, the aim device's reported buttons, and the host
+  keyboard. Short-circuiting on the DMA bitmap used to hide a working device or
+  host input whenever the bitmap resolved but pointed at the wrong session.
+- "Visible bones only" reuses the ESP's animator/cull state. It is not wall
+  occlusion.
+
+## Diagnosing "aim does nothing"
+
+The aim tab shows a live line and the overlay draws a small HUD (top-left,
+toggle **Show aim debug**). It reports the activation key source, the number of
+entities and in-FOV candidates, the chosen target, the pixel delta, the step
+actually emitted, whether the hardware device is ready, and the exact reason the
+loop stopped (`aim disabled`, `menu open`, `aim key not held`, `no entities`,
+`no target in FOV`, `hardware device not ready`, ...). Read that reason first.
+
+Common cases:
+
+- **`menu open`**: aim is paused while the menu is visible. Close it before
+  testing.
+- **`no target in FOV`**: no entity projects inside the circle. Check the FOV
+  slider and whether the player ESP is actually drawing targets.
+- **`hardware device not ready`**: Hardware Aim needs a connected device; the
+  device panel shows the link state and error.
+- **`moving (memory)` with no view change**: Memory Aim uses `SendInput` on the
+  overlay PC. On a two-PC DMA setup this cannot reach the game PC; use Hardware
+  Aim.
 
 ## Why true silent aim is not implemented
 

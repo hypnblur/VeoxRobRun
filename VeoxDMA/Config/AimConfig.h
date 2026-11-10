@@ -22,6 +22,9 @@ public:
 	int AimKey = 0;         // index into Aim::KeyNames()
 	int MaxDistance = 400;  // metres
 	bool ShowFov = true;
+	// Draws the live aim state (key source, candidate count, chosen target,
+	// pixel delta and the reason the loop stopped) in the top-left corner.
+	bool ShowDebug = true;
 	// Only consider characters whose animator is still evaluating (the same
 	// per-character state the ESP colours as "visible"). This is an
 	// animator/cull check, not wall occlusion: read-only DMA cannot tell
@@ -39,6 +42,7 @@ public:
 		j[ConfigName][LIT("AimKey")] = AimKey;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
 		j[ConfigName][LIT("ShowFov")] = ShowFov;
+		j[ConfigName][LIT("ShowDebug")] = ShowDebug;
 		j[ConfigName][LIT("VisibleBonesOnly")] = VisibleBonesOnly;
 		return j;
 	}
@@ -63,6 +67,8 @@ public:
 			MaxDistance = j[ConfigName][LIT("MaxDistance")];
 		if (j[ConfigName].contains(LIT("ShowFov")))
 			ShowFov = j[ConfigName][LIT("ShowFov")];
+		if (j[ConfigName].contains(LIT("ShowDebug")))
+			ShowDebug = j[ConfigName][LIT("ShowDebug")];
 		if (j[ConfigName].contains(LIT("VisibleBonesOnly")))
 			VisibleBonesOnly = j[ConfigName][LIT("VisibleBonesOnly")];
 	}
