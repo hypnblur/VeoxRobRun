@@ -37,10 +37,9 @@ struct State {
 
 void Init(std::uintptr_t gameAssemblyBase);
 
-// Reads BattleModel + 0x510 -> WorldEntitiesModel. All world-entity offsets
-// are metadata-derived, so every model pointer and position is validated
-// before it is accepted.
-bool Read(std::uintptr_t battleModel, State& out);
+// Reads WorldEntitiesModel. The dump places it at BattleEntitiesModel+0x60;
+// BattleModel+0x60 and the legacy BattleModel+0x510 are validated fallbacks.
+bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out);
 
 const char* KindName(Kind kind);
 

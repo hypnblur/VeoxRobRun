@@ -16,9 +16,9 @@ pointer, class identity, field offset and finite value before use.
 | --- | --- |
 | Process | `ROB RUN.exe` |
 | Code module | `GameAssembly.dll` |
-| PE TimeDateStamp | `0x6AF2342B` |
+| PE TimeDateStamp | `0x6AF2C76F` |
 | PE SizeOfImage | `0x08FC9000` |
-| GameAssembly SHA-256 | `030edb81966417d68dab4b808941e38def27e9de98367b863529b2f9f1b681e0` |
+| GameAssembly SHA-256 | `ecd0a4275325fce38c9794576c541891cb8dfaa0b0ac3a38fdd2dc9711ecb81e` |
 | UnityPlayer PE TimeDateStamp | `0x6A28669F` |
 | UnityPlayer PE SizeOfImage | `0x02426000` |
 
@@ -131,11 +131,14 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `Game.Game +0x20` | active updater `List<reference>` |
 | `Game.Game +0xD0` | `Game.GameModel*` |
 | `Game.GameModel +0x10` | `Game.Battle.BattleModel*` |
-| `BattleModel +0x60` | `WorldEntitiesModel*` (new offset set) |
+| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` (dump path) |
+| `BattleModel +0x60` | `WorldEntitiesModel*` fallback |
 | `BattleModel +0x510` | `WorldEntitiesModel*` legacy fallback |
 | `BattleModel +0x90` | `Game.Battle.BattleEntitiesModel*` |
-| `BattleModel +0x4C8` | character slots model (new offset set) |
-| `Character slots model +0x10` | slot dictionary, keyed by entity ID |
+| `BattleModel +0x248` | character slots model (dump path) |
+| `BattleModel +0x4C8` | character slots model legacy fallback |
+| `Character slots model +0x18` | slot dictionary, keyed by entity ID |
+| `Character slots model +0x10` | slot dictionary legacy fallback |
 | `BattleEntitiesModel +0x50` | entity dictionary, keyed by entity ID |
 | `BattleEntitiesModel +0x80` | character slots root (legacy fallback) |
 | `Character slots root +0x18` | slot dictionary, keyed by entity ID |
@@ -143,7 +146,8 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `PlayerEntityModel +0x10` | local `int32` entity ID |
 | `PlayerEntityModel +0x18` | local client `BattleCharacterModel*` |
 | `PlayerEntityModel +0x20` | local server `BattleCharacterModel*` |
-| `BattleCharacterEntityModel +0x30` | `BattleCharacterModel*` |
+| `BattleCharacterEntityModel +0x20` | client `BattleCharacterModel*` (dump path) |
+| `BattleCharacterEntityModel +0x30` | simulated `BattleCharacterModel*` fallback |
 | `BattleCharacterModel +0x38` | character ID (new offset set) |
 | `BattleCharacterModel +0x40` | character data (new offset set) |
 | `BattleCharacterModel +0x58` | `CharacterTransformModel*` |
@@ -171,6 +175,13 @@ the canonical offset map.
 | `BattleCharacterModel +0x40` -> `+0x20` | battle data |
 | `BattleData +0x20` | common model |
 | `CommonModel +0x20` | role |
+| `CommonModel +0x28` | position `Vector3` primitive |
+| `CommonModel +0x30` | look direction `Vector3` primitive |
+| `CommonModel +0x88` | `IsSprinting` primitive |
+| `CommonModel +0xA8` | `IsCrouching` primitive |
+| `CommonModel +0xE0` | `IsDead` primitive |
+| `CommonModel +0xF0` | `VehicleEntityId` primitive |
+| `HealthModel +0x24` | critical-health `int32` |
 | `BattleCharacterModel +0x298` | knockout model |
 | `KnockoutModel +0x18` | phase / phase description |
 | `KnockoutDescription +0x10` | description ID |
@@ -704,6 +715,21 @@ metadata_header_slot = GameAssembly.dll + 0x8625550
 
 class = Q(Q(GameAssemblyBase + class_table_slot) + classIndex*8)
 ```
+
+**AOB fallback (`Il2Cpp::ClassTableSlotRva`).** If the hardcoded slot no longer
+dereferences to a table of printable `Il2CppClass` pointers, the resolver scans
+`.text` for the `GetClassByIndex` accessor and decodes its RIP-relative slot:
+
+```text
+48 63 C8 48 8B 05 ?? ?? ?? ?? 48 8B 04 C8 C3
+```
+
+This signature is unique in the supported build and resolves to
+`0x8625440`. The scan is chunked (1 MiB), cached for the session, and only runs
+when the header slot fails validation. `RobRunReader` then falls back to
+`FindClassByName("BattleModel")` / `FindClassByName("BattleEntitiesUpdater")`
+plus the class static field, so a shifted TypeInfo RVA no longer blocks
+attach. That fallback is rate-limited to one attempt every three seconds.
 
 ---
 

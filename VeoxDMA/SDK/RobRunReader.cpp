@@ -49,8 +49,11 @@ struct DetailCacheEntry {
     std::uint64_t stamp = 0;
     float health = -1.f;
     float maxHealth = -1.f;
+    float criticalHealth = -1.f;
     bool healthKnown = false;
     bool isDead = false;
+    bool isSprinting = false;
+    bool isCrouching = false;
     bool inVehicle = false;
     int vehicleId = 0;
     int role = 0;
@@ -69,6 +72,7 @@ struct RigCacheEntry {
     bool layoutValid = false;
     Skeleton::RigLayout layout;
     std::vector<Skeleton::BoneSegment> bones;
+    Skeleton::BonePoints points;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -86,6 +90,14 @@ static std::mutex g_snapshotMutex;
 static std::shared_ptr<const Snapshot> g_snapshot = std::make_shared<Snapshot>();
 static std::atomic<bool> g_workerStop{ false };
 static std::thread g_workerThread;
+
+// Render-thread camera refresh. The worker publishes cachedCameraModel via
+// this atomic; RefreshCamera() re-reads the camera block with uncached DMA
+// and stores it here so GetViewProjection() can use it instead of the
+// worker's ~30 Hz snapshot.
+static std::atomic<std::uintptr_t> g_renderCameraModel{ 0 };
+static std::mutex g_freshCameraMutex;
+static RobRunCamera::CameraState g_freshCamera;
 
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
 {
@@ -160,6 +172,12 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     fallbackViewProjection = Matrix4x4{};
     fallbackViewProjectionValid = false;
 
+    g_renderCameraModel.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        g_freshCamera = RobRunCamera::CameraState{};
+    }
+
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
         g_snapshot = std::make_shared<Snapshot>();
@@ -185,6 +203,30 @@ static std::uintptr_t ReadPtr(std::uintptr_t address)
 static bool IsClass(std::uintptr_t object, const char* name)
 {
     return Il2Cpp::IsClass(object, name);
+}
+
+// Last-resort singleton resolution. The class-table walk is expensive over
+// DMA, so it only runs when the TypeInfo slot path failed and at most once
+// every three seconds. Positive results are cached by the caller.
+static std::uint64_t lastClassFallbackTick = 0;
+static bool ClassFallbackDue()
+{
+    const std::uint64_t now = GetTickCount64();
+    if (lastClassFallbackTick != 0 && now - lastClassFallbackTick < 3000)
+        return false;
+    lastClassFallbackTick = now;
+    return true;
+}
+
+static std::uintptr_t ResolveStaticSingleton(const char* className,
+    const char* expectedClass)
+{
+    const std::uintptr_t klass = Il2Cpp::FindClassByName(className);
+    if (klass <= 0x10000) return 0;
+    const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
+    if (statics <= 0x10000) return 0;
+    const std::uintptr_t instance = ReadPtr(statics);
+    return IsClass(instance, expectedClass) ? instance : 0;
 }
 
 // --- GOM-based Game resolution -------------------------------------------
@@ -268,6 +310,15 @@ static std::uintptr_t ResolveBattleModel(std::uintptr_t game)
                 return battleModel;
         }
     }
+
+    // AOB-backed fallback: recover the class table, find the class by name and
+    // read its static instance. This does not depend on the TypeInfo RVAs.
+    if (ClassFallbackDue()) {
+        const std::uintptr_t battleModel = ResolveStaticSingleton(
+            "BattleModel", "BattleModel");
+        if (battleModel)
+            return battleModel;
+    }
     return 0;
 }
 
@@ -303,6 +354,14 @@ static std::uintptr_t FindUpdater(std::uintptr_t game, std::uintptr_t battleMode
             }
         }
     }
+
+    // AOB-backed fallback, same contract as ResolveBattleModel.
+    if (ClassFallbackDue()) {
+        const std::uintptr_t updater = ResolveStaticSingleton(
+            "BattleEntitiesUpdater", "BattleEntitiesUpdater");
+        if (updater && ReadPtr(updater + rr::BattleEntitiesUpdater::_battleModel) == battleModel)
+            return updater;
+    }
     return 0;
 }
 
@@ -329,6 +388,11 @@ static void ReadHealth(std::uintptr_t characterModel, EntityData& entity)
     const std::int32_t maxAmount = RobRunMemory::ReadInt32(healthModel + rr::HealthModel::MaxAmount);
     if (maxAmount > 0 && maxAmount <= 100000)
         entity.maxHealth = static_cast<float>(maxAmount);
+
+    const std::int32_t critical = RobRunMemory::ReadInt32(
+        healthModel + rr::HealthModel::CriticalHealth);
+    if (critical >= 0 && critical <= 100000)
+        entity.criticalHealth = static_cast<float>(critical);
 }
 
 static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity)
@@ -351,6 +415,36 @@ static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity
     if (Il2Cpp::ReadPrimitiveInt(vehicleWrapper, vehicleId)) {
         entity.inVehicle = true;
         entity.vehicleId = vehicleId;
+    }
+}
+
+// New offset set: BattleCharacterModel+0x40 -> Data+0x20 -> CommonData.
+// One traversal covers role, movement state, death and vehicle id.
+static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
+{
+    if (characterModel <= 0x10000) return;
+    const std::uintptr_t data = ReadPtr(
+        characterModel + rr::BattleCharacterModel::Data);
+    if (data <= 0x10000) return;
+    const std::uintptr_t common = ReadPtr(data + rr::BattleData::Common);
+    if (common <= 0x10000) return;
+
+    std::int32_t role = 0;
+    if (Il2Cpp::ReadPrimitiveInt(ReadPtr(common + rr::CommonModel::Role), role))
+        entity.role = role;
+
+    bool flag = false;
+    if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsSprinting), flag))
+        entity.isSprinting = flag;
+    if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsCrouching), flag))
+        entity.isCrouching = flag;
+    if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsDead), flag))
+        entity.isDead = flag;
+
+    std::int32_t vehicleId = 0;
+    if (Il2Cpp::ReadPrimitiveInt(ReadPtr(common + rr::CommonModel::VehicleEntityId), vehicleId)) {
+        entity.inVehicle = vehicleId > 0;
+        entity.vehicleId = vehicleId > 0 ? vehicleId : 0;
     }
 }
 
@@ -445,6 +539,7 @@ static void UpdateInternal()
 
     if (!cachedCameraModel)
         cachedCameraModel = ReadPtr(cachedBattleModel + rr::BattleModel::BattleCameraModel);
+    g_renderCameraModel.store(cachedCameraModel, std::memory_order_release);
     cameraState = RobRunCamera::Read(cachedCameraModel);
 
     // Resolve the native Unity camera fallback here, on the worker, so the
@@ -511,13 +606,31 @@ static void UpdateInternal()
     std::vector<RobRunMemory::DictEntry> slotEntries;
     bool slotsRead = false;
 
-    // New offset set: BattleModel+0x4C8 -> slots model +0x10 -> dictionary.
+    // New offset set: BattleModel+0x248 -> slots model +0x18 -> dictionary.
+    // Both the model offset and the dictionary offset have legacy variants, so
+    // try the new pair first and fall back without losing older sessions.
     const std::uintptr_t slotsModel = ReadPtr(
         cachedBattleModel + rr::BattleModel::CharacterSlotsModel);
     if (slotsModel > 0x10000) {
-        const std::uintptr_t slotDictionary = ReadPtr(
+        std::uintptr_t slotDictionary = ReadPtr(
             slotsModel + rr::CharacterSlotsModel::SlotDict);
         slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+        if (!slotsRead) {
+            slotDictionary = ReadPtr(
+                slotsModel + rr::CharacterSlotsModel::SlotDictLegacy);
+            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+        }
+    }
+
+    // Legacy model offset.
+    if (!slotsRead) {
+        const std::uintptr_t legacyModel = ReadPtr(
+            cachedBattleModel + rr::BattleModel::CharacterSlotsModelLegacy);
+        if (legacyModel > 0x10000) {
+            std::uintptr_t slotDictionary = ReadPtr(
+                legacyModel + rr::CharacterSlotsModel::SlotDictLegacy);
+            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+        }
     }
 
     // Legacy fallback: BattleEntitiesModel+0x80 -> root +0x18 -> dictionary.
@@ -547,10 +660,21 @@ static void UpdateInternal()
             const std::uintptr_t entityModel = entry.value;
             if (entityModel <= 0x10000) continue;
 
+            // New offset set: +0x20 is the client model, which is the view the
+            // player actually sees. Fall back to the simulated model and then
+            // to the entity itself when the client pointer is not usable.
             std::uintptr_t characterModel = ReadPtr(
-                entityModel + rr::BattleCharacterEntityModel::BattleCharacterModel);
-            if (characterModel <= 0x10000 && IsClass(entityModel, "BattleCharacterModel"))
-                characterModel = entityModel;
+                entityModel + rr::BattleCharacterEntityModel::ClientModel);
+            if (!IsClass(characterModel, "BattleCharacterModel")) {
+                const std::uintptr_t simulated = ReadPtr(
+                    entityModel + rr::BattleCharacterEntityModel::SimulatedModel);
+                if (IsClass(simulated, "BattleCharacterModel"))
+                    characterModel = simulated;
+                else if (IsClass(entityModel, "BattleCharacterModel"))
+                    characterModel = entityModel;
+                else
+                    characterModel = 0;
+            }
             if (characterModel <= 0x10000) continue;
 
             const std::uintptr_t transform = ReadPtr(
@@ -612,9 +736,17 @@ static void UpdateInternal()
                 ReadHealth(characterModel, scratch);
                 detail.health = scratch.health;
                 detail.maxHealth = scratch.maxHealth;
+                detail.criticalHealth = scratch.criticalHealth;
                 detail.healthKnown = scratch.healthKnown;
 
+                // Keep the wrapper-derived death flag as the default; the
+                // CommonData read below may override it when available.
+                scratch.isDead = detail.isDead;
                 ReadRoleAndVehicle(characterModel, scratch);
+                ReadCommonState(characterModel, scratch);
+                detail.isDead = scratch.isDead;
+                detail.isSprinting = scratch.isSprinting;
+                detail.isCrouching = scratch.isCrouching;
                 detail.role = scratch.role;
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
@@ -630,7 +762,10 @@ static void UpdateInternal()
             entity.isDead = detail.isDead;
             entity.health = detail.health;
             entity.maxHealth = detail.maxHealth;
+            entity.criticalHealth = detail.criticalHealth;
             entity.healthKnown = detail.healthKnown;
+            entity.isSprinting = detail.isSprinting;
+            entity.isCrouching = detail.isCrouching;
             entity.role = detail.role;
             entity.inVehicle = detail.inVehicle;
             entity.vehicleId = detail.vehicleId;
@@ -651,6 +786,7 @@ static void UpdateInternal()
                 rig.layoutValid = false;
                 rig.layoutStamp = 0;
                 rig.bones.clear();
+                rig.points = Skeleton::BonePoints{};
             }
 
             const bool dueForRebuild = !rig.layoutValid
@@ -660,12 +796,15 @@ static void UpdateInternal()
                 rig.layoutStamp = now;
                 rig.layoutValid = entity.viewPtr > 0x10000 &&
                     Skeleton::BuildLayoutFromView(entity.viewPtr, DmaRead, rig.layout);
-                if (!rig.layoutValid) rig.bones.clear();
+                if (!rig.layoutValid) {
+                    rig.bones.clear();
+                    rig.points = Skeleton::BonePoints{};
+                }
             }
 
             if (rig.layoutValid) {
-                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones) &&
-                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones)) {
+                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones, &rig.points) &&
+                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones, &rig.points)) {
                     // Keep the last good pose for this pass; the layout is
                     // rebuilt after a short backoff.
                     rig.layoutValid = false;
@@ -676,8 +815,10 @@ static void UpdateInternal()
                 rig.fallbackStamp = now;
                 rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
+                rig.points = Skeleton::BonePoints{};
             }
             entity.bones = rig.bones;
+            entity.bonePoints = rig.points;
 
             if (entity.entityId == localEntityId && localPosition.IsZero() &&
                 !entity.position.IsZero()) {
@@ -693,7 +834,7 @@ static void UpdateInternal()
     // the player pass stays short and positions/bones stay fresh.
     if (cachedBattleModel > 0x10000 &&
         (worldRefreshStamp == 0 || passNow - worldRefreshStamp >= 250)) {
-        RobRunWorld::Read(cachedBattleModel, worldState);
+        RobRunWorld::Read(cachedBattleModel, cachedBattleEntities, worldState);
         worldRefreshStamp = passNow;
     }
 
@@ -763,13 +904,34 @@ std::uint32_t GetFailureCount()
 
 void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
+void RefreshCamera()
+{
+    const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
+    if (!model) return;
+    auto camera = RobRunCamera::Read(model);
+    if (!camera.valid) return;
+    std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+    g_freshCamera = camera;
+}
+
 bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
-    const auto snapshot = GetSnapshot();
-    if (!snapshot) return false;
+
+    RobRunCamera::CameraState camera;
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        camera = g_freshCamera;
+    }
+    if (!camera.valid) {
+        const auto snapshot = GetSnapshot();
+        if (!snapshot) return false;
+        camera = snapshot->camera;
+    }
+    if (!camera.valid) return false;
+
     const float aspect = static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
-    return RobRunCamera::BuildViewProjection(snapshot->camera, aspect, out);
+    return RobRunCamera::BuildViewProjection(camera, aspect, out);
 }
 
 bool GetFallbackViewProjection(Matrix4x4& out)

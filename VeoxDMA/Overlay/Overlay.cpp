@@ -310,6 +310,16 @@ void SetMonitor(int index)
 	g_appliedMonitor = -1;
 }
 
+bool GetMonitorInfo(int index, MonitorInfo& out)
+{
+	if (index < 0 || index >= (int)g_monitors.size()) return false;
+	const RECT& r = g_monitors[index];
+	out.width = r.right - r.left;
+	out.height = r.bottom - r.top;
+	out.primary = (r.left == 0 && r.top == 0);
+	return true;
+}
+
 void RequestExit() { g_requestExit.store(true); }
 
 void Notify(const char* msg, unsigned int colour, float seconds)

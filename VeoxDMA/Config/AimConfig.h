@@ -1,0 +1,61 @@
+#pragma once
+#include "pch.h"
+
+// Aim settings for the Device Connections tab. Memory Aim drives the host
+// cursor through SendInput (relative counts); Hardware Aim submits the same
+// motion to the selected KMBox/Makcu/Ferrum device through DeviceSession.
+class AimConfig
+{
+	std::string ConfigName;
+
+public:
+	AimConfig(const std::string& name)
+	{
+		ConfigName = name;
+	}
+
+	bool Enabled = false;
+	int AimType = 0;        // 0 = Memory Aim, 1 = Hardware Aim
+	int TargetBone = 0;     // 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis
+	int Smoothness = 6;     // 1 (instant) .. 100 (very slow)
+	int Fov = 40;           // 5 .. 180 degrees
+	int AimKey = 0;         // index into Aim::KeyNames()
+	int MaxDistance = 400;  // metres
+	bool ShowFov = true;
+
+	json ToJson()
+	{
+		json j;
+		j[ConfigName][LIT("Enabled")] = Enabled;
+		j[ConfigName][LIT("AimType")] = AimType;
+		j[ConfigName][LIT("TargetBone")] = TargetBone;
+		j[ConfigName][LIT("Smoothness")] = Smoothness;
+		j[ConfigName][LIT("Fov")] = Fov;
+		j[ConfigName][LIT("AimKey")] = AimKey;
+		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
+		j[ConfigName][LIT("ShowFov")] = ShowFov;
+		return j;
+	}
+
+	void FromJson(const json& j)
+	{
+		if (!j.contains(ConfigName))
+			return;
+		if (j[ConfigName].contains(LIT("Enabled")))
+			Enabled = j[ConfigName][LIT("Enabled")];
+		if (j[ConfigName].contains(LIT("AimType")))
+			AimType = j[ConfigName][LIT("AimType")];
+		if (j[ConfigName].contains(LIT("TargetBone")))
+			TargetBone = j[ConfigName][LIT("TargetBone")];
+		if (j[ConfigName].contains(LIT("Smoothness")))
+			Smoothness = j[ConfigName][LIT("Smoothness")];
+		if (j[ConfigName].contains(LIT("Fov")))
+			Fov = j[ConfigName][LIT("Fov")];
+		if (j[ConfigName].contains(LIT("AimKey")))
+			AimKey = j[ConfigName][LIT("AimKey")];
+		if (j[ConfigName].contains(LIT("MaxDistance")))
+			MaxDistance = j[ConfigName][LIT("MaxDistance")];
+		if (j[ConfigName].contains(LIT("ShowFov")))
+			ShowFov = j[ConfigName][LIT("ShowFov")];
+	}
+};

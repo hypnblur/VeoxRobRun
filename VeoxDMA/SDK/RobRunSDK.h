@@ -16,10 +16,10 @@
 namespace rr {
 
 inline constexpr const char* kBuild = "26549963";
-inline constexpr std::uint32_t kPeTimestamp = 0x6AF2342Bu;
+inline constexpr std::uint32_t kPeTimestamp = 0x6AF2C76Fu;
 inline constexpr std::uint32_t kPeSizeOfImage = 0x08FC9000u;
 inline constexpr const char* kGameAssemblySha256 =
-    "030edb81966417d68dab4b808941e38def27e9de98367b863529b2f9f1b681e0";
+    "ecd0a4275325fce38c9794576c541891cb8dfaa0b0ac3a38fdd2dc9711ecb81e";
 inline constexpr std::uint32_t kUnityPlayerPeTimestamp = 0x6A28669Fu;
 inline constexpr std::uint32_t kUnityPlayerPeSizeOfImage = 0x02426000u;
 inline constexpr const wchar_t* kProcess = L"ROB RUN.exe";
@@ -152,11 +152,13 @@ inline constexpr std::uintptr_t WorldEntitiesModelLegacy = 0x510;
 
 // New offset set: character slots live on BattleModel, not under
 // BattleEntitiesModel. The old root is retained as a fallback.
-inline constexpr std::uintptr_t CharacterSlotsModel = 0x4C8;
+inline constexpr std::uintptr_t CharacterSlotsModel = 0x248;
+inline constexpr std::uintptr_t CharacterSlotsModelLegacy = 0x4C8;
 }
 
 namespace BattleEntitiesModel {
 inline constexpr std::uintptr_t EntityDict             = 0x50; // Dictionary<int, entity>
+inline constexpr std::uintptr_t WorldEntitiesModel     = 0x60; // new offset set
 inline constexpr std::uintptr_t CharacterSlotsRoot     = 0x80; // legacy fallback
 inline constexpr std::uintptr_t LocalPlayerEntityModel = 0xD0;
 inline constexpr std::uintptr_t Player                 = 0xD0; // new offset set alias
@@ -167,7 +169,8 @@ inline constexpr std::uintptr_t SlotDict = 0x18; // Dictionary<int, slot>
 }
 
 namespace CharacterSlotsModel {
-inline constexpr std::uintptr_t SlotDict = 0x10; // Dictionary<int, slot>
+inline constexpr std::uintptr_t SlotDict = 0x18; // new offset set
+inline constexpr std::uintptr_t SlotDictLegacy = 0x10;
 }
 
 namespace BattleCharacterSlotModel {
@@ -191,7 +194,10 @@ inline constexpr std::uintptr_t BattleCharacterModel = 0x20; // server-side char
 }
 
 namespace BattleCharacterEntityModel {
-inline constexpr std::uintptr_t BattleCharacterModel = 0x30;
+inline constexpr std::uintptr_t ClientModel    = 0x20; // new offset set
+inline constexpr std::uintptr_t ServerModel    = 0x28; // new offset set
+inline constexpr std::uintptr_t SimulatedModel = 0x30; // legacy path
+inline constexpr std::uintptr_t BattleCharacterModel = 0x20; // alias for ClientModel
 }
 
 namespace BattleCharacterModel {
@@ -225,6 +231,7 @@ namespace HealthModel {
 inline constexpr std::uintptr_t Health    = 0x10; // primitive wrapper
 inline constexpr std::uintptr_t IsDead    = 0x18; // primitive wrapper
 inline constexpr std::uintptr_t MaxAmount = 0x20; // int32
+inline constexpr std::uintptr_t CriticalHealth = 0x24; // int32
 }
 
 // ------------------------------------------------------------------
@@ -236,6 +243,12 @@ inline constexpr std::uintptr_t Common = 0x20; // BattleCharacterModel+0x40 -> +
 
 namespace CommonModel {
 inline constexpr std::uintptr_t Role = 0x20;
+inline constexpr std::uintptr_t Position = 0x28; // primitive<Vector3>
+inline constexpr std::uintptr_t LookDirection = 0x30; // primitive<Vector3>
+inline constexpr std::uintptr_t IsSprinting = 0x88;
+inline constexpr std::uintptr_t IsCrouching = 0xA8;
+inline constexpr std::uintptr_t IsDead = 0xE0;
+inline constexpr std::uintptr_t VehicleEntityId = 0xF0;
 }
 
 namespace ReferenceData {

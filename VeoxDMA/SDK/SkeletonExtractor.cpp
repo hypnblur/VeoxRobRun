@@ -198,6 +198,10 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     out.count = count;
     out.parent = std::move(parent);
     out.selected = std::move(selected);
+    out.head = skull;
+    out.neck = neck;
+    out.chest = spine3;
+    out.pelvis = spine2;
     out.segments.clear();
     for (int b = 0; b < count; ++b) {
         const int p = out.parent[b];
@@ -208,7 +212,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 }
 
 bool SampleLayout(const RigLayout& layout, const Read& read,
-    std::vector<BoneSegment>& out)
+    std::vector<BoneSegment>& out, BonePoints* points)
 {
     const int count = layout.count;
     if (!read || layout.matrices <= 0x10000 || count < 2 ||
@@ -246,6 +250,19 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         result.push_back({world[seg.first], world[seg.second]});
     }
     out = std::move(result);
+
+    if (points) {
+        points->valid = layout.head >= 0 && layout.head < count &&
+            layout.neck >= 0 && layout.neck < count &&
+            layout.chest >= 0 && layout.chest < count &&
+            layout.pelvis >= 0 && layout.pelvis < count;
+        if (points->valid) {
+            points->head = world[layout.head];
+            points->neck = world[layout.neck];
+            points->chest = world[layout.chest];
+            points->pelvis = world[layout.pelvis];
+        }
+    }
     return true;
 }
 

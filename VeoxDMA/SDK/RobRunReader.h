@@ -27,6 +27,7 @@ struct EntityData {
     bool inVehicle = false;
     int vehicleId = 0;
     int role = 0;
+    float criticalHealth = -1.f;
     std::wstring nickname;
     std::wstring clanTag;
     std::uintptr_t viewPtr = 0;
@@ -35,6 +36,8 @@ struct EntityData {
     // Bone segments are extracted by the reader worker, never by the render
     // thread, so drawing only projects already-resolved 3D points.
     std::vector<Skeleton::BoneSegment> bones;
+    // Named aim points sampled from the same pose as the skeleton.
+    Skeleton::BonePoints bonePoints;
 };
 
 // Immutable view of the last completed read pass. The worker publishes a new
@@ -83,6 +86,12 @@ std::uint32_t GetFailureCount();
 // Enables the one-off item-catalog class scan. Disabled by default because
 // the scan is intentionally bounded but not free.
 void SetReadCatalogEnabled(bool enabled);
+
+// Re-reads only the BattleCameraModel with uncached DMA reads and updates
+// a thread-safe camera state used by GetViewProjection. Call this from the
+// render thread (e.g. the overlay tick callback) so camera projection stays
+// in sync with the game frame instead of trailing the worker by ~33 ms.
+void RefreshCamera();
 
 // Builds the view-projection from the verified BattleCameraModel. Returns
 // false when the camera path is unavailable; callers can then use

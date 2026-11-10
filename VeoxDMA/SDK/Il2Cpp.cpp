@@ -23,6 +23,14 @@ static std::unordered_map<std::string, std::uintptr_t> g_classCache;
 static std::mutex g_primitiveMutex;
 static std::unordered_map<std::uintptr_t, std::uintptr_t> g_primitiveOffsets;
 
+// Loaded-class-table slot. Resolved once per session: the hardcoded RVA is
+// preferred while it validates, otherwise the AOB scanner recovers it from the
+// GetClassByIndex accessor. Guarded because resolution may run from the reader
+// worker and the menu thread at the same time.
+static std::mutex g_classTableMutex;
+static std::uintptr_t g_classTableSlot = 0;
+static bool g_classTableAttempted = false;
+
 static bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
 {
     if (!address || !buffer || !size) return false;
@@ -67,6 +75,147 @@ static bool ValidClass(std::uintptr_t klass)
     return ReadBytes(name, &first, 1) && first >= 0x20 && first < 0x7F;
 }
 
+namespace {
+
+struct SectionRange {
+    std::uintptr_t va = 0;
+    std::uint32_t size = 0;
+};
+
+// Reads a PE section header from the live module. Only the fields needed to
+// scan code are returned; the header was already validated by
+// VerifyFingerprint before this path is used.
+bool ReadSection(const char* wanted, SectionRange& out)
+{
+    if (!gaBase || !wanted) return false;
+    std::uint32_t lfanew = 0;
+    if (!ReadBytes(gaBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000)
+        return false;
+    const std::uintptr_t nt = gaBase + lfanew;
+    std::uint16_t sectionCount = 0;
+    std::uint16_t optionalSize = 0;
+    if (!ReadBytes(nt + 6, &sectionCount, sizeof(sectionCount))) return false;
+    if (!ReadBytes(nt + 20, &optionalSize, sizeof(optionalSize))) return false;
+    if (sectionCount == 0 || sectionCount > 96 || optionalSize == 0 || optionalSize > 0x400)
+        return false;
+
+    const std::uintptr_t headers = nt + 24 + optionalSize;
+    for (std::uint16_t i = 0; i < sectionCount; ++i) {
+        const std::uintptr_t entry = headers + static_cast<std::uintptr_t>(i) * 40;
+        char name[8]{};
+        if (!ReadBytes(entry, name, sizeof(name))) return false;
+        if (std::strncmp(name, wanted, sizeof(name)) != 0) continue;
+
+        std::uint32_t virtualSize = 0;
+        std::uint32_t virtualAddress = 0;
+        if (!ReadBytes(entry + 8, &virtualSize, sizeof(virtualSize))) return false;
+        if (!ReadBytes(entry + 12, &virtualAddress, sizeof(virtualAddress))) return false;
+        if (virtualSize == 0 || virtualAddress == 0) return false;
+        out.va = virtualAddress;
+        out.size = virtualSize;
+        return true;
+    }
+    return false;
+}
+
+// A slot is usable when it dereferences to an array that contains at least one
+// printable Il2CppClass. This rejects stale pointers left behind by a remap.
+bool ClassTableLooksValid(std::uintptr_t slotAddress)
+{
+    const std::uintptr_t table = ReadPtr(slotAddress);
+    if (!ValidPtr(table)) return false;
+
+    std::uintptr_t entries[16]{};
+    if (!ReadBytes(table, entries, sizeof(entries))) return false;
+    for (std::uintptr_t klass : entries) {
+        if (ValidClass(klass)) return true;
+    }
+    return false;
+}
+
+// Scans .text for the GetClassByIndex accessor:
+//
+//   48 63 C8              movsxd rcx, eax
+//   48 8B 05 <disp32>     mov    rax, [rip + disp32]  ; class-table slot
+//   48 8B 04 C8           mov    rax, [rax + rcx*8]
+//   C3                    ret
+//
+// The displacement is decoded into a module RVA. The scan is chunked so a
+// multi-megabyte section never has to fit in one allocation or one DMA
+// transaction.
+std::uintptr_t ScanForClassTableSlot()
+{
+    SectionRange text{};
+    if (!ReadSection(".text", text) || text.size < 16) return 0;
+
+    static constexpr std::uint8_t kSignature[] = {
+        0x48, 0x63, 0xC8, 0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0x8B, 0x04, 0xC8, 0xC3
+    };
+    static constexpr bool kWildcard[] = {
+        false, false, false, false, false, false, true, true, true, true,
+        false, false, false, false, false
+    };
+    constexpr std::size_t kSignatureLength = sizeof(kSignature);
+    constexpr std::size_t kChunk = 0x100000;
+
+    std::vector<std::uint8_t> buffer(kChunk + kSignatureLength);
+    for (std::size_t offset = 0; offset < text.size; offset += kChunk) {
+        const std::size_t remaining = text.size - offset;
+        const std::size_t want = (std::min)(kChunk + kSignatureLength, remaining);
+        if (!ReadBytes(gaBase + text.va + offset, buffer.data(), want))
+            continue;
+        if (want < kSignatureLength) break;
+
+        const std::size_t limit = want - kSignatureLength + 1;
+        for (std::size_t i = 0; i < limit; ++i) {
+            bool match = true;
+            for (std::size_t j = 0; j < kSignatureLength; ++j) {
+                if (!kWildcard[j] && buffer[i + j] != kSignature[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (!match) continue;
+
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement, buffer.data() + i + 6, sizeof(displacement));
+            const std::uintptr_t matchRva = text.va + offset + i;
+            const std::uintptr_t slot = static_cast<std::uintptr_t>(
+                static_cast<std::int64_t>(matchRva) + 10 + displacement);
+            // The table slot lives in .data, past the end of .text.
+            if (slot <= text.va + text.size) continue;
+            return slot;
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+std::uintptr_t ClassTableSlotRva()
+{
+    std::lock_guard<std::mutex> lock(g_classTableMutex);
+    if (g_classTableAttempted) return g_classTableSlot;
+    g_classTableAttempted = true;
+
+    if (ClassTableLooksValid(gaBase + rr::ClassTable::Slot)) {
+        g_classTableSlot = rr::ClassTable::Slot;
+        return g_classTableSlot;
+    }
+
+    const std::uintptr_t scanned = ScanForClassTableSlot();
+    if (scanned && ClassTableLooksValid(gaBase + scanned)) {
+        g_classTableSlot = scanned;
+        return g_classTableSlot;
+    }
+
+    // Keep the header value so the caller's own validation can report the
+    // failure; a later session reopen will retry the scan.
+    g_classTableSlot = rr::ClassTable::Slot;
+    return g_classTableSlot;
+}
+
 void Init(std::uintptr_t gameAssemblyBase)
 {
     gaBase = gameAssemblyBase;
@@ -74,6 +223,9 @@ void Init(std::uintptr_t gameAssemblyBase)
     g_classCache.clear();
     std::lock_guard<std::mutex> primitiveLock(g_primitiveMutex);
     g_primitiveOffsets.clear();
+    std::lock_guard<std::mutex> tableLock(g_classTableMutex);
+    g_classTableSlot = 0;
+    g_classTableAttempted = false;
 }
 
 std::uintptr_t Base()
@@ -133,7 +285,9 @@ bool VerifyAccessors()
 std::uintptr_t GetClassByIndex(int index)
 {
     if (!gaBase || index < 0) return 0;
-    const std::uintptr_t table = ReadPtr(gaBase + rr::ClassTable::Slot);
+    const std::uintptr_t slot = ClassTableSlotRva();
+    if (!slot) return 0;
+    const std::uintptr_t table = ReadPtr(gaBase + slot);
     if (!ValidPtr(table)) return 0;
     const std::uintptr_t klass = ReadPtr(table + static_cast<std::uintptr_t>(index) * 8);
     return ValidClass(klass) ? klass : 0;
@@ -399,7 +553,9 @@ std::uintptr_t FindClassByName(const char* name, int maxIndex)
     const auto it = g_classCache.find(name);
     if (it != g_classCache.end()) return it->second;
 
-    const std::uintptr_t table = ReadPtr(gaBase + rr::ClassTable::Slot);
+    const std::uintptr_t slot = ClassTableSlotRva();
+    if (!slot) return 0;
+    const std::uintptr_t table = ReadPtr(gaBase + slot);
     if (!ValidPtr(table)) return 0;
 
     constexpr int kChunk = 512;

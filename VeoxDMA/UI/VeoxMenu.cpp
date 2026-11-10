@@ -2,8 +2,12 @@
 #include "VeoxMenu.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
+#include "DeviceSession.h"
+#include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../ImGUI/imgui.h"
+#include <cstdio>
+#include <cstring>
 
 namespace VeoxMenu {
 
@@ -176,19 +180,168 @@ static void DrawPanelESP()
 	ImGui::PopStyleVar();
 }
 
-static void DrawPanelAimbot()
+static void DrawPanelDevices()
 {
+	using namespace Base::Hardware;
+	static int deviceIndex = 0;
+	static char comPort[16] = "";
+	static char ipAddr[64] = "";
+	static char netPort[16] = "8899";
+	static char macId[16] = "";
+	static int baudIndex = 0;
+	static bool manualPort = false;
+	static bool ferrumController = false;
+	static bool needsRefresh = true;
+
+	static const char* deviceNames[] = { "Off", "Kmbox USB", "Kmbox Net", "Macku", "Macku Controller", "Ferrum", "Macku Medius", "Kmbox NB Pro" };
+	static const DeviceKind deviceKinds[] = { DeviceKind::Off, DeviceKind::KmboxUsb, DeviceKind::KmboxNet, DeviceKind::Makcu, DeviceKind::Controller, DeviceKind::Ferrum, DeviceKind::Medius, DeviceKind::KmboxNbPro };
+	static const int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
+	static const char* baudLabels[] = { "115200", "921600", "1500000", "2000000", "3000000", "4000000" };
+
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, CHROME_R);
 	float pw = MENU_W - SIDE_W - 24.f;
 	float ph = MENU_H - LOGO_H - 24.f;
 	ImGui::SetCursorPos(ImVec2(SIDE_W + 8.f, LOGO_H + 8.f));
 	ImGui::BeginChild("##aim_panel", ImVec2(pw, ph), true);
 
-	ImGui::Text("Aimbot");
+	ImGui::Text("Aim");
 	ImGui::Separator();
 	ImGui::Spacing();
-	ImGui::TextDisabled("Aim device integration ready.");
-	ImGui::TextDisabled("Configure aim device type and settings here.");
+
+	ImGui::Checkbox("Enable aim", &ConfigInstance.Aim.Enabled);
+
+	static const char* aimTypeNames[] = { "Memory Aim", "Hardware Aim" };
+	ImGui::SetNextItemWidth(180.f);
+	ImGui::Combo("Aim type", &ConfigInstance.Aim.AimType, aimTypeNames,
+		IM_ARRAYSIZE(aimTypeNames));
+	if (ConfigInstance.Aim.AimType == 0)
+		ImGui::TextDisabled("Closed-loop SendInput relative movement.");
+	else
+		ImGui::TextDisabled("Motion is sent to the selected device.");
+
+	static const char* boneNames[] = { "Head", "Neck", "Chest", "Pelvis" };
+	ImGui::SetNextItemWidth(180.f);
+	ImGui::Combo("Target bone", &ConfigInstance.Aim.TargetBone, boneNames,
+		IM_ARRAYSIZE(boneNames));
+
+	ImGui::SliderInt("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
+	ImGui::SliderInt("FOV", &ConfigInstance.Aim.Fov, 5, 180, "%d deg");
+
+	ImGui::SetNextItemWidth(180.f);
+	ImGui::Combo("Aim key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(),
+		Aim::KeyCount());
+
+	ImGui::SliderInt("Aim distance", &ConfigInstance.Aim.MaxDistance, 10, 1000, "%dm");
+	ImGui::Checkbox("Show FOV circle", &ConfigInstance.Aim.ShowFov);
+
+	if (ConfigInstance.Aim.AimType == 1 && !Ready())
+		ImGui::TextDisabled("Hardware Aim needs a connected device below.");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	ImGui::Text("Aim Device");
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	ImGui::SetNextItemWidth(180.f);
+	ImGui::Combo("Device", &deviceIndex, deviceNames, IM_ARRAYSIZE(deviceNames));
+
+	const auto kind = deviceKinds[deviceIndex];
+	const bool isNet = IsNetworkDevice(kind);
+	const bool isSerial = kind != DeviceKind::Off && !isNet;
+
+	if (isNet) {
+		ImGui::SetNextItemWidth(140.f);
+		ImGui::InputText("IP", ipAddr, sizeof(ipAddr));
+		ImGui::SetNextItemWidth(80.f);
+		ImGui::InputText("Port", netPort, sizeof(netPort));
+		ImGui::SetNextItemWidth(100.f);
+		ImGui::InputText("Device ID", macId, sizeof(macId));
+	}
+
+	if (isSerial) {
+		if (needsRefresh) { Session().RefreshPorts(); needsRefresh = false; }
+		auto ports = Session().GetPorts();
+		ImGui::Checkbox("Manual COM port", &manualPort);
+		if (manualPort || kind == DeviceKind::Ferrum) {
+			ImGui::SetNextItemWidth(100.f);
+			ImGui::InputText("COM Port", comPort, sizeof(comPort));
+		} else if (!ports.empty()) {
+			ImGui::SetNextItemWidth(200.f);
+			if (ImGui::BeginCombo("COM Port", comPort[0] ? comPort : "Auto-detect")) {
+				for (const auto& p : ports) {
+					char label[128];
+					std::snprintf(label, sizeof(label), "%s  %s", p.port.c_str(), p.name.c_str());
+					if (ImGui::Selectable(label, p.port == comPort)) {
+						std::strncpy(comPort, p.port.c_str(), sizeof(comPort) - 1);
+						comPort[sizeof(comPort) - 1] = 0;
+					}
+				}
+				ImGui::EndCombo();
+			}
+			if (ImGui::SmallButton("Refresh ports")) Session().RefreshPorts();
+		} else {
+			ImGui::TextDisabled("No COM ports found");
+			if (ImGui::SmallButton("Refresh ports")) Session().RefreshPorts();
+		}
+
+		if (IsMakcu(kind)) {
+			ImGui::SetNextItemWidth(120.f);
+			ImGui::Combo("Baud", &baudIndex, baudLabels, IM_ARRAYSIZE(baudLabels));
+		}
+		if (kind == DeviceKind::Ferrum)
+			ImGui::Checkbox("Ferrum controller mode", &ferrumController);
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	const auto status = Session().GetStatus();
+	const bool connected = status.state == LinkState::Ready;
+	const bool connecting = status.state == LinkState::Connecting || status.state == LinkState::Recovering;
+
+	if (kind != DeviceKind::Off) {
+		if (!connected && !connecting) {
+			if (ImGui::Button("Connect", ImVec2(100, 0))) {
+				DeviceConfig cfg;
+				cfg.kind = kind;
+				cfg.port = comPort;
+				cfg.ip = ipAddr;
+				cfg.networkPort = netPort;
+				cfg.mac = macId;
+				cfg.baud = baudRates[baudIndex];
+				cfg.manualPort = manualPort || kind == DeviceKind::Ferrum;
+				cfg.ferrumController = ferrumController;
+				Session().Connect(cfg);
+			}
+		} else {
+			if (ImGui::Button("Disconnect", ImVec2(100, 0)))
+				Session().Disconnect();
+			ImGui::SameLine();
+			if (connected && ImGui::Button("Test", ImVec2(60, 0)))
+				Session().TestMovement();
+		}
+	}
+
+	ImGui::Spacing();
+	ImGui::Text("Status: %s", StateLabel(status.state));
+	if (!status.endpoint.empty())
+		ImGui::Text("Endpoint: %s", status.endpoint.c_str());
+	if (status.protocolVerified)
+		ImGui::TextColored(ImVec4(0.3f, 0.85f, 0.4f, 1.f), "Protocol verified");
+	if (!status.error.empty())
+		ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.f), "%s", status.error.c_str());
+	if (status.retryInMs > 0)
+		ImGui::TextDisabled("Retrying in %u ms", status.retryInMs);
+	if (status.test != OutputResult::None) {
+		const char* testLabels[] = { "", "Testing...", "OK", "Expired", "Cancelled", "Failed", "Unconfirmed" };
+		ImGui::Text("Test: %s", testLabels[int(status.test)]);
+	}
+	if (status.writes)
+		ImGui::TextDisabled("Writes: %llu | Failures: %llu", status.writes, status.failures);
 
 	ImGui::EndChild();
 	ImGui::PopStyleVar();
@@ -284,9 +437,36 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 	if (ImGui::SliderInt("Frame cap", &cap, 0, 360, cap > 0 ? "%d fps" : "off"))
 		Overlay::SetFrameCap(cap);
 
-	int monitor = Overlay::MonitorIndex();
-	if (ImGui::SliderInt("Monitor", &monitor, 0, std::max(0, Overlay::MonitorCount() - 1)))
-		Overlay::SetMonitor(monitor);
+	{
+		const int monCount = Overlay::MonitorCount();
+		int monIndex = Overlay::MonitorIndex();
+		if (monCount <= 0) {
+			ImGui::TextDisabled("No monitors detected.");
+		} else {
+			char preview[64] = "";
+			Overlay::MonitorInfo info{};
+			if (Overlay::GetMonitorInfo(monIndex, info))
+				std::snprintf(preview, sizeof(preview), "%d  %dx%d%s",
+					monIndex + 1, info.width, info.height, info.primary ? "  (primary)" : "");
+
+			if (ImGui::BeginCombo("Display Monitor", preview)) {
+				for (int i = 0; i < monCount; ++i) {
+					char label[64];
+					if (Overlay::GetMonitorInfo(i, info))
+						std::snprintf(label, sizeof(label), "%d  %dx%d%s",
+							i + 1, info.width, info.height, info.primary ? "  (primary)" : "");
+					else
+						std::snprintf(label, sizeof(label), "Monitor %d", i + 1);
+
+					if (ImGui::Selectable(label, i == monIndex))
+						Overlay::SetMonitor(i);
+					if (i == monIndex)
+						ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+		}
+	}
 
 	ImGui::TextDisabled("Insert toggles the menu.");
 
@@ -383,7 +563,7 @@ void Draw(bool attached, const std::string& statusText)
 	ImGui::BeginChild("##sidebar_nav", ImVec2(SIDE_W - 6.f, MENU_H - LOGO_H - 8.f), false,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
 
-	static const char* tabs[] = { "ESP", "Aimbot", "Misc", "Settings" };
+	static const char* tabs[] = { "ESP", "Device Connections", "Misc", "Settings" };
 	for (int i = 0; i < 4; i++)
 	{
 		if (SidebarButton(tabs[i], g_tab == i, SIDE_W - 6.f))
@@ -409,7 +589,7 @@ void Draw(bool attached, const std::string& statusText)
 	switch (g_tab)
 	{
 	case 0: DrawPanelESP(); break;
-	case 1: DrawPanelAimbot(); break;
+	case 1: DrawPanelDevices(); break;
 	case 2: DrawPanelMisc(); break;
 	case 3: DrawPanelSettings(attached, statusText); break;
 	}

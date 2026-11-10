@@ -5,6 +5,7 @@
 #include "RobRunReader.h"
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
+#include "Aim/AimController.h"
 #include "UI/VeoxMenu.h"
 #include "Overlay/Overlay.h"
 #include <atomic>
@@ -77,6 +78,9 @@ static void TickOverlay()
 {
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f); // IM_COL32(100,220,140,255)
+
+	if (g_attached.load(std::memory_order_acquire))
+		RobRunReader::RefreshCamera();
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
@@ -98,8 +102,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		TickOverlay();
 	};
 	callbacks.draw = [] {
+		Aim::Tick();
 		DrawPlayers();
 		DrawWorldEntities();
+		Aim::Draw();
 		if (Overlay::MenuOpen())
 			VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 	};

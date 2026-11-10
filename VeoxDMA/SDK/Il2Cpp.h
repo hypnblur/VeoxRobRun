@@ -65,6 +65,12 @@ bool ReadPrimitiveInt(std::uintptr_t wrapper, std::int32_t& out);
 bool ReadPrimitiveInt64(std::uintptr_t wrapper, std::int64_t& out);
 bool ReadPrimitiveVector3(std::uintptr_t wrapper, Vector3& out);
 
+// Loaded-class-table slot (module-relative). Uses rr::ClassTable::Slot while it
+// still validates; otherwise performs a one-off, cached AOB scan of .text for
+// the GetClassByIndex accessor and decodes the RIP-relative slot. This is the
+// last-resort path when a build shifts the metadata slot RVAs.
+std::uintptr_t ClassTableSlotRva();
+
 // Bounded, cached class-name lookup. Expensive; intended for one-off catalog
 // resolution, never for per-frame work.
 std::uintptr_t FindClassByName(const char* name, int maxIndex = 45000);

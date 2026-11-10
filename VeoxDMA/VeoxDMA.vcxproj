@@ -150,6 +150,7 @@
   <ItemGroup>
     <ClCompile Include="Esp\PlayerEsp.cpp" />
     <ClCompile Include="Esp\EspDraw.cpp" />
+    <ClCompile Include="Aim\AimController.cpp" />
     <ClCompile Include="Overlay\Overlay.cpp" />
     <ClCompile Include="Overlay\OverlayNotify.cpp" />
     <ClCompile Include="Main.cpp" />
@@ -176,6 +177,8 @@
     <ClCompile Include="Input\CtlState.cpp" />
     <ClCompile Include="Input\InputDevice.cpp" />
     <ClCompile Include="Input\InputManager.cpp" />
+    <ClCompile Include="Input\DeviceBackend.cpp" />
+    <ClCompile Include="Input\DeviceSession.cpp" />
     <ClCompile Include="ImGUI\imgui.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -200,6 +203,7 @@
     <ClInclude Include="Config\PlayerConfig.h" />
     <ClInclude Include="Config\OverlayConfig.h" />
     <ClInclude Include="Config\WorldConfig.h" />
+    <ClInclude Include="Config\AimConfig.h" />
     <ClInclude Include="Esp\PlayerEsp.h" />
     <ClInclude Include="Esp\WorldEsp.h" />
     <ClInclude Include="Esp\EspDraw.h" />
@@ -236,6 +240,9 @@
     <ClInclude Include="Input\HidTable.h" />
     <ClInclude Include="Input\InputDevice.h" />
     <ClInclude Include="Input\InputManager.h" />
+    <ClInclude Include="Input\AimMotion.h" />
+    <ClInclude Include="Input\DeviceSession.h" />
+    <ClInclude Include="Aim\AimController.h" />
     <ClInclude Include="ImGUI\imgui.h" />
     <ClInclude Include="ImGUI\imgui_internal.h" />
     <ClInclude Include="ImGUI\imconfig.h" />

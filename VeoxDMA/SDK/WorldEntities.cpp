@@ -125,14 +125,30 @@ void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind k
 
 } // namespace
 
-bool Read(std::uintptr_t battleModel, State& out)
+bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
 {
     out = State{};
     if (battleModel <= 0x10000) return false;
 
-    std::uintptr_t world = RobRunMemory::ReadPtr(
-        battleModel + rr::BattleModel::WorldEntitiesModel);
-    if (!WorldLooksValid(world)) {
+    // Dump path: BattleEntitiesModel+0x60 -> WorldEntitiesModel.
+    std::uintptr_t world = 0;
+    if (battleEntities > 0x10000) {
+        const std::uintptr_t candidate = RobRunMemory::ReadPtr(
+            battleEntities + rr::BattleEntitiesModel::WorldEntitiesModel);
+        if (WorldLooksValid(candidate))
+            world = candidate;
+    }
+
+    // Header path kept as a validated fallback.
+    if (!world) {
+        const std::uintptr_t candidate = RobRunMemory::ReadPtr(
+            battleModel + rr::BattleModel::WorldEntitiesModel);
+        if (WorldLooksValid(candidate))
+            world = candidate;
+    }
+
+    // Legacy root.
+    if (!world) {
         const std::uintptr_t legacy = RobRunMemory::ReadPtr(
             battleModel + rr::BattleModel::WorldEntitiesModelLegacy);
         if (WorldLooksValid(legacy))

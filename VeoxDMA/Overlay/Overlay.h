@@ -42,6 +42,13 @@ int MonitorCount();
 int MonitorIndex();
 void SetMonitor(int index);
 
+struct MonitorInfo {
+	int width;
+	int height;
+	bool primary;
+};
+bool GetMonitorInfo(int index, MonitorInfo& out);
+
 void RequestExit();
 
 // Corner toast. Colour is IM_COL32-formatted; seconds is the lifetime.

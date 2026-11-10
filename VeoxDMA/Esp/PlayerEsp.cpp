@@ -178,6 +178,8 @@ void DrawPlayers()
 		if (ent.inVehicle) stateStr = "[V]";
 		else if (ent.isCrouching) stateStr = "[C]";
 		else if (ent.isSprinting) stateStr = "[S]";
+		if (ent.healthKnown && ent.criticalHealth > 0.f && ent.health <= ent.criticalHealth)
+			stateStr += "[!]";
 		if (!stateStr.empty())
 		{
 			ImVec2 textSize = MeasureText(stateStr.c_str(), fontSize);
