@@ -73,6 +73,9 @@ struct RigCacheEntry {
     Skeleton::RigLayout layout;
     std::vector<Skeleton::BoneSegment> bones;
     Skeleton::BonePoints points;
+    std::vector<Skeleton::Vec> curLocal;
+    std::vector<Skeleton::Vec> prevLocal;
+    bool prevLocalValid = false;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -787,6 +790,7 @@ static void UpdateInternal()
                 rig.layoutStamp = 0;
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
+                rig.prevLocalValid = false;
             }
 
             const bool dueForRebuild = !rig.layoutValid
@@ -803,11 +807,27 @@ static void UpdateInternal()
             }
 
             if (rig.layoutValid) {
-                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones, &rig.points) &&
-                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones, &rig.points)) {
-                    // Keep the last good pose for this pass; the layout is
-                    // rebuilt after a short backoff.
+                rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
+                if (!Skeleton::SampleLayout(rig.layout, DmaReadFresh, rig.bones, &rig.points, rig.curLocal.data()) &&
+                    !Skeleton::SampleLayout(rig.layout, DmaRead, rig.bones, &rig.points, rig.curLocal.data())) {
                     rig.layoutValid = false;
+                } else {
+                    constexpr float kStaleThreshSq = 0.0001f * 0.0001f;
+                    if (rig.prevLocalValid && rig.prevLocal.size() == rig.curLocal.size()) {
+                        for (std::size_t i = 0; i < rig.bones.size() && i < rig.layout.segments.size(); ++i) {
+                            const int pi = rig.layout.segments[i].first;
+                            const int ci = rig.layout.segments[i].second;
+                            auto distSq = [&](int idx) {
+                                float dx = rig.curLocal[idx].x - rig.prevLocal[idx].x;
+                                float dy = rig.curLocal[idx].y - rig.prevLocal[idx].y;
+                                float dz = rig.curLocal[idx].z - rig.prevLocal[idx].z;
+                                return dx*dx + dy*dy + dz*dz;
+                            };
+                            rig.bones[i].visible = distSq(pi) > kStaleThreshSq || distSq(ci) > kStaleThreshSq;
+                        }
+                    }
+                    rig.prevLocal.swap(rig.curLocal);
+                    rig.prevLocalValid = true;
                 }
             } else if (now - rig.fallbackStamp > 1000) {
                 // Last resort when the view layout cannot be validated: full

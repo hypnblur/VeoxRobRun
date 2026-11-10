@@ -8,12 +8,16 @@
 namespace Skeleton {
 
 struct Vec { float x, y, z; };
-struct BoneSegment { Vec a, b; };
+struct BoneSegment { Vec a, b; bool visible = true; };
 
 // Named aim points resolved from the same pose as the skeleton. Only valid when
 // the rig exposed all four anchors.
 struct BonePoints {
     Vec head{}, neck{}, chest{}, pelvis{};
+    Vec leftShoulder{}, leftElbow{}, leftHand{};
+    Vec rightShoulder{}, rightElbow{}, rightHand{};
+    Vec leftHip{}, leftKnee{}, leftFoot{};
+    Vec rightHip{}, rightKnee{}, rightFoot{};
     bool valid = false;
 };
 
@@ -33,6 +37,10 @@ struct RigLayout {
     std::int32_t neck = -1;
     std::int32_t chest = -1;
     std::int32_t pelvis = -1;
+    std::int32_t leftShoulder = -1, leftElbow = -1, leftHand = -1;
+    std::int32_t rightShoulder = -1, rightElbow = -1, rightHand = -1;
+    std::int32_t leftHip = -1, leftKnee = -1, leftFoot = -1;
+    std::int32_t rightHip = -1, rightKnee = -1, rightFoot = -1;
 };
 
 // Resolves and validates the layout from a BattleCharacterEntityView.
@@ -42,7 +50,8 @@ bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out)
 // Returns false when the layout is no longer valid (freed/moved array,
 // corrupt pose), in which case the caller should rebuild it.
 bool SampleLayout(const RigLayout& layout, const ReadFn& read,
-    std::vector<BoneSegment>& out, BonePoints* points = nullptr);
+    std::vector<BoneSegment>& out, BonePoints* points = nullptr,
+    Vec* localPosOut = nullptr);
 
 // Convenience one-shot extraction (layout build + sample).
 std::vector<BoneSegment> BuildFromView(

@@ -152,6 +152,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     if (!m.isOneOf(animation,{"CharacterAnimationView","AnimationView"}) ||
         !m.isOneOf(weapon,{"CharacterWithWeaponAnimationView","WithWeaponView"})) return false;
     std::vector<int> anchors;
+    int limbCounter = 0;
     for (U offset : {U(0x58),U(0x60),U(0x68),U(0x70)}) {
         U limb = m.ptr(weapon,offset);
         if (!m.isOneOf(limb,{"LimbIKView","LimbIK"})) return false;
@@ -169,6 +170,15 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                     !ancestor(index,other))) return false;
             limbIndices.push_back(index); anchors.push_back(index);
         }
+        if (limbIndices.size() >= 3) {
+            switch (limbCounter) {
+            case 0: out.leftShoulder = limbIndices[0]; out.leftElbow = limbIndices[1]; out.leftHand = limbIndices[2]; break;
+            case 1: out.rightShoulder = limbIndices[0]; out.rightElbow = limbIndices[1]; out.rightHand = limbIndices[2]; break;
+            case 2: out.leftHip = limbIndices[0]; out.leftKnee = limbIndices[1]; out.leftFoot = limbIndices[2]; break;
+            case 3: out.rightHip = limbIndices[0]; out.rightKnee = limbIndices[1]; out.rightFoot = limbIndices[2]; break;
+            }
+        }
+        ++limbCounter;
     }
     U head = m.ptr(animation,0x28), torso = m.ptr(animation,0x30);
     if (!m.isOneOf(head,{"CharacterHeadManualControlView","HeadView"}) ||
@@ -212,7 +222,8 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 }
 
 bool SampleLayout(const RigLayout& layout, const Read& read,
-    std::vector<BoneSegment>& out, BonePoints* points)
+    std::vector<BoneSegment>& out, BonePoints* points,
+    Vec* localPosOut)
 {
     const int count = layout.count;
     if (!read || layout.matrices <= 0x10000 || count < 2 ||
@@ -251,6 +262,11 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     }
     out = std::move(result);
 
+    if (localPosOut) {
+        for (int b = 0; b < count; ++b)
+            localPosOut[b] = local[b].p;
+    }
+
     if (points) {
         points->valid = layout.head >= 0 && layout.head < count &&
             layout.neck >= 0 && layout.neck < count &&
@@ -261,6 +277,21 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
             points->neck = world[layout.neck];
             points->chest = world[layout.chest];
             points->pelvis = world[layout.pelvis];
+            auto fill = [&](int idx, Vec& dst) {
+                if (idx >= 0 && idx < count) dst = world[idx];
+            };
+            fill(layout.leftShoulder, points->leftShoulder);
+            fill(layout.leftElbow, points->leftElbow);
+            fill(layout.leftHand, points->leftHand);
+            fill(layout.rightShoulder, points->rightShoulder);
+            fill(layout.rightElbow, points->rightElbow);
+            fill(layout.rightHand, points->rightHand);
+            fill(layout.leftHip, points->leftHip);
+            fill(layout.leftKnee, points->leftKnee);
+            fill(layout.leftFoot, points->leftFoot);
+            fill(layout.rightHip, points->rightHip);
+            fill(layout.rightKnee, points->rightKnee);
+            fill(layout.rightFoot, points->rightFoot);
         }
     }
     return true;

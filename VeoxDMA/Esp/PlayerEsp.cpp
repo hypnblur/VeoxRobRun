@@ -102,7 +102,10 @@ void DrawPlayers()
 			if (!Project(viewProjection, Vector3(seg.b.x, seg.b.y, seg.b.z),
 					screenW, screenH, b)) continue;
 
-			dl->AddLine(a, b, espCol, 2.f);
+			const ImU32 segCol = seg.visible
+				? IM_COL32(255, 50, 50, 255)
+				: IM_COL32(255, 255, 255, 255);
+			dl->AddLine(a, b, segCol, 2.f);
 			minX = std::min(minX, std::min(a.x, b.x));
 			maxX = std::max(maxX, std::max(a.x, b.x));
 			minY = std::min(minY, std::min(a.y, b.y));
