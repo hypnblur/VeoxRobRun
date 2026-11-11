@@ -407,6 +407,107 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     return true;
 }
 
+bool ProcessPoseData(const RigLayout& layout, const void* poseData,
+    std::size_t poseSize, std::vector<BoneSegment>& out,
+    BonePoints* points, BoneLocal* localOut)
+{
+    const int count = layout.count;
+    if (count < 2 ||
+        layout.parent.size() != static_cast<std::size_t>(count) ||
+        layout.selected.size() != static_cast<std::size_t>(count))
+        return false;
+    if (poseSize < static_cast<std::size_t>(count) * sizeof(TRS))
+        return false;
+
+    std::vector<TRS> local(static_cast<std::size_t>(count));
+    std::memcpy(local.data(), poseData, static_cast<std::size_t>(count) * sizeof(TRS));
+
+    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        auto& t = local[b];
+        const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
+        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
+            n < 0.5f || n > 1.5f)
+            continue;
+        const float inv = 1.0f/std::sqrt(n);
+        t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
+        boneValid[b] = 1;
+    }
+
+    std::vector<Vec> world(static_cast<std::size_t>(count));
+    std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        if (!boneValid[b]) continue;
+        Vec v = local[b].p;
+        bool ok = true;
+        for (int p = layout.parent[b]; p != -1; p = layout.parent[p]) {
+            if (!boneValid[p]) { ok = false; break; }
+            v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
+        }
+        if (!ok || !Finite(v)) continue;
+        world[b] = v;
+        worldValid[b] = 1;
+    }
+
+    std::vector<BoneSegment> result;
+    result.reserve(layout.segments.size());
+    for (const auto& seg : layout.segments) {
+        if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
+        result.push_back({world[seg.first], world[seg.second]});
+    }
+    out = std::move(result);
+
+    if (localOut) {
+        for (int b = 0; b < count; ++b) {
+            if (!boneValid[b]) {
+                localOut[b].position = {};
+                localOut[b].rotation[0] = 0.f;
+                localOut[b].rotation[1] = 0.f;
+                localOut[b].rotation[2] = 0.f;
+                localOut[b].rotation[3] = 1.f;
+                localOut[b].scale = {1.f, 1.f, 1.f};
+                continue;
+            }
+            localOut[b].position = local[b].p;
+            localOut[b].rotation[0] = local[b].q.x;
+            localOut[b].rotation[1] = local[b].q.y;
+            localOut[b].rotation[2] = local[b].q.z;
+            localOut[b].rotation[3] = local[b].q.w;
+            localOut[b].scale = local[b].s;
+        }
+    }
+
+    if (points) {
+        auto anchorOk = [&](int idx) {
+            return idx >= 0 && idx < count && worldValid[idx] != 0;
+        };
+        points->valid = anchorOk(layout.head) || anchorOk(layout.neck) ||
+            anchorOk(layout.chest) || anchorOk(layout.pelvis);
+        if (points->valid) {
+            auto fill = [&](int idx, Vec& dst) {
+                if (anchorOk(idx)) dst = world[idx];
+            };
+            fill(layout.head, points->head);
+            fill(layout.neck, points->neck);
+            fill(layout.chest, points->chest);
+            fill(layout.pelvis, points->pelvis);
+            fill(layout.leftShoulder, points->leftShoulder);
+            fill(layout.leftElbow, points->leftElbow);
+            fill(layout.leftHand, points->leftHand);
+            fill(layout.rightShoulder, points->rightShoulder);
+            fill(layout.rightElbow, points->rightElbow);
+            fill(layout.rightHand, points->rightHand);
+            fill(layout.leftHip, points->leftHip);
+            fill(layout.leftKnee, points->leftKnee);
+            fill(layout.leftFoot, points->leftFoot);
+            fill(layout.rightHip, points->rightHip);
+            fill(layout.rightKnee, points->rightKnee);
+            fill(layout.rightFoot, points->rightFoot);
+        }
+    }
+    return true;
+}
+
 std::vector<BoneSegment> BuildFromView(U view, const Read& read)
 {
     RigLayout layout;

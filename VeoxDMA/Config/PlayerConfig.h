@@ -23,6 +23,8 @@ public:
 	bool VisCheck = false;
 	D2D1::ColorF VisibleColour = Colour(255, 50, 50);  // animator active
 	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // pose frozen / culled
+	bool WallCheck = false;
+	std::string BvhPath = "city_colliders.bvh";
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -55,6 +57,8 @@ public:
         j[ConfigName][LIT("VisCheck")] = VisCheck;
         ToJsonColour(&j, LIT("VisibleColour"), &VisibleColour);
         ToJsonColour(&j, LIT("HiddenColour"), &HiddenColour);
+        j[ConfigName][LIT("WallCheck")] = WallCheck;
+        j[ConfigName][LIT("BvhPath")] = BvhPath;
 
         return j;
     }
@@ -79,6 +83,10 @@ public:
             VisCheck = j[ConfigName][LIT("VisCheck")];
         FromJsonColour(j, LIT("VisibleColour"), &VisibleColour);
         FromJsonColour(j, LIT("HiddenColour"), &HiddenColour);
+        if (j[ConfigName].contains(LIT("WallCheck")))
+            WallCheck = j[ConfigName][LIT("WallCheck")];
+        if (j[ConfigName].contains(LIT("BvhPath")))
+            BvhPath = j[ConfigName][LIT("BvhPath")];
     }
 };
 

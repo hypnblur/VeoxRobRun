@@ -62,6 +62,17 @@ bool SampleLayout(const RigLayout& layout, const ReadFn& read,
     std::vector<BoneSegment>& out, BonePoints* points = nullptr,
     BoneLocal* localOut = nullptr);
 
+// Processes pre-read pose data (from a scatter read) instead of issuing its
+// own DMA read. The buffer must hold layout.count * 48 bytes (one TRS per bone).
+bool ProcessPoseData(const RigLayout& layout, const void* poseData,
+    std::size_t poseSize, std::vector<BoneSegment>& out,
+    BonePoints* points = nullptr, BoneLocal* localOut = nullptr);
+
+// Returns the byte size of the pose buffer needed for a layout.
+inline std::size_t PoseDataSize(const RigLayout& layout) {
+    return static_cast<std::size_t>(layout.count) * 48; // sizeof(TRS)
+}
+
 // Convenience one-shot extraction (layout build + sample).
 std::vector<BoneSegment> BuildFromView(
     std::uint64_t view, const ReadFn& read);

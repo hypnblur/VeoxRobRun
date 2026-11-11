@@ -338,6 +338,67 @@ by the ESP so a valid result at screen `(0,0)` is not mistaken for a failure.
 
 ---
 
+## Memory aim (angle write)
+
+Memory Aim can write the camera block through one scatter transaction per step
+instead of moving the host cursor. The written fields are exactly the verified
+camera block above:
+
+| Address | Value written |
+| --- | --- |
+| `BattleCameraModel +0x1C` | orientation quaternion (x/y/z/w) |
+| `BattleCameraModel +0x2C` | look quaternion (same rotation) |
+| `BattleCameraModel +0x3C` | forward `V3` |
+| `BattleCameraModel +0x48` | right `V3` |
+| `BattleCameraModel +0x54` | up `V3` |
+
+```text
+forward = ( sin(yaw)*cos(pitch), -sin(pitch), cos(yaw)*cos(pitch) )
+right   = ( cos(yaw),             0,          -sin(yaw) )
+up      = ( sin(yaw)*sin(pitch),  cos(pitch),  cos(yaw)*sin(pitch) )
+```
+
+The quaternion is converted from that orthonormal basis (columns
+right/up/forward), not from Euler angles, so the quaternion and the basis
+vectors always describe the same rotation. Before writing, the live block must
+still pass a sanity check (unit orientation quaternion, unit forward vector) so
+a stale pointer from a scene change cannot scribble over reused memory.
+
+Each step is rate-limited to one write per 8 ms. The step size is an
+exponential response:
+
+```text
+response_ms = 12 + 8 * (1 + smoothness01 * 9)     // 20..92 ms
+gain        = 1 - exp(-dt / response_ms)
+vertical    = 1 - exp(-dt / (response_ms * 0.8))
+```
+
+The previous write is read back before the next one. `held` means the game kept
+the orientation; `reverted` means the camera controller rebuilt it from its own
+input state, in which case the reference aim's additional write targets are
+needed:
+
+| Reference target | Status |
+| --- | --- |
+| `LocalInputModel + yaw/pitch` | offset not in this SDK |
+| `BMPlayerRotationInput + x/y` | offset not in this SDK |
+| `LocalLookDirectionModel + value` | offset not in this SDK |
+
+The first attached aim tick writes `C:\VeoxDMA\RobRun\aim_fields.txt` with the
+runtime field tables of `BattleModel`, `BattleCharacterModel`,
+`BattleEntitiesModel` and `BattleCameraModel`. Those names and offsets are what
+should be used to wire the three missing targets instead of guessing.
+
+If the write is unavailable, the optional cursor fallback uses the closed-loop
+`SendInput` path. Target selection supports optional leading (velocity between
+two aim frames, capped at 65 ms / 0.55 m per m/s) and a hard lock that keeps the
+current target outside the FOV ring until it dies or leaves the distance limit.
+
+Implementation: `Aim::WriteCameraAngles`, `QuatFromBasis`, `ApplyLeading`,
+`Aim::Tick`.
+
+---
+
 ## Coordinates and distance
 
 **Live verified**
@@ -947,8 +1008,10 @@ If the DMA keyboard cannot be resolved, the aim key falls back to:
 1. the connected aim device's button report (`Base::Hardware::MouseDown`), then
 2. the host PC's `GetAsyncKeyState` (single-PC setups only).
 
-On a two-PC setup the DMA keyboard is the only correct source; Memory Aim also
-moves the host cursor, so use Hardware Aim to move the game PC.
+On a two-PC setup the DMA keyboard is the only correct source. Memory Aim now
+writes camera angles to the game PC over DMA (see "Memory aim"), so it works on
+a two-PC setup too; the SendInput cursor path is only the fallback when writes
+are unavailable. Hardware Aim remains the device-driven option.
 
 ---
 
@@ -968,7 +1031,8 @@ moves the host cursor, so use Hardware Aim to move the game PC.
 | `VeoxDMA/Esp/WorldEsp.cpp` | World-entity labels and markers |
 | `VeoxDMA/Esp/EspDraw.cpp` | Outlined text, boxes, stacked labels/bars |
 | `VeoxDMA/Overlay/*` | D3D11 overlay, notifications, monitor selection |
-| `VeoxDMA/Config/*` | Player, overlay and world ESP settings |
+| `VeoxDMA/Config/*` | Player, overlay, world and aim settings, `config.json` persistence |
+| `VeoxDMA/Aim/AimController.cpp` | Target pick, leading, smoothing, DMA angle write, cursor/hardware fallback |
 
 ## Known limits
 

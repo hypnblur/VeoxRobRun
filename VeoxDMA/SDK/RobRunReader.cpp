@@ -4,6 +4,8 @@
 #include "Il2Cpp.h"
 #include "Memory.h"
 #include "CameraFinder.h"
+#include "CollisionBVH.h"
+#include "ConfigInstance.h"
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -22,6 +24,9 @@ static std::uintptr_t cachedBattleModel = 0;
 static std::uintptr_t cachedBattleEntities = 0;
 static std::uintptr_t cachedCameraModel = 0;
 static std::uintptr_t cachedLocalCharacter = 0;
+static std::uintptr_t cachedLookDirectionModel = 0;
+static std::uintptr_t cachedLookDirDirect = 0;
+static std::uintptr_t cachedPlayerRotationInput = 0;
 static std::uintptr_t cachedUpdater = 0;
 
 static std::vector<EntityData> entities;
@@ -118,6 +123,9 @@ static std::atomic<std::uintptr_t> g_renderCameraModel{ 0 };
 static std::mutex g_freshCameraMutex;
 static RobRunCamera::CameraState g_freshCamera;
 
+static CollisionBVH::Scene g_bvhScene;
+static std::string g_bvhLoadedPath;
+
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
 {
     return TargetProcess.Read(static_cast<std::uintptr_t>(address), buffer, size);
@@ -143,6 +151,9 @@ static void PublishSnapshot()
     snapshot->battleModel = cachedBattleModel;
     snapshot->localCharacter = cachedLocalCharacter;
     snapshot->cameraModel = cachedCameraModel;
+    snapshot->lookDirectionModel = cachedLookDirectionModel;
+    snapshot->lookDirDirect = cachedLookDirDirect;
+    snapshot->playerRotationInput = cachedPlayerRotationInput;
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
     for (const auto& entity : entities) {
@@ -178,6 +189,9 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     cachedBattleEntities = 0;
     cachedCameraModel = 0;
     cachedLocalCharacter = 0;
+    cachedLookDirectionModel = 0;
+    cachedLookDirDirect = 0;
+    cachedPlayerRotationInput = 0;
     cachedUpdater = 0;
     failureCount = 0;
     updateCounter = 0;
@@ -201,6 +215,16 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         g_freshCamera = RobRunCamera::CameraState{};
+    }
+
+    if (!ConfigInstance.Player.BvhPath.empty() &&
+        ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
+    {
+        g_bvhScene = CollisionBVH::Scene{};
+        if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
+            g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
+        else
+            g_bvhLoadedPath.clear();
     }
 
     {
@@ -541,6 +565,9 @@ static void RevalidateSession()
         cachedBattleEntities = 0;
         cachedCameraModel = 0;
         cachedLocalCharacter = 0;
+        cachedLookDirectionModel = 0;
+        cachedLookDirDirect = 0;
+        cachedPlayerRotationInput = 0;
         cachedUpdater = 0;
         fingerprintFailures = 0;
         return;
@@ -649,9 +676,33 @@ static void UpdateInternal()
                 RobRunMemory::Finite(position)) {
                 localPosition = position;
             }
+
+            // Resolve LookDirectionModel for multi-model aim writes:
+            // BattleCharacterModel -> Data(0x40) -> CommonModel::LookDirection(0x30)
+            const std::uintptr_t dataModel = ReadPtr(
+                cachedLocalCharacter + rr::BattleCharacterModel::Data);
+            if (dataModel > 0x10000)
+                cachedLookDirectionModel = ReadPtr(
+                    dataModel + rr::CommonModel::LookDirection);
+            else
+                cachedLookDirectionModel = 0;
+
+            // BCM+0x70 LookDirectionModel (has _value, _yaw, _pitch)
+            cachedLookDirDirect = ReadPtr(cachedLocalCharacter + 0x70);
+            if (cachedLookDirDirect <= 0x10000) cachedLookDirDirect = 0;
+
+            // BattleModel+0x40 PlayerRotationInput
+            if (cachedBattleModel > 0x10000)
+                cachedPlayerRotationInput = ReadPtr(cachedBattleModel + 0x40);
+            else
+                cachedPlayerRotationInput = 0;
+            if (cachedPlayerRotationInput <= 0x10000) cachedPlayerRotationInput = 0;
         }
     } else {
         cachedLocalCharacter = 0;
+        cachedLookDirectionModel = 0;
+        cachedLookDirDirect = 0;
+        cachedPlayerRotationInput = 0;
     }
 
     // Drop a stale updater when the scene changes; otherwise the view
@@ -735,19 +786,39 @@ static void UpdateInternal()
     if (RobRunMemory::ReadDictInt(entityDictionary, entityEntries)) {
         entities.reserve(entityEntries.size());
 
+        struct TransformBlock {
+            Vector3 position;
+            float pitch;
+            float yaw;
+        };
+        static_assert(sizeof(TransformBlock) == 20, "transform block layout");
+
+        struct EntityWork {
+            std::int32_t entityId = 0;
+            std::uintptr_t characterModel = 0;
+            std::uintptr_t transform = 0;
+            std::uintptr_t blockAddress = 0;
+            TransformBlock block{};
+            bool positionValid = false;
+            bool needsPose = false;
+            std::size_t poseOffset = 0;
+            std::size_t poseSize = 0;
+        };
+
+        // ---------------------------------------------------------------
+        // Phase 1: Resolve characterModel and transform for each entity.
+        // These pointer chains are mostly cached, so sequential is fine.
+        // ---------------------------------------------------------------
+        std::vector<EntityWork> work;
+        work.reserve(entityEntries.size());
+
         for (const auto& entry : entityEntries) {
             const std::uintptr_t entityModel = entry.value;
             if (entityModel <= 0x10000) continue;
 
-            // New offset set: +0x20 is the client model, which is the view the
-            // player actually sees. Fall back to the simulated model and then
-            // to the entity itself when the client pointer is not usable.
             std::uintptr_t characterModel = ReadPtr(
                 entityModel + rr::BattleCharacterEntityModel::ClientModel);
 
-            // Class identity costs 3-4 reads. When the pointer is unchanged
-            // from the cached detail entry it was already validated, so skip
-            // the check on this pass.
             const auto cachedDetail = detailCache.find(entry.key);
             const bool clientModelKnown = characterModel > 0x10000 &&
                 cachedDetail != detailCache.end() &&
@@ -768,69 +839,162 @@ static void UpdateInternal()
                 characterModel + rr::BattleCharacterModel::CharacterTransformModel);
             if (transform <= 0x10000) continue;
 
-            // Position (x/y/z), pitch and yaw are contiguous. One uncached
-            // read per entity keeps the box on the character instead of
-            // returning a VMM-cached sample that can trail by hundreds of ms.
-            struct TransformBlock {
-                Vector3 position;
-                float pitch;
-                float yaw;
-            };
-            static_assert(sizeof(TransformBlock) == 20, "transform block layout");
-            TransformBlock block{};
-            const std::uintptr_t blockAddress =
-                transform + rr::CharacterTransformModel::Position;
-            if ((!RobRunMemory::ReadBytesFresh(blockAddress, &block, sizeof(block)) &&
-                 !RobRunMemory::ReadBytes(blockAddress, &block, sizeof(block))) ||
-                !RobRunMemory::Finite(block.position)) {
-                continue;
+            EntityWork w{};
+            w.entityId = entry.key;
+            w.characterModel = characterModel;
+            w.transform = transform;
+            w.blockAddress = transform + rr::CharacterTransformModel::Position;
+            work.push_back(w);
+        }
+
+        // ---------------------------------------------------------------
+        // Phase 2: Scatter-read all position blocks in one DMA call.
+        // ---------------------------------------------------------------
+        if (!work.empty()) {
+            auto scatter = TargetProcess.CreateScatterHandle();
+            if (scatter) {
+                for (auto& w : work)
+                    TargetProcess.AddScatterReadRequest(scatter,
+                        w.blockAddress, &w.block, sizeof(TransformBlock));
+                TargetProcess.ExecuteReadScatter(scatter);
+                TargetProcess.CloseScatterHandle(scatter);
             }
+        }
+
+        for (auto& w : work) {
+            if (!RobRunMemory::Finite(w.block.position) ||
+                (w.block.position.x == 0.f && w.block.position.y == 0.f &&
+                 w.block.position.z == 0.f))
+            {
+                w.block = TransformBlock{};
+                if (!RobRunMemory::ReadBytesFresh(w.blockAddress, &w.block,
+                        sizeof(TransformBlock)) &&
+                    !RobRunMemory::ReadBytes(w.blockAddress, &w.block,
+                        sizeof(TransformBlock)))
+                {
+                    w.positionValid = false;
+                    continue;
+                }
+            }
+            w.positionValid = RobRunMemory::Finite(w.block.position);
+        }
+
+        // ---------------------------------------------------------------
+        // Phase 3: Build entity data, refresh details, resolve layouts,
+        //          and collect pose-read requests.
+        // ---------------------------------------------------------------
+        const std::uint64_t now = GetTickCount64();
+
+        std::vector<unsigned char> poseBuf;
+        std::size_t poseTotal = 0;
+
+        for (auto& w : work) {
+            if (!w.positionValid) continue;
+
+            const auto viewIt = views.find(w.entityId);
+            const std::uintptr_t viewPtr =
+                (viewIt != views.end()) ? viewIt->second : 0;
+
+            auto& rig = rigCache[w.entityId];
+            if (rig.view != viewPtr) {
+                rig.view = viewPtr;
+                rig.layoutValid = false;
+                rig.layoutStamp = 0;
+                rig.bones.clear();
+                rig.points = Skeleton::BonePoints{};
+                rig.prevLocalValid = false;
+                rig.lastMotionTick = 0;
+                rig.animatorActive = true;
+            }
+
+            const bool dueForRebuild = !rig.layoutValid
+                ? (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250)
+                : (now - rig.layoutStamp >= 2000);
+            if (dueForRebuild) {
+                rig.layoutStamp = now;
+                rig.layoutValid = viewPtr > 0x10000 &&
+                    Skeleton::BuildLayoutFromView(viewPtr, DmaRead, rig.layout);
+                if (!rig.layoutValid) {
+                    rig.bones.clear();
+                    rig.points = Skeleton::BonePoints{};
+                }
+            }
+
+            if (rig.layoutValid) {
+                const std::size_t sz = Skeleton::PoseDataSize(rig.layout);
+                w.needsPose = true;
+                w.poseOffset = poseTotal;
+                w.poseSize = sz;
+                poseTotal += sz;
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Phase 4: Scatter-read all pose matrices in one DMA call.
+        // ---------------------------------------------------------------
+        poseBuf.resize(poseTotal, 0);
+
+        if (poseTotal > 0) {
+            auto scatter = TargetProcess.CreateScatterHandle();
+            if (scatter) {
+                for (auto& w : work) {
+                    if (!w.needsPose) continue;
+                    auto& rig = rigCache[w.entityId];
+                    TargetProcess.AddScatterReadRequest(scatter,
+                        rig.layout.matrices,
+                        poseBuf.data() + w.poseOffset, w.poseSize);
+                }
+                TargetProcess.ExecuteReadScatter(scatter);
+                TargetProcess.CloseScatterHandle(scatter);
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Phase 5: Process poses, build entities, wall check.
+        // ---------------------------------------------------------------
+        for (auto& w : work) {
+            if (!w.positionValid) continue;
 
             EntityData entity{};
-            entity.entityId = entry.key;
-            entity.position = block.position;
-            entity.characterModel = characterModel;
-            if (std::isfinite(block.pitch)) entity.pitch = block.pitch;
-            if (std::isfinite(block.yaw)) {
-                entity.yaw = block.yaw;
-                const float cosPitch = std::cos(block.pitch);
+            entity.entityId = w.entityId;
+            entity.position = w.block.position;
+            entity.characterModel = w.characterModel;
+            if (std::isfinite(w.block.pitch)) entity.pitch = w.block.pitch;
+            if (std::isfinite(w.block.yaw)) {
+                entity.yaw = w.block.yaw;
+                const float cosPitch = std::cos(w.block.pitch);
                 entity.lookDirection = Vector3(
-                    std::sin(block.yaw) * cosPitch,
-                    std::sin(block.pitch),
-                    std::cos(block.yaw) * cosPitch);
+                    std::sin(w.block.yaw) * cosPitch,
+                    std::sin(w.block.pitch),
+                    std::cos(w.block.yaw) * cosPitch);
             }
 
-            const std::uint64_t now = GetTickCount64();
-
-            // Identity, health, role and vehicle state change slowly and are
-            // expensive to read (primitive wrappers + strings). Refresh them a
-            // few times per second and reuse the values in between.
             auto& detail = detailCache[entity.entityId];
-            if (detail.characterModel != characterModel || now - detail.stamp > 500) {
+            if (detail.characterModel != w.characterModel ||
+                now - detail.stamp > 500)
+            {
                 detail = DetailCacheEntry{};
-                detail.characterModel = characterModel;
+                detail.characterModel = w.characterModel;
                 detail.stamp = now;
 
                 EntityData scratch{};
                 scratch.entityId = entity.entityId;
 
                 const std::uintptr_t deadWrapper = ReadPtr(
-                    characterModel + rr::BattleCharacterModel::IsDeadWrapper);
+                    w.characterModel + rr::BattleCharacterModel::IsDeadWrapper);
                 bool dead = false;
                 if (Il2Cpp::ReadPrimitiveBool(deadWrapper, dead))
                     detail.isDead = dead;
 
-                ReadHealth(characterModel, scratch);
+                ReadHealth(w.characterModel, scratch);
                 detail.health = scratch.health;
                 detail.maxHealth = scratch.maxHealth;
                 detail.criticalHealth = scratch.criticalHealth;
                 detail.healthKnown = scratch.healthKnown;
 
-                // Keep the wrapper-derived death flag as the default; the
-                // CommonData read below may override it when available.
                 scratch.isDead = detail.isDead;
-                ReadRoleAndVehicle(characterModel, scratch);
-                ReadCommonState(characterModel, scratch);
+                ReadRoleAndVehicle(w.characterModel, scratch);
+                ReadCommonState(w.characterModel, scratch);
                 detail.isDead = scratch.isDead;
                 detail.isSprinting = scratch.isSprinting;
                 detail.isCrouching = scratch.isCrouching;
@@ -838,7 +1002,7 @@ static void UpdateInternal()
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
 
-                const auto slotIt = slots.find(entry.key);
+                const auto slotIt = slots.find(w.entityId);
                 if (slotIt != slots.end()) {
                     ReadSlotIdentity(slotIt->second, scratch);
                     detail.nickname = std::move(scratch.nickname);
@@ -859,55 +1023,27 @@ static void UpdateInternal()
             entity.nickname = detail.nickname;
             entity.clanTag = detail.clanTag;
 
-            const auto viewIt = views.find(entry.key);
+            const auto viewIt = views.find(w.entityId);
             if (viewIt != views.end())
                 entity.viewPtr = viewIt->second;
 
-            // Resolve the rig layout once per view, then sample the animation
-            // pose every pass. Sampling is a single read of the matrix array,
-            // so bones stay in sync with the position instead of being served
-            // from a 100+ ms cache.
-            auto& rig = rigCache[entry.key];
-            if (rig.view != entity.viewPtr) {
-                rig.view = entity.viewPtr;
-                rig.layoutValid = false;
-                rig.layoutStamp = 0;
-                rig.bones.clear();
-                rig.points = Skeleton::BonePoints{};
-                rig.prevLocalValid = false;
-                rig.lastMotionTick = 0;
-                rig.animatorActive = true;
-            }
+            auto& rig = rigCache[w.entityId];
 
-            const bool dueForRebuild = !rig.layoutValid
-                ? (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250)
-                : (now - rig.layoutStamp >= 2000);
-            if (dueForRebuild) {
-                rig.layoutStamp = now;
-                rig.layoutValid = entity.viewPtr > 0x10000 &&
-                    Skeleton::BuildLayoutFromView(entity.viewPtr, DmaRead, rig.layout);
-                if (!rig.layoutValid) {
-                    rig.bones.clear();
-                    rig.points = Skeleton::BonePoints{};
-                }
-            }
-
-            if (rig.layoutValid) {
+            if (w.needsPose) {
                 rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
-                // Only fresh poses are accepted. A cached read can trail the
-                // fresh transform position by the VMM cache window, which is
-                // exactly what made skeletons drift behind the body. Retry once
-                // so a single transient device error does not freeze the pose.
-                bool sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
+                bool sampled = Skeleton::ProcessPoseData(rig.layout,
+                    poseBuf.data() + w.poseOffset, w.poseSize,
                     rig.bones, &rig.points, rig.curLocal.data());
-                if (!sampled)
-                    sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                        rig.bones, &rig.points, rig.curLocal.data());
 
                 if (!sampled) {
-                    // Keep the last good pose for this pass instead of
-                    // substituting cached data. Only a persistent failure means
-                    // the matrix array moved, so the layout is rebuilt then.
+                    sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
+                        rig.bones, &rig.points, rig.curLocal.data());
+                    if (!sampled)
+                        sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
+                            rig.bones, &rig.points, rig.curLocal.data());
+                }
+
+                if (!sampled) {
                     if (rig.poseFailures == 0)
                         rig.poseFailureSince = now;
                     ++rig.poseFailures;
@@ -920,12 +1056,8 @@ static void UpdateInternal()
                     }
                 } else {
                     rig.poseFailures = 0;
-                    // Any meaningful change in local TRS across the whole
-                    // skeleton means the animator is still updating this
-                    // character. Quaternions are compared with |dot| because
-                    // q and -q describe the same rotation.
-                    constexpr float kPosEpsSq  = 1.0e-6f; // (1 mm)^2
-                    constexpr float kRotEps    = 1.0e-6f; // ~0.16 degrees
+                    constexpr float kPosEpsSq  = 1.0e-6f;
+                    constexpr float kRotEps    = 1.0e-6f;
                     constexpr float kScaleEps  = 1.0e-6f;
                     constexpr std::uint64_t kFreezeMs = 150;
 
@@ -959,9 +1091,6 @@ static void UpdateInternal()
 
                     if (moved)
                         rig.lastMotionTick = now;
-                    // Treat a character as visible until its pose has been
-                    // frozen for a short while. This debounces single stale
-                    // reads without flickering.
                     rig.animatorActive = rig.lastMotionTick == 0 ||
                         now - rig.lastMotionTick < kFreezeMs;
 
@@ -971,9 +1100,7 @@ static void UpdateInternal()
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
                 }
-            } else if (now - rig.fallbackStamp > 1000) {
-                // Last resort when the view layout cannot be validated: full
-                // extraction, at most once per second.
+            } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
                 rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
@@ -982,6 +1109,28 @@ static void UpdateInternal()
             entity.bones = rig.bones;
             entity.bonePoints = rig.points;
             entity.visible = rig.animatorActive;
+
+            if (ConfigInstance.Player.WallCheck && g_bvhScene.valid &&
+                cameraState.valid && entity.entityId != localEntityId)
+            {
+                const CollisionBVH::Float3 cam = {
+                    cameraState.position.x,
+                    cameraState.position.y,
+                    cameraState.position.z };
+                bool anyVisible = false;
+                for (auto& seg : entity.bones) {
+                    const CollisionBVH::Float3 mid = {
+                        (seg.a.x + seg.b.x) * 0.5f,
+                        (seg.a.y + seg.b.y) * 0.5f,
+                        (seg.a.z + seg.b.z) * 0.5f };
+                    if (CollisionBVH::IsOccluded(g_bvhScene, cam, mid))
+                        seg.visible = false;
+                    else
+                        anyVisible = true;
+                }
+                if (!anyVisible)
+                    entity.visible = false;
+            }
 
             if (entity.entityId == localEntityId && localPosition.IsZero() &&
                 !entity.position.IsZero()) {
@@ -1013,6 +1162,17 @@ static void UpdateInternal()
 
 void Update()
 {
+    if (!g_bvhScene.valid &&
+        !ConfigInstance.Player.BvhPath.empty() &&
+        ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
+    {
+        g_bvhScene = CollisionBVH::Scene{};
+        if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
+            g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
+        else
+            g_bvhLoadedPath.clear();
+    }
+
     UpdateInternal();
     PublishSnapshot();
 }
@@ -1118,6 +1278,15 @@ bool ProjectWorld(const Matrix4x4& viewProjection, const Vector3& world,
     int screenWidth, int screenHeight, Vector2& out)
 {
     return RobRunCamera::WorldToScreen(viewProjection, world, screenWidth, screenHeight, out);
+}
+
+BvhStatus GetBvhStatus()
+{
+    BvhStatus s;
+    s.loaded = g_bvhScene.valid;
+    s.nodeCount = (uint32_t)g_bvhScene.nodes.size();
+    s.triCount = (uint32_t)g_bvhScene.tris.size();
+    return s;
 }
 
 } // namespace RobRunReader

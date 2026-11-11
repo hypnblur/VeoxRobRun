@@ -1,9 +1,16 @@
 #pragma once
 #include "pch.h"
 
-// Aim settings for the Device Connections tab. Memory Aim drives the host
-// cursor through SendInput (relative counts); Hardware Aim submits the same
-// motion to the selected KMBox/Makcu/Ferrum device through DeviceSession.
+// Aim settings for the Device Connections tab.
+//
+// Memory Aim writes the camera orientation/look quaternion and basis vectors
+// into BattleCameraModel over DMA (one scatter transaction per step), which
+// works on a two-PC setup. If the device rejects writes, or the game rebuilds
+// the camera from its own input state, the optional cursor fallback drives the
+// host cursor through SendInput instead.
+//
+// Hardware Aim submits the same pixel error to the selected KMBox/Makcu/Ferrum
+// device through DeviceSession.
 class AimConfig
 {
 	std::string ConfigName;
@@ -23,13 +30,30 @@ public:
 	int MaxDistance = 400;  // metres
 	bool ShowFov = true;
 	// Draws the live aim state (key source, candidate count, chosen target,
-	// pixel delta and the reason the loop stopped) in the top-left corner.
+	// pixel delta, write verdict and the reason the loop stopped) in the
+	// top-left corner.
 	bool ShowDebug = true;
 	// Only consider characters whose animator is still evaluating (the same
 	// per-character state the ESP colours as "visible"). This is an
 	// animator/cull check, not wall occlusion: read-only DMA cannot tell
 	// whether a bone is behind geometry.
 	bool VisibleBonesOnly = false;
+
+	// --- Memory Aim write path -----------------------------------------
+	// Write the camera angles through DMA instead of moving the local cursor.
+	bool MemoryWrite = true;
+	// If the write is unavailable, fall back to SendInput cursor movement so
+	// aim still does something on a single-PC setup.
+	bool CursorFallback = true;
+	// 0 = derive from Smoothness (20..92 ms). Any other value is an explicit
+	// exponential response time in milliseconds.
+	int ResponseMs = 0;
+
+	// --- Target leading / sticky lock ----------------------------------
+	bool Prediction = false;
+	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
+	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
+	bool HardLock = false;        // keep the current target outside the FOV
 
 	json ToJson()
 	{
@@ -44,6 +68,13 @@ public:
 		j[ConfigName][LIT("ShowFov")] = ShowFov;
 		j[ConfigName][LIT("ShowDebug")] = ShowDebug;
 		j[ConfigName][LIT("VisibleBonesOnly")] = VisibleBonesOnly;
+		j[ConfigName][LIT("MemoryWrite")] = MemoryWrite;
+		j[ConfigName][LIT("CursorFallback")] = CursorFallback;
+		j[ConfigName][LIT("ResponseMs")] = ResponseMs;
+		j[ConfigName][LIT("Prediction")] = Prediction;
+		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
+		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
+		j[ConfigName][LIT("HardLock")] = HardLock;
 		return j;
 	}
 
@@ -71,5 +102,19 @@ public:
 			ShowDebug = j[ConfigName][LIT("ShowDebug")];
 		if (j[ConfigName].contains(LIT("VisibleBonesOnly")))
 			VisibleBonesOnly = j[ConfigName][LIT("VisibleBonesOnly")];
+		if (j[ConfigName].contains(LIT("MemoryWrite")))
+			MemoryWrite = j[ConfigName][LIT("MemoryWrite")];
+		if (j[ConfigName].contains(LIT("CursorFallback")))
+			CursorFallback = j[ConfigName][LIT("CursorFallback")];
+		if (j[ConfigName].contains(LIT("ResponseMs")))
+			ResponseMs = j[ConfigName][LIT("ResponseMs")];
+		if (j[ConfigName].contains(LIT("Prediction")))
+			Prediction = j[ConfigName][LIT("Prediction")];
+		if (j[ConfigName].contains(LIT("PredictionStrength")))
+			PredictionStrength = j[ConfigName][LIT("PredictionStrength")];
+		if (j[ConfigName].contains(LIT("PredictionYScale")))
+			PredictionYScale = j[ConfigName][LIT("PredictionYScale")];
+		if (j[ConfigName].contains(LIT("HardLock")))
+			HardLock = j[ConfigName][LIT("HardLock")];
 	}
 };

@@ -179,6 +179,25 @@ static void DrawPanelESP()
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
+	ImGui::Text("Wall Occlusion (Offline Raycast)");
+	ImGui::Checkbox("Enable WallCheck", &ConfigInstance.Player.WallCheck);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Casts rays from the camera to each bone against pre-built\n"
+			"collision geometry. Bones behind walls are marked hidden.\n\n"
+			"Requires a .bvh file built by convert_scene.py.");
+	{
+		auto status = RobRunReader::GetBvhStatus();
+		if (status.loaded)
+			ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f),
+				"BVH: %u nodes, %u tris", status.nodeCount, status.triCount);
+		else
+			ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f), "BVH: not loaded");
+	}
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
 	ImGui::Text("World ESP");
 
 	ImGui::Checkbox("Enable World ESP", &ConfigInstance.World.Enabled);
@@ -304,10 +323,28 @@ static void DrawPanelDevices()
 	ImGui::SetNextItemWidth(180.f);
 	ImGui::Combo("Aim type", &ConfigInstance.Aim.AimType, aimTypeNames,
 		IM_ARRAYSIZE(aimTypeNames));
-	if (ConfigInstance.Aim.AimType == 0)
-		ImGui::TextDisabled("Closed-loop SendInput relative movement.");
-	else
+	if (ConfigInstance.Aim.AimType == 0) {
+		ImGui::Checkbox("Write camera angles (DMA)", &ConfigInstance.Aim.MemoryWrite);
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip(
+				"Writes the camera orientation, look quaternion and basis vectors\n"
+				"directly into BattleCameraModel through one scatter write per step.\n\n"
+				"This works on a two-PC DMA setup. If the game rebuilds the camera\n"
+				"from its own input state every frame, the debug HUD reports the\n"
+				"write as \"reverted\" and you can fall back to cursor movement.");
+		if (ConfigInstance.Aim.MemoryWrite) {
+			ImGui::Checkbox("Cursor fallback", &ConfigInstance.Aim.CursorFallback);
+			if (ImGui::IsItemHovered())
+				ImGui::SetTooltip(
+					"If the DMA write is rejected (or the camera model is missing),\n"
+					"drive the local cursor with SendInput instead. Only useful when\n"
+					"the game runs on this PC.");
+		} else {
+			ImGui::TextDisabled("Closed-loop SendInput relative movement.");
+		}
+	} else {
 		ImGui::TextDisabled("Motion is sent to the selected device.");
+	}
 
 	static const char* boneNames[] = { "Head", "Neck", "Chest", "Pelvis" };
 	ImGui::SetNextItemWidth(180.f);
@@ -325,6 +362,27 @@ static void DrawPanelDevices()
 	ImGui::SliderInt("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
 	ImGui::SliderInt("FOV", &ConfigInstance.Aim.Fov, 5, 180, "%d deg");
 
+	ImGui::Spacing();
+	ImGui::Checkbox("Target prediction", &ConfigInstance.Aim.Prediction);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Leads a moving target using the velocity between two aim frames.\n"
+			"Lead is capped at 65 ms and 0.55 m per m/s, so a target that\n"
+			"teleports or desyncs cannot pull the aim point far away.");
+	if (ConfigInstance.Aim.Prediction) {
+		ImGui::Indent();
+		ImGui::SliderInt("Lead strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%d%%");
+		ImGui::SliderInt("Vertical lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%d%%");
+		ImGui::Unindent();
+	}
+
+	ImGui::Checkbox("Hard lock", &ConfigInstance.Aim.HardLock);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Keep the current target even when it leaves the FOV ring, so a\n"
+			"strafing player does not cause the pick to jump to someone else.\n"
+			"The lock drops when the target dies or leaves the distance limit.");
+
 	ImGui::SetNextItemWidth(180.f);
 	ImGui::Combo("Aim key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(),
 		Aim::KeyCount());
@@ -341,6 +399,10 @@ static void DrawPanelDevices()
 		ImGui::TextDisabled("Targets %d/%d | target %d | delta %.1f, %.1f | device %s",
 			info.candidates, info.entities, info.target, info.dx, info.dy,
 			info.deviceReady ? "ready" : "not ready");
+		if (info.writeMode)
+			ImGui::TextDisabled("Write: %s (%s) | yaw %.1f pitch %.1f | %.0fm | lead %dms",
+				info.writeOk ? "ok" : "fail", info.writeState,
+				info.tgtYawDeg, info.tgtPitchDeg, info.distance, info.leadMs);
 		if (info.menuOpen)
 			ImGui::TextDisabled("Aim is paused while this menu is open.");
 	}

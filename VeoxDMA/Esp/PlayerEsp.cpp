@@ -104,7 +104,7 @@ void DrawPlayers()
 					screenW, screenH, b)) continue;
 
 			ImU32 segCol = espCol;
-			if (ConfigInstance.Player.VisCheck) {
+			if (ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck) {
 				segCol = seg.visible
 					? D2DColorToImU32(ConfigInstance.Player.VisibleColour)
 					: D2DColorToImU32(ConfigInstance.Player.HiddenColour);

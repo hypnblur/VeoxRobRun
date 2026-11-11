@@ -58,6 +58,9 @@ struct Snapshot {
     std::uintptr_t battleModel = 0;
     std::uintptr_t localCharacter = 0;
     std::uintptr_t cameraModel = 0;
+    std::uintptr_t lookDirectionModel = 0;
+    std::uintptr_t lookDirDirect = 0;
+    std::uintptr_t playerRotationInput = 0;
     std::uint32_t failureCount = 0;
     // Coverage diagnostics: how many players actually produced drawable bones
     // or a usable named aim pose this pass. These make "some skeletons do not
@@ -121,5 +124,12 @@ Vector2 WorldToScreen(const Matrix4x4& viewProjection, const Vector3& world,
 // (0,0) is not confused with a behind-camera failure.
 bool ProjectWorld(const Matrix4x4& viewProjection, const Vector3& world,
     int screenWidth, int screenHeight, Vector2& out);
+
+struct BvhStatus {
+    bool loaded = false;
+    uint32_t nodeCount = 0;
+    uint32_t triCount = 0;
+};
+BvhStatus GetBvhStatus();
 
 } // namespace RobRunReader

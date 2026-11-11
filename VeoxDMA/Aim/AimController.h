@@ -23,6 +23,16 @@ struct DebugInfo {
 	int stepY = 0;
 	int aimType = 0;
 	bool deviceReady = false;
+	// DMA angle write (Memory Aim). writeState is a short verdict from the
+	// post-write readback: "held" means the game kept our orientation,
+	// "reverted" means the camera controller rebuilt it from its own input.
+	bool writeMode = false;
+	bool writeOk = false;
+	const char* writeState = "-";
+	float tgtYawDeg = 0.f;
+	float tgtPitchDeg = 0.f;
+	float distance = 0.f;
+	int leadMs = 0;
 };
 
 void Tick();

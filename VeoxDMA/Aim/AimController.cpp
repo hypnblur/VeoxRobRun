@@ -2,12 +2,20 @@
 #include "AimController.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
+#include "RobRunSDK.h"
+#include "RobRunMemory.h"
+#include "Il2Cpp.h"
+#include "Memory.h"
 #include "DeviceSession.h"
 #include "InputManager.h"
 #include "Overlay.h"
 #include "imgui.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <unordered_map>
 
 namespace Aim {
 
@@ -24,10 +32,43 @@ const char* const kKeyNames[] = {
 };
 constexpr int kKeyCount = static_cast<int>(sizeof(kKeys) / sizeof(kKeys[0]));
 
+// The camera block is written as one scatter transaction. Ten milliseconds is
+// slow enough to keep the read worker fed and still fast enough that the
+// exponential response (20-90 ms) does not look steppy.
+constexpr std::uint64_t kWriteIntervalMs = 16;
+
 std::uint64_t g_observation = 0;
 int g_lastTarget = -1;
 bool g_wasAiming = false;
 DebugInfo g_debug{};
+
+// Smoothing state. Reset whenever the aim key is released or the target
+// changes, so a new pick starts from its own angle instead of sweeping across
+// the world from the previous target.
+bool g_smoothInit = false;
+float g_curYaw = 0.f;
+float g_curPitch = 0.f;
+float g_carryYaw = 0.f;
+float g_carryPitch = 0.f;
+int g_smoothTarget = -1;
+std::uint64_t g_lastWriteTick = 0;
+Vector3 g_writtenForward{};
+bool g_haveWrittenForward = false;
+bool g_writeHealthy = false;
+const char* g_lastVerdict = "-";
+
+// Previous feet position per entity, used for target leading. Kept on the
+// render thread because the reader snapshot only carries one position.
+struct MotionSample {
+    Vector3 position{};
+    std::uint64_t tickMs = 0;
+    bool valid = false;
+};
+std::unordered_map<int, MotionSample> g_motion;
+
+struct AimQuat {
+    float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
+};
 
 bool Held(int keyIndex, const char** source)
 {
@@ -143,11 +184,360 @@ float ConeRadiusPixels(const Matrix4x4& viewProjection, float fovDeg,
         VerticalFovFromProjection(viewProjection, fallbackVerticalFov), height);
 }
 
+// -------- angle helpers (same convention as the reference memory aim) ------
+// Unity left-handed: positive pitch is nose-down, so forward.y = -sin(pitch).
+
+// Rotation matrix (columns right/up/forward) -> quaternion. The reference built
+// the quaternion from Euler angles directly, but its z term did not reproduce
+// its own forward vector, so the game's quaternion is derived from the same
+// basis we write instead. This keeps the block internally consistent.
+AimQuat QuatFromBasis(const Vector3& right, const Vector3& up, const Vector3& forward)
+{
+    const float m00 = right.x, m01 = up.x, m02 = forward.x;
+    const float m10 = right.y, m11 = up.y, m12 = forward.y;
+    const float m20 = right.z, m21 = up.z, m22 = forward.z;
+    const float trace = m00 + m11 + m22;
+
+    AimQuat q;
+    if (trace > 0.f) {
+        const float s = std::sqrt(trace + 1.f) * 2.f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.f + m00 - m11 - m22) * 2.f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.f + m11 - m00 - m22) * 2.f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.f + m22 - m00 - m11) * 2.f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+
+    const float length = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    if (length > 1.0e-6f) {
+        q.x /= length; q.y /= length; q.z /= length; q.w /= length;
+    }
+    return q;
+}
+
+Vector3 EulerToForward(float yaw, float pitch)
+{
+    const float cp = std::cos(pitch), sp = std::sin(pitch);
+    return Vector3(std::sin(yaw) * cp, -sp, std::cos(yaw) * cp);
+}
+
+Vector3 RightFromYaw(float yaw)
+{
+    return Vector3(std::cos(yaw), 0.f, -std::sin(yaw));
+}
+
+Vector3 UpFromYawPitch(float yaw, float pitch)
+{
+    return Vector3(
+        std::sin(yaw) * std::sin(pitch),
+        std::cos(pitch),
+        std::cos(yaw) * std::sin(pitch));
+}
+
+// Response time in milliseconds for the exponential gain. Smoothness 1 is the
+// fastest step the reference exposes, 100 the slowest.
+float ResponseForSmoothness(int smoothness)
+{
+    const float s = std::clamp((static_cast<float>(smoothness) - 1.f) / 99.f, 0.f, 1.f);
+    const float step = 1.f + s * 9.f; // 1..10, matches the reference mapping
+    return 12.f + 8.f * step;
+}
+
+// Writes the camera orientation, look quaternion and orthonormal basis in one
+// scatter transaction. Returns false when the device rejected the write, which
+// lets the caller fall back to cursor movement.
+struct WriteOutcome {
+    bool attempted = false;
+    bool scatter = false;
+};
+
+bool WriteCameraAngles(std::uintptr_t cameraModel, float yaw, float pitch,
+    WriteOutcome& outcome, Vector3* liveForwardOut = nullptr,
+    std::uintptr_t lookDirModel = 0, std::uintptr_t lookDirDirect = 0,
+    std::uintptr_t playerRotInput = 0)
+{
+    outcome = WriteOutcome{};
+    if (cameraModel <= 0x10000) return false;
+
+    Vector3 forward = EulerToForward(yaw, pitch);
+    Vector3 right = RightFromYaw(yaw);
+    Vector3 up = UpFromYawPitch(yaw, pitch);
+    AimQuat q = QuatFromBasis(right, up, forward);
+
+    // Batch both validation reads into one scatter instead of two separate
+    // ReadBytesFresh calls. Each ReadBytesFresh is a full device transaction;
+    // batching halves the DMA traffic and avoids starving the reader worker.
+    float liveQuat[4]{};
+    Vector3 liveForward{};
+    {
+        VMMDLL_SCATTER_HANDLE rh = TargetProcess.CreateScatterHandle();
+        if (!rh) return false;
+        TargetProcess.AddScatterReadRequest(rh,
+            cameraModel + rr::BattleCameraModelOffsets::Orientation,
+            liveQuat, sizeof(liveQuat));
+        TargetProcess.AddScatterReadRequest(rh,
+            cameraModel + rr::BattleCameraModelOffsets::Forward,
+            &liveForward, sizeof(liveForward));
+        TargetProcess.ExecuteReadScatter(rh);
+        TargetProcess.CloseScatterHandle(rh);
+    }
+    if (liveForwardOut) *liveForwardOut = liveForward;
+    const float quatLength2 = liveQuat[0] * liveQuat[0] + liveQuat[1] * liveQuat[1] +
+        liveQuat[2] * liveQuat[2] + liveQuat[3] * liveQuat[3];
+    if (!std::isfinite(quatLength2) || std::fabs(quatLength2 - 1.f) > 0.15f) return false;
+    if (!Finite(liveForward)) return false;
+    const float forwardLength = std::sqrt(
+        liveForward.x * liveForward.x + liveForward.y * liveForward.y +
+        liveForward.z * liveForward.z);
+    if (!std::isfinite(forwardLength) || forwardLength < 0.9f || forwardLength > 1.1f)
+        return false;
+
+    outcome.attempted = true;
+
+    VMMDLL_SCATTER_HANDLE handle = TargetProcess.CreateScatterHandle();
+    if (handle) {
+        TargetProcess.AddScatterWriteRequest(handle,
+            cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
+        TargetProcess.AddScatterWriteRequest(handle,
+            cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q));
+        TargetProcess.AddScatterWriteRequest(handle,
+            cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward));
+        TargetProcess.AddScatterWriteRequest(handle,
+            cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right));
+        TargetProcess.AddScatterWriteRequest(handle,
+            cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up));
+        // Write the forward vector to the LookDirection model so the game's
+        // input pipeline reads the same direction we set on the camera.
+        if (lookDirModel > 0x10000)
+            TargetProcess.AddScatterWriteRequest(handle,
+                lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
+        // BCM+0x70 LookDirectionModel: _value(+0x10), _yaw(+0x1C), _pitch(+0x20)
+        if (lookDirDirect > 0x10000) {
+            TargetProcess.AddScatterWriteRequest(handle,
+                lookDirDirect + 0x10, &forward, sizeof(forward));
+            TargetProcess.AddScatterWriteRequest(handle,
+                lookDirDirect + 0x1C, &yaw, sizeof(yaw));
+            TargetProcess.AddScatterWriteRequest(handle,
+                lookDirDirect + 0x20, &pitch, sizeof(pitch));
+        }
+        // BattleModel+0x40 PlayerRotationInput: fields TBD, dump next cycle
+        // (placeholder — will wire once field offsets are discovered)
+        TargetProcess.ExecuteScatterWrite(handle);
+        TargetProcess.CloseScatterHandle(handle);
+        outcome.scatter = true;
+        return true;
+    }
+
+    bool ok = TargetProcess.Write(
+        cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
+    ok = TargetProcess.Write(
+        cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q)) && ok;
+    ok = TargetProcess.Write(
+        cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward)) && ok;
+    ok = TargetProcess.Write(
+        cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right)) && ok;
+    ok = TargetProcess.Write(
+        cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up)) && ok;
+    if (lookDirModel > 0x10000)
+        TargetProcess.Write(
+            lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
+    if (lookDirDirect > 0x10000) {
+        TargetProcess.Write(lookDirDirect + 0x10, &forward, sizeof(forward));
+        TargetProcess.Write(lookDirDirect + 0x1C, &yaw, sizeof(yaw));
+        TargetProcess.Write(lookDirDirect + 0x20, &pitch, sizeof(pitch));
+    }
+    return ok;
+}
+
+// Verdict on the previous write: if the camera controller rebuilds the basis
+// from its own input state, the forward vector no longer matches what we wrote.
+// This is a diagnostic, not a failure path.
+const char* CompareToWritten(const Vector3& written, const Vector3& live)
+{
+    if (!Finite(live)) return "unreadable";
+    const float length = std::sqrt(live.x * live.x + live.y * live.y + live.z * live.z);
+    if (!std::isfinite(length) || length < 1.0e-3f) return "unreadable";
+    const float dot = (written.x * live.x + written.y * live.y + written.z * live.z) / length;
+    return dot > 0.99f ? "held" : "reverted";
+}
+
+// Reference leading: sample window 4..100 ms, speed gate 0.35..12 m/s, lead
+// capped at 65 ms / response time / 0.55 m per m/s. Y lead is scaled
+// separately because jump and crouch arcs do not extrapolate linearly.
+bool ApplyLeading(const Vector3& point, const Vector3& position,
+    const Vector3& previous, std::uint64_t sampleMs, float responseMs,
+    int strengthPercent, int yScalePercent, Vector3& out, int& leadMs)
+{
+    if (sampleMs == 0) return false;
+    const float seconds = static_cast<float>(sampleMs) * 0.001f;
+    const float vx = (position.x - previous.x) / seconds;
+    const float vy = (position.y - previous.y) / seconds;
+    const float vz = (position.z - previous.z) / seconds;
+
+    const float speedXZ = std::hypot(vx, vz);
+    const float speedY = std::fabs(vy);
+    if (speedXZ < 0.35f && speedY < 0.35f) return false;
+
+    const float speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+    if (!std::isfinite(speed) || speed > 12.f) return false;
+
+    float lead = std::min(0.065f, responseMs * 0.001f);
+    lead = std::min(lead, 0.55f / speed);
+    const float strength = std::clamp(static_cast<float>(strengthPercent) / 100.f, 0.f, 2.f);
+    lead *= strength;
+    const float yScale = std::clamp(static_cast<float>(yScalePercent) / 100.f, 0.f, 1.f);
+
+    out = Vector3(
+        point.x + vx * lead,
+        point.y + vy * lead * yScale,
+        point.z + vz * lead);
+    leadMs = static_cast<int>(lead * 1000.f);
+    return true;
+}
+
 } // namespace
 
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
 DebugInfo GetDebug() { return g_debug; }
+
+// The reference memory aim also writes the local input model, the player
+// rotation-input model and the local look-direction model. Those offsets are
+// not in the current SDK, so dump the runtime field tables once and let the
+// caller wire them from real metadata instead of guessing.
+static void DumpAimFieldsOnce()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    std::error_code ec;
+    std::filesystem::create_directories(L"C:\\VeoxDMA\\RobRun", ec);
+    std::ofstream out("C:\\VeoxDMA\\RobRun\\aim_fields.txt", std::ios::trunc);
+    if (!out) return;
+
+    struct Entry {
+        int index;
+        const char* label;
+    };
+    const Entry entries[] = {
+        { rr::ClassIndex::BattleModel, "BattleModel" },
+        { rr::ClassIndex::BattleCharacterModel, "BattleCharacterModel" },
+        { rr::ClassIndex::BattleEntitiesModel, "BattleEntitiesModel" },
+        { rr::ClassIndex::BattleCameraModel, "BattleCameraModel" },
+    };
+
+    out << "ROB RUN field dump (read-only metadata walk)\n\n";
+    for (const auto& entry : entries) {
+        const std::uintptr_t klass = Il2Cpp::GetClassByIndex(entry.index);
+        out << "=== " << entry.label << " index=" << entry.index
+            << " klass=0x" << std::hex << klass << std::dec << " ===\n";
+        if (!klass) {
+            out << "  unresolved\n\n";
+            continue;
+        }
+        for (const auto& field : Il2Cpp::Fields(klass)) {
+            out << "  +0x" << std::hex << field.offset << std::dec
+                << "  type=" << static_cast<int>(field.typeCode)
+                << "  " << field.name << "\n";
+        }
+        out << "\n";
+    }
+
+    out << "Camera block written by the aim: Position 0x10, Orientation 0x1C,\n"
+           "LookQuat 0x2C, Forward 0x3C, Right 0x48, Up 0x54.\n\n";
+
+    // Walk the local character hierarchy to discover InputModel and
+    // BMPlayerRotationInput class names and their field offsets.
+    const auto snapshot = RobRunReader::GetSnapshot();
+    if (snapshot && snapshot->localCharacter > 0x10000) {
+        out << "=== Local character sub-model scan ===\n"
+            << "localCharacter = 0x" << std::hex << snapshot->localCharacter << std::dec << "\n";
+        auto ReadPtr = [](std::uintptr_t addr) -> std::uintptr_t {
+            std::uintptr_t val = 0;
+            if (addr > 0x10000)
+                RobRunMemory::ReadBytes(addr, &val, sizeof(val));
+            return val;
+        };
+        auto DumpModelAt = [&](std::uintptr_t ptr, const char* label) {
+            if (ptr <= 0x10000) return;
+            const std::uintptr_t klass = ReadPtr(ptr + rr::Object::klass);
+            if (klass <= 0x10000) return;
+            char name[128]{}; char ns[128]{};
+            const std::uintptr_t namePtr = ReadPtr(klass + rr::Klass::name_ptr);
+            const std::uintptr_t nsPtr = ReadPtr(klass + rr::Klass::namespace_ptr);
+            if (namePtr > 0x10000) RobRunMemory::ReadBytes(namePtr, name, sizeof(name) - 1);
+            if (nsPtr > 0x10000) RobRunMemory::ReadBytes(nsPtr, ns, sizeof(ns) - 1);
+            out << "  " << label << " ptr=0x" << std::hex << ptr << std::dec
+                << "  class=" << ns << "::" << name << "\n";
+            for (const auto& field : Il2Cpp::Fields(klass)) {
+                out << "    +0x" << std::hex << field.offset << std::dec
+                    << "  type=" << static_cast<int>(field.typeCode)
+                    << "  " << field.name << "\n";
+            }
+        };
+        // Walk known offsets on BattleCharacterModel that might host input models.
+        const std::uintptr_t lc = snapshot->localCharacter;
+        const std::uintptr_t offsets[] = {
+            0x70, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8,
+            0x228, 0x300
+        };
+        for (auto off : offsets) {
+            char label[64];
+            std::snprintf(label, sizeof(label), "BCM+0x%X", (unsigned)off);
+            DumpModelAt(ReadPtr(lc + off), label);
+        }
+        // BattleModel+0x40 PlayerRotationInput
+        if (snapshot->battleModel > 0x10000)
+            DumpModelAt(ReadPtr(snapshot->battleModel + 0x40), "BM+0x40 (PlayerRotationInput)");
+
+        // Also check PlayerEntityModel::Client (0x18 on the player entity)
+        if (snapshot->battleModel > 0x10000) {
+            const std::uintptr_t battleEnts = ReadPtr(
+                snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
+            const std::uintptr_t localPlayer = ReadPtr(
+                battleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel);
+            if (localPlayer > 0x10000) {
+                DumpModelAt(ReadPtr(localPlayer + rr::PlayerEntityModel::Client), "PlayerEntity.Client");
+                const std::uintptr_t client = ReadPtr(localPlayer + rr::PlayerEntityModel::Client);
+                if (client > 0x10000) {
+                    const std::uintptr_t clientOffsets[] = {
+                        0x28, 0x30, 0x38, 0x40, 0x298
+                    };
+                    for (auto off : clientOffsets) {
+                        char label[64];
+                        std::snprintf(label, sizeof(label), "Client+0x%X", (unsigned)off);
+                        DumpModelAt(ReadPtr(client + off), label);
+                    }
+                }
+            }
+        }
+        out << "\n";
+    }
+    out << "LookDirectionModel (CommonModel) = 0x" << std::hex
+        << (snapshot ? snapshot->lookDirectionModel : 0) << std::dec << "\n";
+    out << "LookDirDirect (BCM+0x70) = 0x" << std::hex
+        << (snapshot ? snapshot->lookDirDirect : 0) << std::dec << "\n";
+    out << "PlayerRotationInput (BM+0x40) = 0x" << std::hex
+        << (snapshot ? snapshot->playerRotationInput : 0) << std::dec << "\n";
+}
 
 void Tick()
 {
@@ -165,15 +555,26 @@ void Tick()
         }
     };
 
+    const auto resetSmoothing = [] {
+        g_smoothInit = false;
+        g_carryYaw = g_carryPitch = 0.f;
+        g_lastWriteTick = 0;
+        g_haveWrittenForward = false;
+        g_writeHealthy = false;
+        g_lastVerdict = "-";
+    };
+
     if (!cfg.Enabled) {
         g_debug.reason = "aim disabled";
         stopAiming();
+        resetSmoothing();
         g_lastTarget = -1;
         return;
     }
     if (Overlay::MenuOpen()) {
         g_debug.reason = "menu open";
         stopAiming();
+        resetSmoothing();
         g_lastTarget = -1;
         return;
     }
@@ -184,6 +585,9 @@ void Tick()
     if (!g_debug.held) {
         g_debug.reason = "aim key not held";
         stopAiming();
+        resetSmoothing();
+        g_lastTarget = -1;
+        g_motion.clear();
         return;
     }
 
@@ -194,6 +598,11 @@ void Tick()
         return;
     }
     g_debug.entities = static_cast<int>(snapshot->entities.size());
+
+    // One-off, cheap enough to do on the first attached tick: write the runtime
+    // field tables that the reference memory aim writes through, so the missing
+    // input/rotation offsets can be taken from real metadata.
+    DumpAimFieldsOnce();
 
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     const int width = static_cast<int>(display.x);
@@ -224,12 +633,20 @@ void Tick()
 
     bool found = false;
     int bestId = -1;
+    Vector3 bestPoint{};
     Vector2 bestScreen{};
     float bestScore = 0.f;
+    int bestLeadMs = 0;
     // If the local transform could not be resolved the origin would reject
     // every target on distance, so only apply the range filter when we have a
     // real local position.
     const bool haveLocalPosition = !snapshot->localPosition.IsZero();
+    const std::uint64_t nowMs = GetTickCount64();
+    const float responseMs = ResponseForSmoothness(cfg.Smoothness);
+
+    // Bounded sample table: entity ids churn across matches, so drop stale
+    // history rather than letting the map grow for the whole session.
+    if (g_motion.size() > 512) g_motion.clear();
 
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
@@ -241,7 +658,27 @@ void Tick()
         if (haveLocalPosition &&
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 
-        const Vector3 point = BonePoint(ent, cfg.TargetBone);
+        Vector3 point = BonePoint(ent, cfg.TargetBone);
+        int leadMs = 0;
+
+        // Leading uses the previous feet sample. Update the sample after the
+        // prediction step so the next tick differentiates against this one.
+        MotionSample& sample = g_motion[ent.entityId];
+        if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
+            const std::uint64_t sampleMs = nowMs - sample.tickMs;
+            if (sampleMs >= 4 && sampleMs <= 100) {
+                Vector3 lead;
+                if (ApplyLeading(point, ent.position, sample.position,
+                        sampleMs, responseMs, cfg.PredictionStrength,
+                        cfg.PredictionYScale, lead, leadMs)) {
+                    point = lead;
+                }
+            }
+        }
+        sample.position = ent.position;
+        sample.tickMs = nowMs;
+        sample.valid = true;
+
         Vector2 screen{};
         if (!RobRunReader::ProjectWorld(viewProjection, point, width, height, screen))
             continue;
@@ -249,8 +686,21 @@ void Tick()
         const float dx = screen.x - centerX;
         const float dy = screen.y - centerY;
         const float distance = std::hypot(dx, dy);
-        if (distance > radiusPixels) continue;
+
+        // Hard lock: the sticky target keeps its pick even when it leaves the
+        // FOV ring, mirroring the reference's locked-target behaviour.
+        const bool isLocked = cfg.HardLock && ent.entityId == g_lastTarget;
+        if (!isLocked && distance > radiusPixels) continue;
         ++g_debug.candidates;
+
+        if (isLocked) {
+            found = true;
+            bestId = ent.entityId;
+            bestScreen = screen;
+            bestPoint = point;
+            bestLeadMs = leadMs;
+            break;
+        }
 
         float score = distance;
         if (ent.entityId == g_lastTarget) score *= 0.75f;
@@ -258,23 +708,134 @@ void Tick()
             found = true;
             bestId = ent.entityId;
             bestScreen = screen;
+            bestPoint = point;
             bestScore = score;
+            bestLeadMs = leadMs;
         }
     }
 
     if (!found) {
         g_debug.reason = "no target in FOV";
         stopAiming();
+        resetSmoothing();
         g_lastTarget = -1;
         return;
     }
     g_lastTarget = bestId;
     g_debug.target = bestId;
+    g_debug.leadMs = bestLeadMs;
 
     const float dx = bestScreen.x - centerX;
     const float dy = bestScreen.y - centerY;
     g_debug.dx = dx;
     g_debug.dy = dy;
+
+    // Target angles are measured from the camera, not the local player: the
+    // camera is what actually has to turn.
+    const Vector3 origin = snapshot->camera.valid
+        ? snapshot->camera.position : snapshot->localPosition;
+    if (origin.IsZero()) {
+        g_debug.reason = "no camera origin";
+        stopAiming();
+        return;
+    }
+    g_debug.distance = Distance(origin, bestPoint);
+
+    const Vector3 dir = Vector3(
+        bestPoint.x - origin.x,
+        bestPoint.y - origin.y,
+        bestPoint.z - origin.z);
+    const float length = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
+    if (length < 1.0e-4f) {
+        g_debug.reason = "zero aim vector";
+        return;
+    }
+    const float horizontal = std::hypot(dir.x, dir.z);
+    const float targetYaw = std::atan2(dir.x, dir.z);
+    const float targetPitch = std::atan2(-dir.y, horizontal);
+
+    // -------- Memory Aim: write camera angles over DMA -------------------
+    if (cfg.AimType == 0 && cfg.MemoryWrite) {
+        stopAiming();
+        g_debug.writeMode = true;
+
+        const std::uintptr_t cameraModel = snapshot->cameraModel;
+        if (cameraModel <= 0x10000) {
+            g_writeHealthy = false;
+            g_lastVerdict = "no camera model";
+        } else {
+            const std::uint64_t now = GetTickCount64();
+            if (g_lastWriteTick == 0 || now - g_lastWriteTick >= kWriteIntervalMs) {
+                const float dtMs = g_lastWriteTick == 0
+                    ? 16.f
+                    : std::clamp(static_cast<float>(now - g_lastWriteTick), 0.5f, 24.f);
+                g_lastWriteTick = now;
+
+                const float gain = 1.f - std::exp(-dtMs / responseMs);
+                const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
+
+                if (!g_smoothInit || g_smoothTarget != bestId) {
+                    g_curYaw = targetYaw;
+                    g_curPitch = targetPitch;
+                    g_carryYaw = g_carryPitch = 0.f;
+                    g_smoothInit = true;
+                    g_smoothTarget = bestId;
+                } else {
+                    float dYaw = targetYaw - g_curYaw;
+                    while (dYaw > kPi) dYaw -= 2.f * kPi;
+                    while (dYaw < -kPi) dYaw += 2.f * kPi;
+                    const float dPitch = targetPitch - g_curPitch;
+
+                    if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
+                    if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
+
+                    const float stepYaw = dYaw * gain + g_carryYaw;
+                    const float stepPitch = dPitch * verticalGain + g_carryPitch;
+                    g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
+                    g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
+                    g_curYaw += stepYaw;
+                    g_curPitch += stepPitch;
+                }
+
+                WriteOutcome outcome;
+                Vector3 liveForward{};
+                g_writeHealthy = WriteCameraAngles(cameraModel, g_curYaw, g_curPitch, outcome, &liveForward,
+                    snapshot->lookDirectionModel, snapshot->lookDirDirect,
+                    snapshot->playerRotationInput);
+                g_debug.tgtYawDeg = g_curYaw * 180.f / kPi;
+                g_debug.tgtPitchDeg = g_curPitch * 180.f / kPi;
+
+                // Verdict on the previous write using the forward the scatter
+                // validation read fetched (before the new write replaced it).
+                if (g_haveWrittenForward && Finite(liveForward))
+                    g_lastVerdict = CompareToWritten(g_writtenForward, liveForward);
+
+                if (!g_writeHealthy) {
+                    g_lastVerdict = "write failed";
+                } else {
+                    g_writtenForward = EulerToForward(g_curYaw, g_curPitch);
+                    g_haveWrittenForward = true;
+                    if (g_lastVerdict[0] == '-' || g_lastVerdict[0] == '\0')
+                        g_lastVerdict = "writing";
+                }
+            }
+        }
+
+        g_debug.writeOk = g_writeHealthy;
+        g_debug.writeState = g_lastVerdict;
+
+        if (g_writeHealthy) {
+            g_debug.reason = "writing angles (memory)";
+            return;
+        }
+
+        if (!cfg.CursorFallback) {
+            g_debug.reason = "memory write unavailable";
+            return;
+        }
+        // Fall through to the cursor path below.
+    }
+
     if (std::hypot(dx, dy) < 0.5f) {
         g_debug.reason = "on target";
         return;
@@ -288,10 +849,10 @@ void Tick()
     settings.deadzonePixels = 0.5f;
 
     if (cfg.AimType == 0) {
-        // Memory Aim: closed-loop relative cursor movement on this PC. Each
-        // frame re-reads the target so the gain does not need to match the
-        // game's sensitivity exactly. This only reaches a game running on the
-        // same PC; a two-PC DMA setup needs Hardware Aim.
+        // Cursor fallback: closed-loop relative movement on this PC. Each frame
+        // re-reads the target so the gain does not need to match the game's
+        // sensitivity exactly. This only reaches a game running on the same PC;
+        // a two-PC DMA setup needs Hardware Aim or the angle write above.
         stopAiming();
         const auto step = Base::AimMotion::Step({ dx, dy }, settings, dt);
         const int mx = static_cast<int>(std::lround(step.x));
@@ -300,7 +861,7 @@ void Tick()
         g_debug.stepY = my;
         if (mx != 0 || my != 0) {
             SendRelative(mx, my);
-            g_debug.reason = "moving (memory)";
+            g_debug.reason = "moving (cursor)";
         } else {
             g_debug.reason = "inside deadzone";
         }
@@ -371,15 +932,18 @@ void DrawDebug()
         d.menuOpen ? "open" : "closed", d.held ? "held" : "up", d.keySource);
     std::snprintf(lines[2], sizeof(lines[2]), "Entities: %d  Candidates: %d  Target: %d",
         d.entities, d.candidates, d.target);
-    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d",
-        d.dx, d.dy, d.stepX, d.stepY);
+    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d  Lead: %dms",
+        d.dx, d.dy, d.stepX, d.stepY, d.leadMs);
     std::snprintf(lines[4], sizeof(lines[4]), "Type: %s  Device: %s",
         d.aimType == 0 ? "memory" : "hardware", d.deviceReady ? "ready" : "not ready");
-    std::snprintf(lines[5], sizeof(lines[5]), "Reason: %s", d.reason);
+    std::snprintf(lines[5], sizeof(lines[5]), "Write: %s  %s  yaw %.1f pitch %.1f dist %.0fm",
+        d.writeMode ? (d.writeOk ? "ok" : "fail") : "off",
+        d.writeState, d.tgtYawDeg, d.tgtPitchDeg, d.distance);
+    std::snprintf(lines[6], sizeof(lines[6]), "Reason: %s", d.reason);
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 origin(12.f, 12.f);
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 7; ++i) {
         dl->AddText(ImVec2(origin.x + 1.f, origin.y + i * 15.f + 1.f),
             IM_COL32(0, 0, 0, 200), lines[i]);
         dl->AddText(ImVec2(origin.x, origin.y + i * 15.f),
