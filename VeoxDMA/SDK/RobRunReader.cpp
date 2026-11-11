@@ -30,8 +30,15 @@ static std::uintptr_t cachedPlayerRotationInput = 0;
 static std::uintptr_t cachedUpdater = 0;
 
 static std::vector<EntityData> entities;
-static RobRunWorld::State worldState;
-static RobRunInventory::State inventoryState;
+// World/inventory state is built on a separate worker thread and published as
+// immutable shared objects. Copying the whole state into every snapshot (and,
+// worse, reading it inline in the player pass) made the ESP freeze while the
+// dictionaries were walked.
+static std::mutex g_worldMutex;
+static std::shared_ptr<const RobRunWorld::State> g_worldState =
+    std::make_shared<RobRunWorld::State>();
+static std::shared_ptr<const RobRunInventory::State> g_inventoryState =
+    std::make_shared<RobRunInventory::State>();
 static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
@@ -123,6 +130,19 @@ static std::atomic<std::uintptr_t> g_renderCameraModel{ 0 };
 static std::mutex g_freshCameraMutex;
 static RobRunCamera::CameraState g_freshCamera;
 
+// Native Unity main-camera view-projection, re-read on the render thread.
+// Memory aim rewrites the managed BattleCameraModel block, so building the ESP
+// matrix from that block makes the overlay project with a camera the game never
+// rendered (skeletons drift/lag behind the character). The native Camera
+// component is the camera the GPU actually used, so it is preferred whenever it
+// is readable; the managed block stays as the fallback.
+static std::mutex g_nativeCameraMutex;
+static Matrix4x4 g_nativeView{};
+static Matrix4x4 g_nativeProjection{};
+static bool g_nativeViewProjectionValid = false;
+static float g_nativePositionError = -1.f;
+static float g_nativeForwardDot = -1.f;
+
 static CollisionBVH::Scene g_bvhScene;
 static std::string g_bvhLoadedPath;
 
@@ -142,8 +162,11 @@ static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
     snapshot->entities = entities;
-    snapshot->world = worldState;
-    snapshot->inventory = inventoryState;
+    {
+        std::lock_guard<std::mutex> lock(g_worldMutex);
+        snapshot->world = g_worldState;
+        snapshot->inventory = g_inventoryState;
+    }
     snapshot->camera = cameraState;
     snapshot->localEntityId = localEntityId;
     snapshot->localPosition = localPosition;
@@ -156,6 +179,7 @@ static void PublishSnapshot()
     snapshot->playerRotationInput = cachedPlayerRotationInput;
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
+    snapshot->stampMs = GetTickCount64();
     for (const auto& entity : entities) {
         if (!entity.bones.empty()) ++snapshot->skeletonCount;
         if (entity.bonePoints.valid) ++snapshot->poseCount;
@@ -201,8 +225,11 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     entities.clear();
     detailCache.clear();
     rigCache.clear();
-    worldState = RobRunWorld::State{};
-    inventoryState = RobRunInventory::State{};
+    {
+        std::lock_guard<std::mutex> lock(g_worldMutex);
+        g_worldState = std::make_shared<RobRunWorld::State>();
+        g_inventoryState = std::make_shared<RobRunInventory::State>();
+    }
     worldRefreshStamp = 0;
     inventoryRefreshStamp = 0;
     cameraState = RobRunCamera::CameraState{};
@@ -242,6 +269,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 Sleep(1);
         }
     });
+
 }
 
 static std::uintptr_t ReadPtr(std::uintptr_t address)
@@ -596,8 +624,6 @@ static void UpdateInternal()
 
     if (!gaBase) return;
 
-    const std::uint64_t passNow = GetTickCount64();
-
     ++updateCounter;
     if ((updateCounter % 120) == 0)
         RevalidateSession();
@@ -618,9 +644,12 @@ static void UpdateInternal()
         cachedBattleModel = ResolveBattleModel(cachedGame);
 
     if (!cachedBattleModel) {
-        worldState = RobRunWorld::State{};
+        {
+            std::lock_guard<std::mutex> lock(g_worldMutex);
+            g_worldState = std::make_shared<RobRunWorld::State>();
+            g_inventoryState = std::make_shared<RobRunInventory::State>();
+        }
         worldRefreshStamp = 0;
-        inventoryState = RobRunInventory::State{};
         inventoryRefreshStamp = 0;
         ++failureCount;
         return;
@@ -688,12 +717,12 @@ static void UpdateInternal()
                 cachedLookDirectionModel = 0;
 
             // BCM+0x70 LookDirectionModel (has _value, _yaw, _pitch)
-            cachedLookDirDirect = ReadPtr(cachedLocalCharacter + 0x70);
+            cachedLookDirDirect = ReadPtr(cachedLocalCharacter + rr::BattleCharacterModel::LookDirection);
             if (cachedLookDirDirect <= 0x10000) cachedLookDirDirect = 0;
 
             // BattleModel+0x40 PlayerRotationInput
             if (cachedBattleModel > 0x10000)
-                cachedPlayerRotationInput = ReadPtr(cachedBattleModel + 0x40);
+                cachedPlayerRotationInput = ReadPtr(cachedBattleModel + rr::BattleModel::PlayerRotationInput);
             else
                 cachedPlayerRotationInput = 0;
             if (cachedPlayerRotationInput <= 0x10000) cachedPlayerRotationInput = 0;
@@ -1141,18 +1170,25 @@ static void UpdateInternal()
         }
     }
 
-    // World markers and inventory are expensive (many dictionaries and
-    // per-item reads) and change slowly. Refresh them on their own cadence so
-    // the player pass stays short and positions/bones stay fresh.
+    const std::uint64_t passNow = GetTickCount64();
+
     if (cachedBattleModel > 0x10000 &&
         (worldRefreshStamp == 0 || passNow - worldRefreshStamp >= 250)) {
-        RobRunWorld::Read(cachedBattleModel, cachedBattleEntities, worldState);
+        auto state = std::make_shared<RobRunWorld::State>();
+        if (RobRunWorld::Read(cachedBattleModel, cachedBattleEntities, *state)) {
+            std::lock_guard<std::mutex> lock(g_worldMutex);
+            g_worldState = std::move(state);
+        }
         worldRefreshStamp = passNow;
     }
 
     if (cachedLocalCharacter > 0x10000 &&
         (inventoryRefreshStamp == 0 || passNow - inventoryRefreshStamp >= 1000)) {
-        RobRunInventory::Read(cachedLocalCharacter, inventoryState, readCatalog.load());
+        auto state = std::make_shared<RobRunInventory::State>();
+        if (RobRunInventory::Read(cachedLocalCharacter, *state, readCatalog.load())) {
+            std::lock_guard<std::mutex> lock(g_worldMutex);
+            g_inventoryState = std::move(state);
+        }
         inventoryRefreshStamp = passNow;
     }
 
@@ -1229,17 +1265,66 @@ void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
 void RefreshCamera()
 {
+    // Managed camera first. Its position is never written by aim, so it is the
+    // anchor used to identify which tagged Unity camera is the real render
+    // camera; its orientation may be our aim angle, so the native camera is
+    // only accepted when it is the same physical camera.
+    RobRunCamera::CameraState managed{};
     const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
-    if (!model) return;
-    auto camera = RobRunCamera::Read(model);
-    if (!camera.valid) return;
-    std::lock_guard<std::mutex> lock(g_freshCameraMutex);
-    g_freshCamera = camera;
+    if (model) {
+        managed = RobRunCamera::Read(model);
+        if (managed.valid) {
+            std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+            g_freshCamera = managed;
+        }
+    }
+    if (!managed.valid) {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        managed = g_freshCamera;
+    }
+    if (!managed.valid) {
+        const auto snapshot = GetSnapshot();
+        if (snapshot) managed = snapshot->camera;
+    }
+
+    CameraFinder::CameraData native;
+    if (ConfigInstance.Player.NativeEspCamera)
+        native = CameraFinder::GetCameraMatricesValidated(
+            managed.position, managed.forward, managed.verticalFov);
+
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        g_nativeViewProjectionValid = native.valid;
+        if (native.valid) {
+            g_nativeView = native.view;
+            g_nativeProjection = native.projection;
+        }
+        g_nativePositionError = native.positionError;
+        g_nativeForwardDot = native.forwardDot;
+    }
 }
 
 bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
+
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        if (g_nativeViewProjectionValid) {
+            // Keep the rendered camera's view and vertical FOV, but rebuild the
+            // horizontal scale for the overlay surface. When the overlay and
+            // the game render target share an aspect (borderless fullscreen)
+            // this is bit-for-bit the matrix the game used.
+            Matrix4x4 projection = g_nativeProjection;
+            const float aspect =
+                static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
+            const float yScale = projection.matrix[1][1];
+            if (std::isfinite(yScale) && yScale > 0.f && aspect > 0.f)
+                projection.matrix[0][0] = yScale / aspect;
+            out = g_nativeView * projection;
+            return true;
+        }
+    }
 
     RobRunCamera::CameraState camera;
     {
@@ -1263,6 +1348,38 @@ bool GetFallbackViewProjection(Matrix4x4& out)
     if (!snapshot || !snapshot->fallbackViewProjectionValid) return false;
     out = snapshot->fallbackViewProjection;
     return true;
+}
+
+const char* GetViewProjectionSource()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        if (g_nativeViewProjectionValid) return "native";
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        if (g_freshCamera.valid) return "managed";
+    }
+    const auto snapshot = GetSnapshot();
+    if (snapshot && snapshot->camera.valid) return "snapshot";
+    return "none";
+}
+
+CameraDebug GetCameraDebug()
+{
+    CameraDebug debug;
+    debug.nativeEnabled = ConfigInstance.Player.NativeEspCamera;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        debug.nativeValid = g_nativeViewProjectionValid;
+        debug.positionError = g_nativePositionError;
+        debug.forwardDot = g_nativeForwardDot;
+    }
+    const auto snapshot = GetSnapshot();
+    if (snapshot && snapshot->stampMs != 0)
+        debug.snapshotAgeMs =
+            static_cast<std::int64_t>(GetTickCount64() - snapshot->stampMs);
+    return debug;
 }
 
 Vector2 WorldToScreen(const Matrix4x4& viewProjection, const Vector3& world,

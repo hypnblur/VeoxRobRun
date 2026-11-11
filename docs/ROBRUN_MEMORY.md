@@ -336,6 +336,55 @@ Unity's column-major native matrices and matches `WorldToScreen` and the
 `CameraFinder` fallback. `ProjectWorld` is the bool-returning projection used
 by the ESP so a valid result at screen `(0,0)` is not mistaken for a failure.
 
+### ESP projection source
+
+The ESP projects with the managed `BattleCameraModel` block by default. The
+overlay reads that block **after** `Aim::Tick()` has written the aim angles for
+the frame (`Main.cpp` draw callback), so the camera used for projection is the
+same one the game is about to render. Reading it before the aim write projected
+with the previous frame's angle, which is what made skeletons drift away from
+the character while memory aim was active.
+
+The native Unity camera remains available as an opt-in comparison
+(`NativeEspCameraV2` / `Native render camera` in the Player tab). Its matrices
+describe the frame the renderer already finished, so while the camera moves they
+trail the simulation frame that is currently being displayed; with memory aim
+they also lag the aim write. That is why they are off by default.
+
+```text
+view       = Camera.m_WorldToCameraMatrix
+projection = Camera.m_ProjectionMatrix
+clip       = view * projection
+```
+
+Unity's Camera field offsets move between builds, and a wrong camera (preview,
+mirror, disabled) or a wrong projection FOV silently breaks projection, so the
+matrices are located and validated at runtime instead of trusting fixed
+offsets:
+
+- Every object carrying the MainCamera tag is a candidate.
+- The object is read once and scanned for a 4x4 block that looks like a
+  world-to-camera matrix: finite, last row `(tx, ty, tz, 1)`, orthonormal 3x3
+  basis. The camera position is recovered as `-R^T * t` and must be within 5 m
+  of the managed `BattleCameraModel` position (aim never writes position).
+- The projection is the first structurally valid perspective matrix next to the
+  view matrix, and its `1/tan(vfov/2)` y scale must agree with the Cinemachine
+  vertical FOV used by the managed camera.
+- The forward vector (`-row2`) must be within 60 degrees of the managed forward,
+  which still allows the aim angle to lead the damped game camera.
+- The discovered offsets are cached for the session; the node is re-validated
+  every overlay frame and re-resolved at most twice a second.
+
+If no native candidate matches, or the checkbox is off, the ESP uses the managed
+`BattleCameraModel` block and then the worker snapshot. The aim debug overlay
+prints `ESP cam: native d=<metres> a=<degrees> pose=<age>ms` (or
+`managed (native not found/off) pose=<age>ms`), so a wrong camera or stale pose
+data is visible immediately.
+
+Implementation: `CameraFinder::GetCameraMatricesValidated`,
+`ParseViewMatrix`, `ParseProjectionMatrix`, `DiscoverLayout`;
+`RobRunReader::RefreshCamera`, `GetCameraDebug`.
+
 ---
 
 ## Memory aim (angle write)
@@ -383,6 +432,7 @@ needed:
 | `LocalInputModel + yaw/pitch` | offset not in this SDK |
 | `BMPlayerRotationInput + x/y` | offset not in this SDK |
 | `LocalLookDirectionModel + value` | offset not in this SDK |
+| `BattleCharacterModel +0x70` `LookDirectionModel` | live: `_value` `+0x10`, `_yaw` `+0x1c`, `_pitch` `+0x20` |
 
 The first attached aim tick writes `C:\VeoxDMA\RobRun\aim_fields.txt` with the
 runtime field tables of `BattleModel`, `BattleCharacterModel`,
@@ -1024,6 +1074,7 @@ are unavailable. Hardware Aim remains the device-driven option.
 | `VeoxDMA/SDK/RobRunMemory.h/.cpp` | UTF-16 strings, lists, stable dictionary snapshots |
 | `VeoxDMA/SDK/RobRunReader.h/.cpp` | Game roots, updater discovery, entities, slots, health, role |
 | `VeoxDMA/SDK/RobRunCamera.h/.cpp` | BattleCameraModel, Cinemachine FOV, view-projection |
+| `VeoxDMA/SDK/CameraFinder.h/.cpp` | Native Unity main-camera matrices used for ESP projection |
 | `VeoxDMA/SDK/Inventory.h/.cpp` | Packed slots, local inventory, grid, optional catalog |
 | `VeoxDMA/SDK/WorldEntities.h/.cpp` | Containers, loot, vehicles, cars, helicopters, grenades |
 | `VeoxDMA/SDK/SkeletonExtractor.cpp` | Native Transform hierarchy and rig anchors |

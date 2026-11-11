@@ -10,6 +10,7 @@
 #include "../ImGUI/imgui.h"
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 
 namespace VeoxMenu {
 
@@ -128,6 +129,7 @@ static void DrawPanelESP()
 	ImGui::Separator();
 	ImGui::Spacing();
 
+	ImGui::Checkbox("Box ESP", &ConfigInstance.Player.BoxEsp);
 	ImGui::Checkbox("Health", &ConfigInstance.Player.Health);
 	ImGui::Checkbox("Distance", &ConfigInstance.Player.Distance);
 	ImGui::Checkbox("Primary Weapon", &ConfigInstance.Player.PrimaryWeapon);
@@ -135,6 +137,35 @@ static void DrawPanelESP()
 	ImGui::Spacing();
 	ImGui::SliderInt("Max Distance", &ConfigInstance.Player.MaxDistance, 0, 1500, "%dm");
 	ImGui::SliderInt("Font Size", &ConfigInstance.Player.FontSize, 1, 24, "%dpx");
+
+	ImGui::Spacing();
+	ImGui::Text("Projection");
+	ImGui::Checkbox("Native render camera", &ConfigInstance.Player.NativeEspCamera);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Projects the ESP with the Unity camera matrices instead of the managed\n"
+			"BattleCameraModel. The managed camera is read after memory aim writes its\n"
+			"angles, so it matches the frame being rendered. The native matrices are\n"
+			"one rendered frame old and visibly trail while the camera moves; leave\n"
+			"this off unless you are comparing the two.");
+	{
+		const auto cam = RobRunReader::GetCameraDebug();
+		char pose[32] = "pose --";
+		if (cam.snapshotAgeMs >= 0)
+			std::snprintf(pose, sizeof(pose), "pose %lldms",
+				static_cast<long long>(cam.snapshotAgeMs));
+		if (!cam.nativeEnabled)
+			ImGui::TextColored(ImVec4(1.f, 0.7f, 0.3f, 1.f),
+				"Camera: managed (native off)  %s", pose);
+		else if (!cam.nativeValid)
+			ImGui::TextColored(ImVec4(1.f, 0.4f, 0.4f, 1.f),
+				"Camera: managed (native not found)  %s", pose);
+		else
+			ImGui::TextColored(ImVec4(0.4f, 1.f, 0.4f, 1.f),
+				"Camera: native  d=%.2fm  a=%.1f deg  %s", cam.positionError,
+				180.f / 3.14159265f * std::acos(std::clamp(cam.forwardDot, -1.f, 1.f)),
+				pose);
+	}
 
 	ImGui::Spacing();
 	ImGui::Separator();
@@ -269,9 +300,10 @@ static void DrawPanelESP()
 
 	const auto snapshot = RobRunReader::GetSnapshot();
 	const int playerCount = snapshot ? static_cast<int>(snapshot->entities.size()) : 0;
-	const int worldCount = snapshot ? static_cast<int>(snapshot->world.entities.size()) : 0;
+	const int worldCount = (snapshot && snapshot->world)
+		? static_cast<int>(snapshot->world->entities.size()) : 0;
 	const int localId = snapshot ? snapshot->localEntityId : -1;
-	const bool worldValid = snapshot && snapshot->world.valid;
+	const bool worldValid = snapshot && snapshot->world && snapshot->world->valid;
 	const unsigned skeletonCount = snapshot ? snapshot->skeletonCount : 0;
 	const unsigned poseCount = snapshot ? snapshot->poseCount : 0;
 	const unsigned poseFailures = snapshot ? snapshot->poseFailures : 0;
@@ -537,9 +569,9 @@ static void DrawPanelMisc()
 	ImGui::TextDisabled("One-off bounded class scan. It can pause briefly.");
 
 	const auto snapshot = RobRunReader::GetSnapshot();
-	if (snapshot && snapshot->inventory.valid)
+	if (snapshot && snapshot->inventory && snapshot->inventory->valid)
 	{
-		const auto& inventory = snapshot->inventory;
+		const auto& inventory = *snapshot->inventory;
 		ImGui::Spacing();
 		ImGui::Separator();
 		ImGui::Text("Inventory");
@@ -575,7 +607,7 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 	const auto snapshot = RobRunReader::GetSnapshot();
 	if (snapshot)
 	{
-		const auto& world = snapshot->world;
+		const auto world = snapshot->world ? *snapshot->world : RobRunWorld::State{};
 		ImGui::Text("Entities: %zu | C:%d L:%d V:%d G:%d",
 			snapshot->entities.size(), world.containers, world.loots,
 			world.vehicles, world.grenades);

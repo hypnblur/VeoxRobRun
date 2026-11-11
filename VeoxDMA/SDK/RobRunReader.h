@@ -49,8 +49,11 @@ struct EntityData {
 // keeps DMA latency off the render thread.
 struct Snapshot {
     std::vector<EntityData> entities;
-    RobRunWorld::State world;
-    RobRunInventory::State inventory;
+    // World/inventory reads walk dozens of dictionaries and can take hundreds
+    // of milliseconds. They run on their own thread and publish immutable
+    // states, so the player/pose pass never waits for them.
+    std::shared_ptr<const RobRunWorld::State> world;
+    std::shared_ptr<const RobRunInventory::State> inventory;
     RobRunCamera::CameraState camera;
     std::int32_t localEntityId = -1;
     Vector3 localPosition{};
@@ -72,6 +75,9 @@ struct Snapshot {
     std::uint32_t poseFailures = 0;
     Matrix4x4 fallbackViewProjection{};
     bool fallbackViewProjectionValid = false;
+    // Publish time (GetTickCount64). Lets the overlay report how old the pose
+    // data it is drawing actually is.
+    std::uint64_t stampMs = 0;
 };
 
 using SnapshotPtr = std::shared_ptr<const Snapshot>;
@@ -116,6 +122,26 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight);
 // Native Unity camera matrices, resolved by the worker. Never performs a GOM
 // walk on the render thread.
 bool GetFallbackViewProjection(Matrix4x4& out);
+
+// Which camera GetViewProjection is currently projecting with: "native" (the
+// Unity render camera), "managed" (BattleCameraModel), "snapshot" (worker
+// copy) or "none". Useful for confirming the ESP is glued to the rendered frame
+// while memory aim rewrites the managed camera block.
+const char* GetViewProjectionSource();
+
+// Native-camera identification diagnostics: whether the Unity render camera was
+// found and how closely it agrees with the managed camera (position error in
+// metres, forward dot product). Negative values mean "not measured".
+struct CameraDebug {
+    bool nativeEnabled = true;
+    bool nativeValid = false;
+    float positionError = -1.f;
+    float forwardDot = -1.f;
+    // Age of the worker snapshot the ESP is drawing from, in milliseconds.
+    // Negative when no snapshot has been published yet.
+    std::int64_t snapshotAgeMs = -1;
+};
+CameraDebug GetCameraDebug();
 
 Vector2 WorldToScreen(const Matrix4x4& viewProjection, const Vector3& world,
     int screenWidth, int screenHeight);

@@ -10,6 +10,7 @@ public:
 		ConfigName = name;
 	}
 
+	bool BoxEsp = true;
 	bool Health = true;
 	bool Distance = true;
 	int MaxDistance = 1000;
@@ -25,6 +26,12 @@ public:
 	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // pose frozen / culled
 	bool WallCheck = false;
 	std::string BvhPath = "city_colliders.bvh";
+	// Project the ESP with the Unity render camera instead of the managed
+	// BattleCameraModel block. The managed block is read *after* memory aim
+	// writes its angles, so it already matches the frame being rendered; the
+	// native matrices are the previous rendered frame and visibly trail when
+	// the camera moves, so this stays off by default.
+	bool NativeEspCamera = false;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -47,6 +54,7 @@ public:
     json ToJson()
     {
         json j;
+        j[ConfigName][LIT("BoxEsp")] = BoxEsp;
         j[ConfigName][LIT("Health")] = Health;
         j[ConfigName][LIT("Distance")] = Distance;
         j[ConfigName][LIT("MaxDistance")] = MaxDistance;
@@ -59,6 +67,7 @@ public:
         ToJsonColour(&j, LIT("HiddenColour"), &HiddenColour);
         j[ConfigName][LIT("WallCheck")] = WallCheck;
         j[ConfigName][LIT("BvhPath")] = BvhPath;
+        j[ConfigName][LIT("NativeEspCameraV2")] = NativeEspCamera;
 
         return j;
     }
@@ -66,6 +75,8 @@ public:
     {
         if (!j.contains(ConfigName))
             return;
+        if (j[ConfigName].contains(LIT("BoxEsp")))
+            BoxEsp = j[ConfigName][LIT("BoxEsp")];
         if (j[ConfigName].contains(LIT("Health")))
             Health = j[ConfigName][LIT("Health")];
         if (j[ConfigName].contains(LIT("Distance")))
@@ -87,6 +98,8 @@ public:
             WallCheck = j[ConfigName][LIT("WallCheck")];
         if (j[ConfigName].contains(LIT("BvhPath")))
             BvhPath = j[ConfigName][LIT("BvhPath")];
+        if (j[ConfigName].contains(LIT("NativeEspCameraV2")))
+            NativeEspCamera = j[ConfigName][LIT("NativeEspCameraV2")];
     }
 };
 

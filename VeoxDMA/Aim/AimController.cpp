@@ -331,14 +331,18 @@ bool WriteCameraAngles(std::uintptr_t cameraModel, float yaw, float pitch,
         // BCM+0x70 LookDirectionModel: _value(+0x10), _yaw(+0x1C), _pitch(+0x20)
         if (lookDirDirect > 0x10000) {
             TargetProcess.AddScatterWriteRequest(handle,
-                lookDirDirect + 0x10, &forward, sizeof(forward));
+                lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
             TargetProcess.AddScatterWriteRequest(handle,
-                lookDirDirect + 0x1C, &yaw, sizeof(yaw));
+                lookDirDirect + rr::LookDirectionModel::Yaw, &yaw, sizeof(yaw));
             TargetProcess.AddScatterWriteRequest(handle,
-                lookDirDirect + 0x20, &pitch, sizeof(pitch));
+                lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
         }
-        // BattleModel+0x40 PlayerRotationInput: fields TBD, dump next cycle
-        // (placeholder — will wire once field offsets are discovered)
+        if (playerRotInput > 0x10000) {
+            TargetProcess.AddScatterWriteRequest(handle,
+                playerRotInput + rr::PlayerRotationInputModel::Yaw, &yaw, sizeof(yaw));
+            TargetProcess.AddScatterWriteRequest(handle,
+                playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
+        }
         TargetProcess.ExecuteScatterWrite(handle);
         TargetProcess.CloseScatterHandle(handle);
         outcome.scatter = true;
@@ -359,9 +363,13 @@ bool WriteCameraAngles(std::uintptr_t cameraModel, float yaw, float pitch,
         TargetProcess.Write(
             lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
     if (lookDirDirect > 0x10000) {
-        TargetProcess.Write(lookDirDirect + 0x10, &forward, sizeof(forward));
-        TargetProcess.Write(lookDirDirect + 0x1C, &yaw, sizeof(yaw));
-        TargetProcess.Write(lookDirDirect + 0x20, &pitch, sizeof(pitch));
+        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
+        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Yaw, &yaw, sizeof(yaw));
+        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
+    }
+    if (playerRotInput > 0x10000) {
+        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Yaw, &yaw, sizeof(yaw));
+        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
     }
     return ok;
 }
@@ -506,7 +514,7 @@ static void DumpAimFieldsOnce()
         }
         // BattleModel+0x40 PlayerRotationInput
         if (snapshot->battleModel > 0x10000)
-            DumpModelAt(ReadPtr(snapshot->battleModel + 0x40), "BM+0x40 (PlayerRotationInput)");
+            DumpModelAt(ReadPtr(snapshot->battleModel + rr::BattleModel::PlayerRotationInput), "BM+0x40 (PlayerRotationInput)");
 
         // Also check PlayerEntityModel::Client (0x18 on the player entity)
         if (snapshot->battleModel > 0x10000) {
@@ -940,10 +948,29 @@ void DrawDebug()
         d.writeMode ? (d.writeOk ? "ok" : "fail") : "off",
         d.writeState, d.tgtYawDeg, d.tgtPitchDeg, d.distance);
     std::snprintf(lines[6], sizeof(lines[6]), "Reason: %s", d.reason);
+    {
+        const auto cam = RobRunReader::GetCameraDebug();
+        const float angle = cam.forwardDot > -1.f
+            ? 57.2957795f * std::acos(std::clamp(cam.forwardDot, -1.f, 1.f))
+            : -1.f;
+        char pose[32] = "pose=--";
+        if (cam.snapshotAgeMs >= 0)
+            std::snprintf(pose, sizeof(pose), "pose=%lldms",
+                static_cast<long long>(cam.snapshotAgeMs));
+        if (cam.nativeValid)
+            std::snprintf(lines[7], sizeof(lines[7]),
+                "ESP cam: native d=%.2fm a=%.1f  %s", cam.positionError, angle,
+                pose);
+        else
+            std::snprintf(lines[7], sizeof(lines[7]),
+                "ESP cam: %s (native %s)  %s",
+                RobRunReader::GetViewProjectionSource(),
+                cam.nativeEnabled ? "not found" : "off", pose);
+    }
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 origin(12.f, 12.f);
-    for (int i = 0; i < 7; ++i) {
+    for (int i = 0; i < 8; ++i) {
         dl->AddText(ImVec2(origin.x + 1.f, origin.y + i * 15.f + 1.f),
             IM_COL32(0, 0, 0, 200), lines[i]);
         dl->AddText(ImVec2(origin.x, origin.y + i * 15.f),

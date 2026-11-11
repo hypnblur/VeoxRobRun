@@ -249,6 +249,93 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         }
     }
 
+    // Parent-tree limb fallback: when the weapon view is unbound (holster,
+    // reload, vehicle) we get no limb anchors from the IK views. Walk the
+    // parent array — already in memory, no extra DMA — to find branches
+    // that diverge from the spine chain.
+    const bool missingLegs = out.leftHip < 0 && out.rightHip < 0;
+    const bool missingArms = out.leftShoulder < 0 && out.rightShoulder < 0;
+    if ((missingLegs || missingArms) && out.pelvis >= 0 && out.chest >= 0) {
+        std::vector<bool> onSpine(count, false);
+        int top = out.head >= 0 ? out.head : (out.neck >= 0 ? out.neck : out.chest);
+        for (int b = top; b >= 0; b = parent[b]) {
+            onSpine[b] = true;
+            if (b == root) break;
+        }
+
+        auto walkChain = [&](int start, int depth) -> std::vector<int> {
+            std::vector<int> chain;
+            chain.push_back(start);
+            int cur = start;
+            for (int d = 0; d < depth; ++d) {
+                int best = -1;
+                float bestLen = -1.f;
+                for (int b = 0; b < count; ++b) {
+                    if (parent[b] != cur) continue;
+                    const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
+                    const float len = dx*dx + dy*dy + dz*dz;
+                    if (len > bestLen) { bestLen = len; best = b; }
+                }
+                if (best < 0) break;
+                chain.push_back(best);
+                cur = best;
+            }
+            return chain;
+        };
+
+        if (missingLegs) {
+            std::vector<int> legRoots;
+            for (int b = 0; b < count; ++b)
+                if (parent[b] == out.pelvis && !onSpine[b]) legRoots.push_back(b);
+            if (legRoots.empty()) {
+                int hips = parent[out.pelvis];
+                if (hips >= 0)
+                    for (int b = 0; b < count; ++b)
+                        if (parent[b] == hips && !onSpine[b]) legRoots.push_back(b);
+            }
+            std::vector<std::vector<int>> legs;
+            for (int lr : legRoots) {
+                auto chain = walkChain(lr, 2);
+                if (chain.size() >= 2) legs.push_back(std::move(chain));
+            }
+            if (legs.size() >= 2) {
+                auto& lA = legs[0]; auto& lB = legs[1];
+                bool aIsLeft = local[lA[0]].p.x < local[lB[0]].p.x;
+                auto& left  = aIsLeft ? lA : lB;
+                auto& right = aIsLeft ? lB : lA;
+                if (left.size() > 0) { out.leftHip   = left[0]; pushAnchor(left[0]); }
+                if (left.size() > 1) { out.leftKnee  = left[1]; pushAnchor(left[1]); }
+                if (left.size() > 2) { out.leftFoot  = left[2]; pushAnchor(left[2]); }
+                if (right.size() > 0) { out.rightHip  = right[0]; pushAnchor(right[0]); }
+                if (right.size() > 1) { out.rightKnee = right[1]; pushAnchor(right[1]); }
+                if (right.size() > 2) { out.rightFoot = right[2]; pushAnchor(right[2]); }
+            }
+        }
+
+        if (missingArms) {
+            std::vector<int> armRoots;
+            for (int b = 0; b < count; ++b)
+                if (parent[b] == out.chest && !onSpine[b]) armRoots.push_back(b);
+            std::vector<std::vector<int>> arms;
+            for (int ar : armRoots) {
+                auto chain = walkChain(ar, 2);
+                if (chain.size() >= 2) arms.push_back(std::move(chain));
+            }
+            if (arms.size() >= 2) {
+                auto& aA = arms[0]; auto& aB = arms[1];
+                bool aIsLeft = local[aA[0]].p.x < local[aB[0]].p.x;
+                auto& left  = aIsLeft ? aA : aB;
+                auto& right = aIsLeft ? aB : aA;
+                if (left.size() > 0) { out.leftShoulder  = left[0]; pushAnchor(left[0]); }
+                if (left.size() > 1) { out.leftElbow     = left[1]; pushAnchor(left[1]); }
+                if (left.size() > 2) { out.leftHand      = left[2]; pushAnchor(left[2]); }
+                if (right.size() > 0) { out.rightShoulder = right[0]; pushAnchor(right[0]); }
+                if (right.size() > 1) { out.rightElbow    = right[1]; pushAnchor(right[1]); }
+                if (right.size() > 2) { out.rightHand     = right[2]; pushAnchor(right[2]); }
+            }
+        }
+    }
+
     // Two connected anchors are the minimum for a line, and at least one must
     // come from the head/torso chain; limb-only data would draw floating arms.
     if (anchors.size() < 2 || centralAnchors == 0) return false;
@@ -271,6 +358,8 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     if (!m.stable()) return false;
 
     out.matrices = matrices;
+    out.nativeTransform = native;
+    out.hierarchy = hierarchy;
     out.count = count;
     out.parent = std::move(parent);
     out.selected = std::move(selected);
@@ -576,6 +665,182 @@ std::vector<BoneSegment> BuildSkeleton(
     }
     if (!m.is(view,"BattleCharacterEntityView")) return {};
     return BuildFromView(view, read);
+}
+
+bool ValidateHierarchy(const RigLayout& layout, const Read& read)
+{
+    if (!read || layout.nativeTransform <= 0x10000 || layout.hierarchy <= 0x10000)
+        return false;
+    U currentHierarchy = 0;
+    if (!read(layout.nativeTransform + 0x28, &currentHierarchy, sizeof(currentHierarchy)))
+        return false;
+    if (currentHierarchy != layout.hierarchy)
+        return false;
+    U currentMatrices = 0;
+    if (!read(currentHierarchy + 0x18, &currentMatrices, sizeof(currentMatrices)))
+        return false;
+    if (currentMatrices != layout.matrices)
+        return false;
+    std::int32_t currentCount = 0;
+    if (!read(currentHierarchy + 0x38, &currentCount, sizeof(currentCount)))
+        return false;
+    return currentCount == layout.count;
+}
+
+// Name-based bone fallback. Reads each transform's GameObject name from the
+// native hierarchy and matches against Unity humanoid bone names. This works
+// even when the weapon/IK views are unbound (holster, reload, vehicle).
+bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
+{
+    out = RigLayout{};
+    if (!read || view <= 0x10000) return false;
+    Snapshot m{read,{}};
+    if (!m.is(view, "BattleCharacterEntityView")) return false;
+
+    U native = m.ptr(view, 0x10), hierarchy = m.ptr(native, 0x28);
+    if (native <= 0x10000 || hierarchy <= 0x10000) {
+        U movement = m.ptr(view, 0x20);
+        if (!m.isOneOf(movement, {"CharacterMovementView", "MovementView"})) return false;
+        U managed = m.ptr(movement, 0x20);
+        if (!m.is(managed, "Transform")) return false;
+        native = m.ptr(managed, 0x10);
+        hierarchy = m.ptr(native, 0x28);
+    }
+    if (native <= 0x10000 || hierarchy <= 0x10000) return false;
+
+    U matrices = m.ptr(hierarchy, 0x18), parents = m.ptr(hierarchy, 0x20);
+    U pointers = m.ptr(hierarchy, 0x30);
+    std::int32_t count = 0;
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) return false;
+
+    std::vector<TRS> local(count);
+    std::vector<std::int32_t> parent(count);
+    std::vector<U> transforms(count);
+    if (!m.array(matrices, local, false) || !m.array(parents, parent, true) ||
+        !m.array(pointers, transforms, true))
+        return false;
+    for (int p : parent) if (p < -1 || p >= count) return false;
+
+    int root = -1;
+    for (int b = 0; b < count; ++b)
+        if (transforms[b] == native) { root = b; break; }
+    if (root < 0) return false;
+
+    auto ancestor = [&](int a, int b) {
+        for (; b != -1; b = parent[b]) if (a == b) return true;
+        return false;
+    };
+
+    // Read each transform's GameObject name via native Transform -> GameObject(0x30) -> name(0x48)
+    // Unity native name is a char* at GameObject+0x48, length at +0x40 (or just read until null).
+    struct NamedBone { int index; std::string name; };
+    std::vector<NamedBone> namedBones;
+    for (int b = 0; b < count; ++b) {
+        if (!ancestor(root, b)) continue;
+        U gameObject = 0;
+        if (!read(transforms[b] + 0x30, &gameObject, sizeof(gameObject)) || gameObject <= 0x10000)
+            continue;
+        U namePtr = 0;
+        if (!read(gameObject + 0x48, &namePtr, sizeof(namePtr)) || namePtr <= 0x10000)
+            continue;
+        char buf[64]{};
+        if (!read(namePtr, buf, sizeof(buf) - 1)) continue;
+        buf[63] = '\0';
+        if (buf[0] == '\0') continue;
+        namedBones.push_back({b, std::string(buf)});
+    }
+
+    struct BoneMapping { const char* name; std::int32_t* target; };
+    BoneMapping mappings[] = {
+        {"Hips", &out.pelvis},
+        {"Pelvis", &out.pelvis},
+        {"Spine1", &out.chest},
+        {"Spine2", &out.chest},
+        {"Chest", &out.chest},
+        {"Neck", &out.neck},
+        {"Head", &out.head},
+        {"LeftShoulder", &out.leftShoulder},
+        {"LeftUpperArm", &out.leftShoulder},
+        {"LeftLowerArm", &out.leftElbow},
+        {"LeftForeArm", &out.leftElbow},
+        {"LeftHand", &out.leftHand},
+        {"RightShoulder", &out.rightShoulder},
+        {"RightUpperArm", &out.rightShoulder},
+        {"RightLowerArm", &out.rightElbow},
+        {"RightForeArm", &out.rightElbow},
+        {"RightHand", &out.rightHand},
+        {"LeftUpperLeg", &out.leftHip},
+        {"LeftThigh", &out.leftHip},
+        {"LeftLowerLeg", &out.leftKnee},
+        {"LeftCalf", &out.leftKnee},
+        {"LeftFoot", &out.leftFoot},
+        {"RightUpperLeg", &out.rightHip},
+        {"RightThigh", &out.rightHip},
+        {"RightLowerLeg", &out.rightKnee},
+        {"RightCalf", &out.rightKnee},
+        {"RightFoot", &out.rightFoot},
+    };
+
+    auto nameContains = [](const std::string& haystack, const char* needle) {
+        return haystack.find(needle) != std::string::npos;
+    };
+
+    for (const auto& bone : namedBones) {
+        for (auto& mp : mappings) {
+            if (*mp.target >= 0) continue;
+            if (nameContains(bone.name, mp.name))
+                *mp.target = bone.index;
+        }
+    }
+
+    std::vector<int> anchors;
+    auto pushAnchor = [&](int index) {
+        if (index < 0) return;
+        for (int other : anchors) if (other == index) return;
+        anchors.push_back(index);
+    };
+
+    int centralAnchors = 0;
+    if (out.head >= 0) { pushAnchor(out.head); ++centralAnchors; }
+    if (out.neck >= 0) { pushAnchor(out.neck); ++centralAnchors; }
+    if (out.chest >= 0) { pushAnchor(out.chest); ++centralAnchors; }
+    if (out.pelvis >= 0) { pushAnchor(out.pelvis); ++centralAnchors; }
+    pushAnchor(out.leftShoulder); pushAnchor(out.leftElbow); pushAnchor(out.leftHand);
+    pushAnchor(out.rightShoulder); pushAnchor(out.rightElbow); pushAnchor(out.rightHand);
+    pushAnchor(out.leftHip); pushAnchor(out.leftKnee); pushAnchor(out.leftFoot);
+    pushAnchor(out.rightHip); pushAnchor(out.rightKnee); pushAnchor(out.rightFoot);
+
+    if (anchors.size() < 2 || centralAnchors == 0) return false;
+
+    int lca = anchors.front();
+    for (int index : anchors) {
+        while (lca != -1 && !ancestor(lca, index)) lca = parent[lca];
+        if (lca == -1) return false;
+    }
+    if (lca < 0) return false;
+
+    std::vector<unsigned char> selected(count, 0);
+    for (int index : anchors) {
+        for (int p = index;; p = parent[p]) {
+            if (p < 0 || !ancestor(root, p)) return false;
+            selected[p] = 1;
+            if (p == lca) break;
+        }
+    }
+
+    out.matrices = matrices;
+    out.nativeTransform = native;
+    out.hierarchy = hierarchy;
+    out.count = count;
+    out.parent = std::move(parent);
+    out.selected = std::move(selected);
+    out.segments.clear();
+    for (int b = 0; b < count; ++b) {
+        const int p = out.parent[b];
+        if (out.selected[b] && p >= 0 && out.selected[p])
+            out.segments.push_back({p, b});
+    }
+    return !out.segments.empty();
 }
 
 } // namespace Skeleton

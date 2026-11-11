@@ -138,7 +138,7 @@ void DrawPlayers()
 			}
 		}
 
-		if (boxValid)
+		if (boxValid && ConfigInstance.Player.BoxEsp)
 		{
 			Esp::DrawCornerBox(dl, ImVec2(minX - 4.f, minY - 4.f),
 				ImVec2(maxX + 4.f, maxY + 4.f), espCol, 1.5f, 25.f, true);

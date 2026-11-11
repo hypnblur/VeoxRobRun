@@ -316,13 +316,6 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return RobRunMemory::ReadVector3(description + 0x24, position);
         }, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::Vehicles, Kind::Vehicle,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::VehicleModel::Transform);
-            return ReadVehiclePosition(transform, position);
-        }, out, out.vehicles);
-
     AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
         [](std::uintptr_t model, Vector3& position) {
             const std::uintptr_t transform = RobRunMemory::ReadPtr(

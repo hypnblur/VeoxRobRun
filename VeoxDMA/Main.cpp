@@ -94,9 +94,6 @@ static void TickOverlay()
 	if (wasMenuOpen && !menuOpen)
 		ConfigFile::Save();
 	wasMenuOpen = menuOpen;
-
-	if (g_attached.load(std::memory_order_acquire))
-		RobRunReader::RefreshCamera();
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
@@ -122,6 +119,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	};
 	callbacks.draw = [] {
 		Aim::Tick();
+		// Read the camera after the aim has written its angles. The ESP must use
+		// the same camera state the game will render this frame; reading before
+		// the write projected with last frame's angle, which made skeletons drift
+		// while memory aim was active.
+		if (g_attached.load(std::memory_order_acquire))
+			RobRunReader::RefreshCamera();
 		DrawPlayers();
 		DrawWorldEntities();
 		Aim::Draw();

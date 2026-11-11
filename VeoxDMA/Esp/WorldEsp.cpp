@@ -141,7 +141,7 @@ void DrawWorldEntities()
 		return;
 
 	const auto snapshot = RobRunReader::GetSnapshot();
-	if (!snapshot)
+	if (!snapshot || !snapshot->world)
 		return;
 
 	Matrix4x4 viewProjection{};
@@ -154,7 +154,7 @@ void DrawWorldEntities()
 	ImFont* font = ImGui::GetFont();
 	const float fontSize = (float)ConfigInstance.World.FontSize;
 
-	for (const auto& entity : snapshot->world.entities)
+	for (const auto& entity : snapshot->world->entities)
 	{
 		if (!IsEnabled(entity.kind))
 			continue;

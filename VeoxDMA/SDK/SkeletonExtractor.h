@@ -38,6 +38,8 @@ using ReadFn = std::function<bool(uint64_t, void*, std::size_t)>;
 // cached per entity. Sampling then costs a single read of the matrix array.
 struct RigLayout {
     std::uint64_t matrices = 0;
+    std::uint64_t nativeTransform = 0;
+    std::uint64_t hierarchy = 0;
     std::int32_t count = 0;
     std::vector<std::int32_t> parent;
     std::vector<std::uint8_t> selected;
@@ -54,6 +56,17 @@ struct RigLayout {
 
 // Resolves and validates the layout from a BattleCharacterEntityView.
 bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out);
+
+// Quick check: re-reads hierarchy pointer from the native transform and
+// verifies it still matches. Returns false when Unity reallocated the
+// hierarchy (weapon equip, armour change), meaning the cached matrices
+// pointer is stale and the layout must be rebuilt.
+bool ValidateHierarchy(const RigLayout& layout, const ReadFn& read);
+
+// Name-based fallback: walks the native transform hierarchy and matches
+// bones by GameObject name against known humanoid names. Used when the
+// weapon/limb IK view is temporarily unbound (holster, reload, vehicle).
+bool BuildLayoutByName(std::uint64_t view, const ReadFn& read, RigLayout& out);
 
 // Reads the current animation pose and emits world-space bone segments.
 // Returns false when the layout is no longer valid (freed/moved array,
