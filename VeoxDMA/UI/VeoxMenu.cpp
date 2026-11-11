@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "VeoxMenu.h"
 #include "ConfigInstance.h"
+#include "ConfigFile.h"
 #include "RobRunReader.h"
 #include "DeviceSession.h"
 #include "InputManager.h"
@@ -181,26 +182,66 @@ static void DrawPanelESP()
 	ImGui::Text("World ESP");
 
 	ImGui::Checkbox("Enable World ESP", &ConfigInstance.World.Enabled);
-	ImGui::Checkbox("Containers", &ConfigInstance.World.Containers);
-	ImGui::Checkbox("Loot", &ConfigInstance.World.Loot);
-	ImGui::Checkbox("Vehicles", &ConfigInstance.World.Vehicles);
-	ImGui::Checkbox("Grenades", &ConfigInstance.World.Grenades);
 	ImGui::Checkbox("Show empty state", &ConfigInstance.World.ShowEmpty);
 	ImGui::Checkbox("Show distance", &ConfigInstance.World.ShowDistance);
 	ImGui::SliderInt("World distance", &ConfigInstance.World.MaxDistance, 0, 2000, "%dm");
 	ImGui::SliderInt("World font", &ConfigInstance.World.FontSize, 1, 24, "%dpx");
 
-	auto worldColour = [](const char* label, D2D1::ColorF& colour) {
+	auto worldColour = [](const char* id, D2D1::ColorF& colour) {
 		float values[4] = { colour.r, colour.g, colour.b, colour.a };
-		if (ImGui::ColorEdit4(label, values,
-			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+		if (ImGui::ColorEdit4(id, values,
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel |
+			ImGuiColorEditFlags_AlphaBar)) {
 			colour = D2D1::ColorF(values[0], values[1], values[2], values[3]);
 		}
 	};
-	worldColour("Container Color", ConfigInstance.World.ContainerColour);
-	worldColour("Loot Color", ConfigInstance.World.LootColour);
-	worldColour("Vehicle Color", ConfigInstance.World.VehicleColour);
-	worldColour("Grenade Color", ConfigInstance.World.GrenadeColour);
+	auto worldRow = [&](const char* label, bool& enabled, D2D1::ColorF& colour) {
+		ImGui::Checkbox(label, &enabled);
+		ImGui::SameLine();
+		const std::string id = std::string("##") + label;
+		worldColour(id.c_str(), colour);
+	};
+
+	ImGui::Spacing();
+	ImGui::Text("Containers");
+	worldRow("Containers (master)", ConfigInstance.World.Containers, ConfigInstance.World.ContainerColour);
+	ImGui::Indent();
+	worldRow("Loot Node", ConfigInstance.World.LootNodes, ConfigInstance.World.LootNodeColour);
+	worldRow("Safe", ConfigInstance.World.SafeDoors, ConfigInstance.World.SafeDoorColour);
+	worldRow("Storage Box", ConfigInstance.World.StorageBoxes, ConfigInstance.World.StorageBoxColour);
+	worldRow("Shelving", ConfigInstance.World.Shelvings, ConfigInstance.World.ShelvingColour);
+	worldRow("Collection Table", ConfigInstance.World.CollectionTables, ConfigInstance.World.CollectionTableColour);
+	worldRow("Plot Container", ConfigInstance.World.PlotContainers, ConfigInstance.World.PlotContainerColour);
+	ImGui::Unindent();
+
+	ImGui::Spacing();
+	ImGui::Text("Loot");
+	worldRow("Loot (master)", ConfigInstance.World.Loot, ConfigInstance.World.LootColour);
+	ImGui::Indent();
+	worldRow("Dropped Bag", ConfigInstance.World.DroppedBags, ConfigInstance.World.DroppedBagColour);
+	worldRow("Vehicle Loot", ConfigInstance.World.VehicleLoots, ConfigInstance.World.VehicleLootColour);
+	worldRow("Cargo", ConfigInstance.World.Cargos, ConfigInstance.World.CargoColour);
+	worldRow("Plot Loot", ConfigInstance.World.PlotLoots, ConfigInstance.World.PlotLootColour);
+	worldRow("Furniture Loot", ConfigInstance.World.FurnitureLoots, ConfigInstance.World.FurnitureLootColour);
+	worldRow("Building Loot", ConfigInstance.World.BuildingLoots, ConfigInstance.World.BuildingLootColour);
+	ImGui::Unindent();
+
+	ImGui::Spacing();
+	ImGui::Text("Vehicles & Grenades");
+	worldRow("Vehicles (master)", ConfigInstance.World.Vehicles, ConfigInstance.World.VehicleColour);
+	worldRow("Grenades", ConfigInstance.World.Grenades, ConfigInstance.World.GrenadeColour);
+
+	ImGui::Spacing();
+	ImGui::Text("Valuables");
+	worldRow("Valuables (master)", ConfigInstance.World.Valuables, ConfigInstance.World.ValuableColour);
+	ImGui::Indent();
+	worldRow("Cash Loot Node", ConfigInstance.World.CashLootNodes, ConfigInstance.World.CashLootNodeColour);
+	worldRow("Settlement Cash", ConfigInstance.World.SettlementCash, ConfigInstance.World.SettlementCashColour);
+	worldRow("Money Workbench", ConfigInstance.World.MoneyWorkbenches, ConfigInstance.World.MoneyWorkbenchColour);
+	ImGui::Unindent();
+
+	ImGui::Spacing();
+	worldRow("Points of Interest", ConfigInstance.World.PointsOfInterest, ConfigInstance.World.PointOfInterestColour);
 
 	ImGui::Spacing();
 	ImGui::Separator();
@@ -541,6 +582,18 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 	}
 
 	ImGui::TextDisabled("Insert toggles the menu.");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::Text("Config");
+	if (ImGui::Button("Save config", ImVec2(110, 0)))
+		ConfigFile::Save();
+	ImGui::SameLine();
+	if (ImGui::Button("Load config", ImVec2(110, 0)))
+		ConfigFile::Load();
+	ImGui::TextDisabled("C:\\VeoxDMA\\RobRun\\config.json");
+	ImGui::TextDisabled("Also saved automatically when the menu closes.");
 
 	ImGui::EndChild();
 	ImGui::PopStyleVar();

@@ -49,6 +49,10 @@ bool ReadObjectString(std::uintptr_t object, std::wstring& out);
 bool ReadDictInt(std::uintptr_t dictionary, std::vector<DictEntry>& out,
     bool requireStable = true);
 
+// Cheap structural probe (header + backing-array capacity only). Use this to
+// validate a candidate world model without copying every dictionary.
+bool LooksLikeDictionary(std::uintptr_t dictionary);
+
 // Dictionary<reference, reference>.
 bool ReadDictRef(std::uintptr_t dictionary, std::vector<RefDictEntry>& out,
     bool requireStable = true);

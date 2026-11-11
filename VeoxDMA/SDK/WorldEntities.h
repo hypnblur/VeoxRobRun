@@ -14,7 +14,23 @@ enum class Kind {
     Vehicle,
     Car,
     Helicopter,
-    Grenade
+    Grenade,
+    LootNode,
+    SafeDoor,
+    StorageBox,
+    Shelving,
+    CollectionTable,
+    PlotContainer,
+    DroppedBag,
+    VehicleLoot,
+    Cargo,
+    PlotLoot,
+    FurnitureLoot,
+    BuildingLoot,
+    CashLootNode,
+    SettlementCash,
+    MoneyWorkbench,
+    PointOfInterest
 };
 
 struct Entity {
@@ -33,12 +49,14 @@ struct State {
     int loots = 0;
     int vehicles = 0;
     int grenades = 0;
+    int valuables = 0;
+    int pointsOfInterest = 0;
 };
 
 void Init(std::uintptr_t gameAssemblyBase);
 
-// Reads WorldEntitiesModel. The dump places it at BattleEntitiesModel+0x60;
-// BattleModel+0x60 and the legacy BattleModel+0x510 are validated fallbacks.
+// Reads WorldEntitiesModel. The dump places it at BattleModel+0x510;
+// BattleEntitiesModel+0x60 and BattleModel+0x60 are validated fallbacks.
 bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out);
 
 const char* KindName(Kind kind);

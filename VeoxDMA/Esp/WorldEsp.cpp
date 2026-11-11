@@ -25,40 +25,106 @@ static bool ResolveWorldViewProjection(Matrix4x4& viewProjection, int width, int
 
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
+	const auto& world = ConfigInstance.World;
 	switch (kind)
 	{
 	case RobRunWorld::Kind::Container:
-		return ConfigInstance.World.Containers;
+		return world.Containers;
+	case RobRunWorld::Kind::LootNode:
+		return world.Containers && world.LootNodes;
+	case RobRunWorld::Kind::SafeDoor:
+		return world.Containers && world.SafeDoors;
+	case RobRunWorld::Kind::StorageBox:
+		return world.Containers && world.StorageBoxes;
+	case RobRunWorld::Kind::Shelving:
+		return world.Containers && world.Shelvings;
+	case RobRunWorld::Kind::CollectionTable:
+		return world.Containers && world.CollectionTables;
+	case RobRunWorld::Kind::PlotContainer:
+		return world.Containers && world.PlotContainers;
 	case RobRunWorld::Kind::Loot:
 	case RobRunWorld::Kind::StaticLoot:
 	case RobRunWorld::Kind::RandomLoot:
-		return ConfigInstance.World.Loot;
+		return world.Loot;
+	case RobRunWorld::Kind::DroppedBag:
+		return world.Loot && world.DroppedBags;
+	case RobRunWorld::Kind::VehicleLoot:
+		return world.Loot && world.VehicleLoots;
+	case RobRunWorld::Kind::Cargo:
+		return world.Loot && world.Cargos;
+	case RobRunWorld::Kind::PlotLoot:
+		return world.Loot && world.PlotLoots;
+	case RobRunWorld::Kind::FurnitureLoot:
+		return world.Loot && world.FurnitureLoots;
+	case RobRunWorld::Kind::BuildingLoot:
+		return world.Loot && world.BuildingLoots;
 	case RobRunWorld::Kind::Vehicle:
 	case RobRunWorld::Kind::Car:
 	case RobRunWorld::Kind::Helicopter:
-		return ConfigInstance.World.Vehicles;
+		return world.Vehicles;
 	case RobRunWorld::Kind::Grenade:
-		return ConfigInstance.World.Grenades;
+		return world.Grenades;
+	case RobRunWorld::Kind::CashLootNode:
+		return world.Valuables && world.CashLootNodes;
+	case RobRunWorld::Kind::SettlementCash:
+		return world.Valuables && world.SettlementCash;
+	case RobRunWorld::Kind::MoneyWorkbench:
+		return world.Valuables && world.MoneyWorkbenches;
+	case RobRunWorld::Kind::PointOfInterest:
+		return world.PointsOfInterest;
 	}
 	return false;
 }
 
 static ImU32 ColourFor(RobRunWorld::Kind kind)
 {
+	const auto& world = ConfigInstance.World;
 	switch (kind)
 	{
 	case RobRunWorld::Kind::Container:
-		return D2DColorToImU32(ConfigInstance.World.ContainerColour);
+		return D2DColorToImU32(world.ContainerColour);
+	case RobRunWorld::Kind::LootNode:
+		return D2DColorToImU32(world.LootNodeColour);
+	case RobRunWorld::Kind::SafeDoor:
+		return D2DColorToImU32(world.SafeDoorColour);
+	case RobRunWorld::Kind::StorageBox:
+		return D2DColorToImU32(world.StorageBoxColour);
+	case RobRunWorld::Kind::Shelving:
+		return D2DColorToImU32(world.ShelvingColour);
+	case RobRunWorld::Kind::CollectionTable:
+		return D2DColorToImU32(world.CollectionTableColour);
+	case RobRunWorld::Kind::PlotContainer:
+		return D2DColorToImU32(world.PlotContainerColour);
 	case RobRunWorld::Kind::Loot:
 	case RobRunWorld::Kind::StaticLoot:
 	case RobRunWorld::Kind::RandomLoot:
-		return D2DColorToImU32(ConfigInstance.World.LootColour);
+		return D2DColorToImU32(world.LootColour);
+	case RobRunWorld::Kind::DroppedBag:
+		return D2DColorToImU32(world.DroppedBagColour);
+	case RobRunWorld::Kind::VehicleLoot:
+		return D2DColorToImU32(world.VehicleLootColour);
+	case RobRunWorld::Kind::Cargo:
+		return D2DColorToImU32(world.CargoColour);
+	case RobRunWorld::Kind::PlotLoot:
+		return D2DColorToImU32(world.PlotLootColour);
+	case RobRunWorld::Kind::FurnitureLoot:
+		return D2DColorToImU32(world.FurnitureLootColour);
+	case RobRunWorld::Kind::BuildingLoot:
+		return D2DColorToImU32(world.BuildingLootColour);
 	case RobRunWorld::Kind::Vehicle:
 	case RobRunWorld::Kind::Car:
 	case RobRunWorld::Kind::Helicopter:
-		return D2DColorToImU32(ConfigInstance.World.VehicleColour);
+		return D2DColorToImU32(world.VehicleColour);
 	case RobRunWorld::Kind::Grenade:
-		return D2DColorToImU32(ConfigInstance.World.GrenadeColour);
+		return D2DColorToImU32(world.GrenadeColour);
+	case RobRunWorld::Kind::CashLootNode:
+		return D2DColorToImU32(world.CashLootNodeColour);
+	case RobRunWorld::Kind::SettlementCash:
+		return D2DColorToImU32(world.SettlementCashColour);
+	case RobRunWorld::Kind::MoneyWorkbench:
+		return D2DColorToImU32(world.MoneyWorkbenchColour);
+	case RobRunWorld::Kind::PointOfInterest:
+		return D2DColorToImU32(world.PointOfInterestColour);
 	}
 	return IM_COL32(255, 255, 255, 255);
 }

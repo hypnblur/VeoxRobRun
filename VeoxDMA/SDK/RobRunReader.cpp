@@ -38,6 +38,7 @@ static std::atomic<bool> readCatalog{ false };
 static int updateCounter = 0;
 static int gameRetryCountdown = 0;
 static int updaterRetryCountdown = 0;
+static int battleEntitiesRetryCountdown = 0;
 
 static Matrix4x4 fallbackViewProjection{};
 static bool fallbackViewProjectionValid = false;
@@ -182,6 +183,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     updateCounter = 0;
     gameRetryCountdown = 0;
     updaterRetryCountdown = 0;
+    battleEntitiesRetryCountdown = 0;
     entities.clear();
     detailCache.clear();
     rigCache.clear();
@@ -597,9 +599,19 @@ static void UpdateInternal()
         return;
     }
 
-    if (!cachedBattleEntities)
-        cachedBattleEntities = ReadPtr(cachedBattleModel + rr::BattleModel::BattleEntitiesModel);
-    if (!IsClass(cachedBattleEntities, "BattleEntitiesModel")) {
+    if (!cachedBattleEntities) {
+        if (battleEntitiesRetryCountdown <= 0) {
+            const std::uintptr_t candidate = ReadPtr(
+                cachedBattleModel + rr::BattleModel::BattleEntitiesModel);
+            if (IsClass(candidate, "BattleEntitiesModel"))
+                cachedBattleEntities = candidate;
+            else
+                battleEntitiesRetryCountdown = 15;
+        } else {
+            --battleEntitiesRetryCountdown;
+        }
+    }
+    if (cachedBattleEntities <= 0x10000) {
         ++failureCount;
         return;
     }
@@ -732,7 +744,15 @@ static void UpdateInternal()
             // to the entity itself when the client pointer is not usable.
             std::uintptr_t characterModel = ReadPtr(
                 entityModel + rr::BattleCharacterEntityModel::ClientModel);
-            if (!IsClass(characterModel, "BattleCharacterModel")) {
+
+            // Class identity costs 3-4 reads. When the pointer is unchanged
+            // from the cached detail entry it was already validated, so skip
+            // the check on this pass.
+            const auto cachedDetail = detailCache.find(entry.key);
+            const bool clientModelKnown = characterModel > 0x10000 &&
+                cachedDetail != detailCache.end() &&
+                cachedDetail->second.characterModel == characterModel;
+            if (!clientModelKnown && !IsClass(characterModel, "BattleCharacterModel")) {
                 const std::uintptr_t simulated = ReadPtr(
                     entityModel + rr::BattleCharacterEntityModel::SimulatedModel);
                 if (IsClass(simulated, "BattleCharacterModel"))

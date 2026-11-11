@@ -3,6 +3,7 @@
 #include "CheatFunction.h"
 #include "CameraFinder.h"
 #include "RobRunReader.h"
+#include "ConfigFile.h"
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Aim/AimController.h"
@@ -86,6 +87,14 @@ static void TickOverlay()
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f); // IM_COL32(100,220,140,255)
 
+	// Persist settings whenever the menu closes, so a user does not have to
+	// remember a separate save step. Shutdown saves again as a backstop.
+	static bool wasMenuOpen = false;
+	const bool menuOpen = Overlay::MenuOpen();
+	if (wasMenuOpen && !menuOpen)
+		ConfigFile::Save();
+	wasMenuOpen = menuOpen;
+
 	if (g_attached.load(std::memory_order_acquire))
 		RobRunReader::RefreshCamera();
 }
@@ -100,6 +109,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	printf("VeoxDMA - Starting...\n");
 
 	StartAttachLoop();
+
+	// Apply saved settings before the menu is first drawn.
+	ConfigFile::Load();
 
 	Overlay::Callbacks callbacks;
 	callbacks.init = [] {
@@ -118,6 +130,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 	};
 	callbacks.shutdown = [] {
+		ConfigFile::Save();
 		StopAttachLoop();
 		RobRunReader::Shutdown();
 	};

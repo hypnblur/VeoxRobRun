@@ -144,11 +144,10 @@ namespace BattleModel {
 inline constexpr std::uintptr_t BattleEntitiesModel = 0x90;
 inline constexpr std::uintptr_t BattleCameraModel   = 0x358;
 
-// New offset set: WorldEntitiesModel is reached directly from BattleModel.
-// The older +0x510 path is kept as a validated fallback for sessions where the
-// direct field is null.
-inline constexpr std::uintptr_t WorldEntitiesModel       = 0x60;
-inline constexpr std::uintptr_t WorldEntitiesModelLegacy = 0x510;
+// New offset set: WorldEntitiesModel is reached directly from BattleModel at
+// +0x510. The older +0x60 slot is kept as a validated fallback.
+inline constexpr std::uintptr_t WorldEntitiesModel       = 0x510;
+inline constexpr std::uintptr_t WorldEntitiesModelAlt    = 0x60;
 
 // New offset set: character slots live on BattleModel, not under
 // BattleEntitiesModel. The old root is retained as a fallback.
@@ -537,6 +536,7 @@ inline constexpr std::uintptr_t BattleCharacters           = 0x18;
 inline constexpr std::uintptr_t Containers                 = 0x20;
 inline constexpr std::uintptr_t AccessEntities             = 0x28;
 inline constexpr std::uintptr_t SecurityAlarms             = 0x30;
+inline constexpr std::uintptr_t DroppedLootBags            = 0x38; // old "Loots"
 inline constexpr std::uintptr_t Loots                      = 0x38;
 inline constexpr std::uintptr_t VehicleLoots               = 0x40;
 inline constexpr std::uintptr_t Doors                      = 0x48;
@@ -546,10 +546,23 @@ inline constexpr std::uintptr_t Helicopters                = 0x68;
 inline constexpr std::uintptr_t StaticLootObjects          = 0x98;
 inline constexpr std::uintptr_t RandomLootObjects          = 0xA0;
 inline constexpr std::uintptr_t LootNodes                  = 0xB0;
+inline constexpr std::uintptr_t VehicleTrunks              = 0xC0;
+inline constexpr std::uintptr_t Cargos                     = 0xC8;
+inline constexpr std::uintptr_t CollectionTables           = 0xD8;
+inline constexpr std::uintptr_t SafeDoors                  = 0x110;
+inline constexpr std::uintptr_t StorageBoxes               = 0x128;
+inline constexpr std::uintptr_t PlotContainers             = 0x140;
+inline constexpr std::uintptr_t Shelvings                  = 0x148;
+inline constexpr std::uintptr_t MoneyWorkbenches           = 0x158;
 inline constexpr std::uintptr_t Grenades                   = 0x1A0;
-inline constexpr std::uintptr_t FirstAidCabinetModels      = 0x290;
+inline constexpr std::uintptr_t SettlementCash             = 0x1C8;
+inline constexpr std::uintptr_t FurnitureLoots             = 0x220;
+inline constexpr std::uintptr_t BuildingLoots              = 0x238;
 inline constexpr std::uintptr_t CashLootNodes              = 0x268;
 inline constexpr std::uintptr_t PointOfInterest            = 0x270;
+inline constexpr std::uintptr_t FirstAidCabinetModels      = 0x290;
+inline constexpr std::uintptr_t CryptoWorkbenchesPublic    = 0x2D8;
+inline constexpr std::uintptr_t PlotLoots                  = 0x2F0;
 }
 
 namespace ContainerModel {
@@ -604,6 +617,87 @@ inline constexpr std::uintptr_t Transform   = 0x30; // GrenadeTransformModel*
 
 namespace GrenadeTransformModel {
 inline constexpr std::uintptr_t Position = 0x18; // inline V3
+}
+
+// ------------------------------------------------------------------
+// Extra world / valuable models (new metadata dump)
+// Positions are inline Vector3 fields inside the description model.
+// ------------------------------------------------------------------
+namespace LootNodeModel {
+inline constexpr std::uintptr_t Description         = 0x10;
+inline constexpr std::uintptr_t DescriptionPosition = 0x38;
+}
+
+namespace SafeDoorModel {
+inline constexpr std::uintptr_t Description         = 0x28;
+inline constexpr std::uintptr_t DescriptionPosition = 0x14;
+}
+
+namespace StorageBoxModel {
+inline constexpr std::uintptr_t DescriptionModel    = 0x20;
+inline constexpr std::uintptr_t DescriptionPosition = 0x34;
+}
+
+namespace ShelvingModel {
+inline constexpr std::uintptr_t DescriptionModel    = 0x18;
+inline constexpr std::uintptr_t DescriptionPosition = 0x20;
+}
+
+namespace CollectionTableModel {
+inline constexpr std::uintptr_t DescriptionModel    = 0x10;
+inline constexpr std::uintptr_t DescriptionPosition = 0x20;
+}
+
+namespace PlotContainerModel {
+inline constexpr std::uintptr_t Description         = 0x10;
+inline constexpr std::uintptr_t DescriptionPosition = 0x50;
+}
+
+namespace CashLootNodeModel {
+inline constexpr std::uintptr_t Description         = 0x18;
+inline constexpr std::uintptr_t DescriptionPosition = 0x24;
+}
+
+namespace SettlementCashModel {
+inline constexpr std::uintptr_t Description         = 0x18;
+inline constexpr std::uintptr_t DescriptionPosition = 0x1C;
+}
+
+namespace MoneyWorkbenchModel {
+inline constexpr std::uintptr_t DescriptionModel    = 0x20;
+inline constexpr std::uintptr_t DescriptionPosition = 0x20;
+}
+
+namespace DroppedBagModel {
+inline constexpr std::uintptr_t Transform        = 0x20;
+inline constexpr std::uintptr_t InteractPosition = 0x28;
+}
+
+namespace VehicleLootModel {
+inline constexpr std::uintptr_t Transform        = 0x20;
+inline constexpr std::uintptr_t InteractPosition = 0x28;
+}
+
+namespace CargoModel {
+inline constexpr std::uintptr_t Transform        = 0x30;
+inline constexpr std::uintptr_t InteractPosition = 0x38;
+}
+
+namespace PlotLootModel {
+inline constexpr std::uintptr_t Position = 0x18;
+}
+
+namespace FurnitureLootModel {
+inline constexpr std::uintptr_t Position = 0x18;
+}
+
+namespace BuildingLootModel {
+inline constexpr std::uintptr_t Position = 0x18;
+}
+
+namespace PointOfInterestModel {
+inline constexpr std::uintptr_t Description         = 0x38;
+inline constexpr std::uintptr_t DescriptionPosition = 0x30;
 }
 
 // ------------------------------------------------------------------

@@ -18,14 +18,30 @@ void Init(std::uintptr_t gameAssemblyBase)
 const char* KindName(Kind kind)
 {
     switch (kind) {
-    case Kind::Container:  return "Container";
-    case Kind::Loot:       return "Loot";
-    case Kind::StaticLoot: return "Static Loot";
-    case Kind::RandomLoot: return "Loot";
-    case Kind::Vehicle:    return "Vehicle";
-    case Kind::Car:        return "Car";
-    case Kind::Helicopter: return "Helicopter";
-    case Kind::Grenade:    return "Grenade";
+    case Kind::Container:       return "Container";
+    case Kind::Loot:            return "Loot";
+    case Kind::StaticLoot:      return "Static Loot";
+    case Kind::RandomLoot:      return "Loot";
+    case Kind::Vehicle:         return "Vehicle";
+    case Kind::Car:             return "Car";
+    case Kind::Helicopter:      return "Helicopter";
+    case Kind::Grenade:         return "Grenade";
+    case Kind::LootNode:        return "Loot Node";
+    case Kind::SafeDoor:        return "Safe";
+    case Kind::StorageBox:      return "Storage Box";
+    case Kind::Shelving:        return "Shelving";
+    case Kind::CollectionTable: return "Collection Table";
+    case Kind::PlotContainer:   return "Plot Container";
+    case Kind::DroppedBag:      return "Dropped Bag";
+    case Kind::VehicleLoot:     return "Vehicle Loot";
+    case Kind::Cargo:           return "Cargo";
+    case Kind::PlotLoot:        return "Plot Loot";
+    case Kind::FurnitureLoot:   return "Furniture Loot";
+    case Kind::BuildingLoot:    return "Building Loot";
+    case Kind::CashLootNode:    return "Cash Node";
+    case Kind::SettlementCash:  return "Settlement Cash";
+    case Kind::MoneyWorkbench:  return "Money Workbench";
+    case Kind::PointOfInterest: return "Point of Interest";
     }
     return "World";
 }
@@ -86,6 +102,29 @@ bool ReadVehiclePosition(std::uintptr_t transform, Vector3& out)
 
 using PositionReader = std::function<bool(std::uintptr_t model, Vector3& out)>;
 
+// Inline Vector3 stored directly on the model.
+bool ReadInlineField(std::uintptr_t model, std::uintptr_t offset, Vector3& out)
+{
+    out = Vector3{};
+    if (model <= 0x10000) return false;
+    if (!RobRunMemory::ReadVector3(model + offset, out)) return false;
+    return ValidPosition(out) &&
+        (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+}
+
+// Inline Vector3 stored on the model's description object.
+bool ReadDescriptionPosition(std::uintptr_t model, std::uintptr_t descriptionOffset,
+    std::uintptr_t positionOffset, Vector3& out)
+{
+    out = Vector3{};
+    if (model <= 0x10000) return false;
+    const std::uintptr_t description = RobRunMemory::ReadPtr(model + descriptionOffset);
+    if (description <= 0x10000) return false;
+    if (!RobRunMemory::ReadVector3(description + positionOffset, out)) return false;
+    return ValidPosition(out) &&
+        (out.x != 0.f || out.y != 0.f || out.z != 0.f);
+}
+
 // Cheap structural probe. Used to avoid mistaking a real Dictionary's buckets
 // array for a wrapper object when a stable snapshot fails transiently.
 bool HasDictionaryHeader(std::uintptr_t dictionary)
@@ -108,19 +147,41 @@ bool ReadCollection(std::uintptr_t world, std::uintptr_t offset,
     const std::uintptr_t field = RobRunMemory::ReadPtr(world + offset);
     if (field <= 0x10000) return false;
 
-    if (RobRunMemory::ReadDictInt(field, out)) return true;
+    if (RobRunMemory::ReadDictInt(field, out, false)) return true;
     if (HasDictionaryHeader(field)) return false;
 
     const std::uintptr_t inner = RobRunMemory::ReadPtr(field + 0x10);
-    if (inner > 0x10000 && inner != field && RobRunMemory::ReadDictInt(inner, out))
+    if (inner > 0x10000 && inner != field &&
+        RobRunMemory::ReadDictInt(inner, out, false))
         return true;
 
     const std::uintptr_t inner18 = RobRunMemory::ReadPtr(field + 0x18);
     if (inner18 > 0x10000 && inner18 != field && inner18 != inner &&
-        RobRunMemory::ReadDictInt(inner18, out))
+        RobRunMemory::ReadDictInt(inner18, out, false))
         return true;
 
     return false;
+}
+
+// Structural probe for a collection field. The field can hold the dictionary
+// directly or wrap it in a reference object, so the common wrapper slots are
+// tried without copying the dictionary contents.
+bool CollectionLooksValid(std::uintptr_t world, std::uintptr_t offset)
+{
+    if (world <= 0x10000) return false;
+    const std::uintptr_t field = RobRunMemory::ReadPtr(world + offset);
+    if (field <= 0x10000) return false;
+
+    if (RobRunMemory::LooksLikeDictionary(field)) return true;
+
+    const std::uintptr_t inner = RobRunMemory::ReadPtr(field + 0x10);
+    if (inner > 0x10000 && inner != field &&
+        RobRunMemory::LooksLikeDictionary(inner))
+        return true;
+
+    const std::uintptr_t inner18 = RobRunMemory::ReadPtr(field + 0x18);
+    return inner18 > 0x10000 && inner18 != field && inner18 != inner &&
+        RobRunMemory::LooksLikeDictionary(inner18);
 }
 
 bool WorldLooksValid(std::uintptr_t world)
@@ -130,12 +191,16 @@ bool WorldLooksValid(std::uintptr_t world)
     // Probe collections that exist in every loaded scene. A wrong base pointer
     // normally fails the dictionary structure checks. BattleCharacters is
     // included because a fresh match may have no loot or vehicles yet.
-    std::vector<RobRunMemory::DictEntry> entries;
-    return ReadCollection(world, rr::WorldEntitiesModel::BattleCharacters, entries) ||
-        ReadCollection(world, rr::WorldEntitiesModel::Containers, entries) ||
-        ReadCollection(world, rr::WorldEntitiesModel::Loots, entries) ||
-        ReadCollection(world, rr::WorldEntitiesModel::Vehicles, entries) ||
-        ReadCollection(world, rr::WorldEntitiesModel::Cars, entries);
+    return CollectionLooksValid(world, rr::WorldEntitiesModel::BattleCharacters) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::Containers) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::Loots) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::Vehicles) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::Cars) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::SafeDoors) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::LootNodes) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::CashLootNodes) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::SettlementCash) ||
+        CollectionLooksValid(world, rr::WorldEntitiesModel::PointOfInterest);
 }
 
 void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
@@ -170,29 +235,29 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     out = State{};
     if (battleModel <= 0x10000) return false;
 
-    // Dump path: BattleEntitiesModel+0x60 -> WorldEntitiesModel.
+    // Dump path: BattleModel+0x510 -> WorldEntitiesModel.
     std::uintptr_t world = 0;
-    if (battleEntities > 0x10000) {
-        const std::uintptr_t candidate = RobRunMemory::ReadPtr(
-            battleEntities + rr::BattleEntitiesModel::WorldEntitiesModel);
-        if (WorldLooksValid(candidate))
-            world = candidate;
-    }
-
-    // Header path kept as a validated fallback.
-    if (!world) {
+    {
         const std::uintptr_t candidate = RobRunMemory::ReadPtr(
             battleModel + rr::BattleModel::WorldEntitiesModel);
         if (WorldLooksValid(candidate))
             world = candidate;
     }
 
-    // Legacy root.
+    // Older sessions expose the same model at BattleEntitiesModel+0x60.
+    if (!world && battleEntities > 0x10000) {
+        const std::uintptr_t candidate = RobRunMemory::ReadPtr(
+            battleEntities + rr::BattleEntitiesModel::WorldEntitiesModel);
+        if (WorldLooksValid(candidate))
+            world = candidate;
+    }
+
+    // Older BattleModel slot.
     if (!world) {
-        const std::uintptr_t legacy = RobRunMemory::ReadPtr(
-            battleModel + rr::BattleModel::WorldEntitiesModelLegacy);
-        if (WorldLooksValid(legacy))
-            world = legacy;
+        const std::uintptr_t candidate = RobRunMemory::ReadPtr(
+            battleModel + rr::BattleModel::WorldEntitiesModelAlt);
+        if (WorldLooksValid(candidate))
+            world = candidate;
     }
     if (world <= 0x10000) return false;
 
@@ -232,12 +297,10 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    AddDictionary(world, rr::WorldEntitiesModel::Loots, Kind::Loot,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::LootModel::Transform);
-            return ReadScalarPosition(transform, position);
-        }, out, out.loots);
+    // 0x38 is droppedLootBags in the current dump. It used to be read here as
+    // the generic "loots" dictionary; reading it a second time under
+    // DroppedBag below would duplicate every bag and double the DMA traffic,
+    // so the DroppedBag pass is the only reader for this offset.
 
     AddDictionary(world, rr::WorldEntitiesModel::StaticLootObjects, Kind::StaticLoot,
         [](std::uintptr_t model, Vector3& position) {
@@ -281,6 +344,106 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return RobRunMemory::ReadVector3(
                 transform + rr::GrenadeTransformModel::Position, position);
         }, out, out.grenades);
+
+    // --- New dump: containers, storage and safes -----------------------
+    AddDictionary(world, rr::WorldEntitiesModel::LootNodes, Kind::LootNode,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::LootNodeModel::Description,
+                rr::LootNodeModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::SafeDoors, Kind::SafeDoor,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::SafeDoorModel::Description,
+                rr::SafeDoorModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::StorageBoxes, Kind::StorageBox,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::StorageBoxModel::DescriptionModel,
+                rr::StorageBoxModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::Shelvings, Kind::Shelving,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::ShelvingModel::DescriptionModel,
+                rr::ShelvingModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::CollectionTables, Kind::CollectionTable,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::CollectionTableModel::DescriptionModel,
+                rr::CollectionTableModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::PlotContainers, Kind::PlotContainer,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::PlotContainerModel::Description,
+                rr::PlotContainerModel::DescriptionPosition, position);
+        }, out, out.containers);
+
+    // --- New dump: dropped bags, vehicle loot, cargo and loose loot ----
+    AddDictionary(world, rr::WorldEntitiesModel::DroppedLootBags, Kind::DroppedBag,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::DroppedBagModel::Transform);
+            if (ReadScalarPosition(transform, position)) return true;
+            return ReadInlineField(model, rr::DroppedBagModel::InteractPosition, position);
+        }, out, out.loots);
+
+    AddDictionary(world, rr::WorldEntitiesModel::VehicleLoots, Kind::VehicleLoot,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, rr::VehicleLootModel::InteractPosition, position);
+        }, out, out.loots);
+
+    AddDictionary(world, rr::WorldEntitiesModel::Cargos, Kind::Cargo,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::CargoModel::Transform);
+            if (ReadVehiclePosition(transform, position)) return true;
+            return ReadInlineField(model, rr::CargoModel::InteractPosition, position);
+        }, out, out.loots);
+
+    AddDictionary(world, rr::WorldEntitiesModel::PlotLoots, Kind::PlotLoot,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, rr::PlotLootModel::Position, position);
+        }, out, out.loots);
+
+    AddDictionary(world, rr::WorldEntitiesModel::FurnitureLoots, Kind::FurnitureLoot,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, rr::FurnitureLootModel::Position, position);
+        }, out, out.loots);
+
+    AddDictionary(world, rr::WorldEntitiesModel::BuildingLoots, Kind::BuildingLoot,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, rr::BuildingLootModel::Position, position);
+        }, out, out.loots);
+
+    // --- New dump: valuables ------------------------------------------
+    AddDictionary(world, rr::WorldEntitiesModel::CashLootNodes, Kind::CashLootNode,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::CashLootNodeModel::Description,
+                rr::CashLootNodeModel::DescriptionPosition, position);
+        }, out, out.valuables);
+
+    AddDictionary(world, rr::WorldEntitiesModel::SettlementCash, Kind::SettlementCash,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::SettlementCashModel::Description,
+                rr::SettlementCashModel::DescriptionPosition, position);
+        }, out, out.valuables);
+
+    AddDictionary(world, rr::WorldEntitiesModel::MoneyWorkbenches, Kind::MoneyWorkbench,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::MoneyWorkbenchModel::DescriptionModel,
+                rr::MoneyWorkbenchModel::DescriptionPosition, position);
+        }, out, out.valuables);
+
+    // --- New dump: points of interest ----------------------------------
+    AddDictionary(world, rr::WorldEntitiesModel::PointOfInterest, Kind::PointOfInterest,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadDescriptionPosition(model, rr::PointOfInterestModel::Description,
+                rr::PointOfInterestModel::DescriptionPosition, position);
+        }, out, out.pointsOfInterest);
 
     return out.valid;
 }

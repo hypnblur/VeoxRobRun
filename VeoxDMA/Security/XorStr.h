@@ -22,6 +22,14 @@
 #include <cstddef>
 #include <utility>
 
+// Diagnostic / AV-friendly build: emit string literals as-is instead of
+// decrypting them on the stack at runtime. The decryption pattern is what
+// trips obfuscation heuristics such as Ikarus "Trojan.Win64.Krypt" and raises
+// ML scores. Enable with /p:VeoxPlainStrings=true.
+#if defined(VEOX_PLAIN_STRINGS)
+#define MAKE_STRING(str) (str)
+#define LIT(str) (str)
+#else
 #define MAKE_STRING(str)                                              \
     ::jm::make_xorstr(                                                \
         []() { return str; },                                         \
@@ -29,6 +37,7 @@
         std::make_index_sequence<::jm::detail::_buffer_size<sizeof(str)>()>{})
 
 #define LIT(str) MAKE_STRING(str).crypt_get()
+#endif
 
 #ifdef _MSC_VER
 #define LITFORCEINLINE __forceinline

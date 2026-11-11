@@ -20,6 +20,101 @@ bool ReadBytesFresh(std::uintptr_t address, void* buffer, std::size_t size)
     return TargetProcess.ReadFresh(address, buffer, size);
 }
 
+// A dictionary's header fields are contiguous (entries, count, free list,
+// free count, version). Reading them in one transaction instead of three
+// removes a large amount of DMA traffic on the world pass.
+namespace {
+
+struct DictHeader {
+    std::uintptr_t entries = 0;
+    std::int32_t count = 0;
+    std::int32_t freeList = 0;
+    std::int32_t freeCount = 0;
+    std::int32_t version = 0;
+};
+static_assert(sizeof(DictHeader) == 0x18, "Dictionary header layout");
+
+struct ListHeader {
+    std::uintptr_t items = 0;
+    std::int32_t count = 0;
+    std::int32_t version = 0;
+};
+static_assert(sizeof(ListHeader) == 0x10, "List header layout");
+
+bool ReadDictHeader(std::uintptr_t dictionary, DictHeader& out)
+{
+    if (dictionary <= 0x10000) return false;
+    if (!ReadBytes(dictionary + rr::Dict::entries, &out, sizeof(out))) return false;
+    return out.entries > 0x10000 && out.count >= 0 && out.count <= 65536;
+}
+
+bool DictHeaderMatches(const DictHeader& before, const DictHeader& after,
+    bool strictVersion)
+{
+    if (before.entries != after.entries || before.count != after.count)
+        return false;
+    return !strictVersion || before.version == after.version;
+}
+
+template <typename T>
+bool ReadDictOnce(std::uintptr_t dictionary, std::vector<T>& out,
+    bool requireStable)
+{
+    out.clear();
+    DictHeader header;
+    if (!ReadDictHeader(dictionary, header)) return false;
+
+    // Read the backing-array length and the entries in one transaction. The
+    // old path issued a separate read for capacity and another for the data.
+    const std::size_t elementBytes =
+        static_cast<std::size_t>(header.count) * sizeof(T);
+    std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
+    if (!ReadBytes(header.entries + rr::Array::max_length, raw.data(), raw.size()))
+        return false;
+
+    std::uint64_t capacity = 0;
+    std::memcpy(&capacity, raw.data(), sizeof(capacity));
+    if (capacity < static_cast<std::uint64_t>(header.count) ||
+        capacity > 0x1000000ull)
+        return false;
+
+    std::vector<T> snapshot(static_cast<std::size_t>(header.count));
+    if (elementBytes)
+        std::memcpy(snapshot.data(), raw.data() + sizeof(capacity), elementBytes);
+
+    // Re-read the header. A structural change while the array was copied means
+    // the snapshot belongs to a different bucket generation. Version-only
+    // changes are tolerated when the caller opts out of strict stability, which
+    // the fast-moving world dictionaries do.
+    DictHeader after;
+    if (!ReadDictHeader(dictionary, after) ||
+        !DictHeaderMatches(header, after, requireStable))
+        return false;
+
+    out.reserve(snapshot.size());
+    for (const auto& entry : snapshot) {
+        if (entry.next < rr::Dict::entry_allocated_min) continue;
+        if (entry.hash < 0) continue;
+        if (!entry.value) continue;
+        out.push_back(entry);
+    }
+    return true;
+}
+
+} // namespace
+
+bool LooksLikeDictionary(std::uintptr_t dictionary)
+{
+    DictHeader header;
+    if (!ReadDictHeader(dictionary, header)) return false;
+    std::uint64_t capacity = 0;
+    if (!ReadBytes(header.entries + rr::Array::max_length, &capacity,
+            sizeof(capacity)))
+        return false;
+    return capacity >= static_cast<std::uint64_t>(header.count) &&
+        capacity <= 0x1000000ull;
+}
+
 std::uintptr_t ReadPtr(std::uintptr_t address)
 {
     std::uintptr_t value = 0;
@@ -116,82 +211,34 @@ bool IsClass(std::uintptr_t object, const char* name)
     return Il2Cpp::IsClass(object, name);
 }
 
-static bool SnapshotStable(std::uintptr_t dictionary,
-    std::uintptr_t entries, std::int32_t count, std::int32_t version)
-{
-    return ReadPtr(dictionary + rr::Dict::entries) == entries &&
-        ReadInt32(dictionary + rr::Dict::count) == count &&
-        ReadInt32(dictionary + rr::Dict::version) == version;
-}
-
 bool ReadDictInt(std::uintptr_t dictionary, std::vector<DictEntry>& out,
     bool requireStable)
 {
+    // A busy dictionary can change between the header read and the array copy.
+    // Retrying once recovers most transient failures instead of dropping the
+    // whole collection for that pass.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (ReadDictOnce(dictionary, out, requireStable)) return true;
+    }
     out.clear();
-    if (dictionary <= 0x10000) return false;
-
-    const std::uintptr_t entries = ReadPtr(dictionary + rr::Dict::entries);
-    const std::int32_t count = ReadInt32(dictionary + rr::Dict::count);
-    const std::int32_t version = ReadInt32(dictionary + rr::Dict::version);
-
-    if (entries <= 0x10000 || count < 0 || count > 65536) return false;
-
-    const std::uint64_t capacity = ReadUInt64(entries + rr::Array::max_length);
-    if (capacity < static_cast<std::uint64_t>(count) || capacity > 0x1000000ull)
-        return false;
-
-    std::vector<DictEntry> snapshot(static_cast<std::size_t>(count));
-    if (count > 0 && !ReadBytes(entries + rr::Array::vector, snapshot.data(),
-            snapshot.size() * sizeof(DictEntry))) {
-        return false;
-    }
-
-    if (requireStable && !SnapshotStable(dictionary, entries, count, version))
-        return false;
-
-    out.reserve(snapshot.size());
-    for (const auto& entry : snapshot) {
-        if (entry.next < rr::Dict::entry_allocated_min) continue;
-        if (entry.hash < 0) continue; // removed/free slot
-        if (!entry.value) continue;
-        out.push_back(entry);
-    }
-    return true;
+    return false;
 }
 
 bool ReadDictRef(std::uintptr_t dictionary, std::vector<RefDictEntry>& out,
     bool requireStable)
 {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (ReadDictOnce(dictionary, out, requireStable)) {
+            // Reference dictionaries may legitimately hold a null value.
+            out.erase(std::remove_if(out.begin(), out.end(),
+                [](const RefDictEntry& entry) {
+                    return !entry.key || !entry.value;
+                }), out.end());
+            return true;
+        }
+    }
     out.clear();
-    if (dictionary <= 0x10000) return false;
-
-    const std::uintptr_t entries = ReadPtr(dictionary + rr::Dict::entries);
-    const std::int32_t count = ReadInt32(dictionary + rr::Dict::count);
-    const std::int32_t version = ReadInt32(dictionary + rr::Dict::version);
-
-    if (entries <= 0x10000 || count < 0 || count > 65536) return false;
-
-    const std::uint64_t capacity = ReadUInt64(entries + rr::Array::max_length);
-    if (capacity < static_cast<std::uint64_t>(count) || capacity > 0x1000000ull)
-        return false;
-
-    std::vector<RefDictEntry> snapshot(static_cast<std::size_t>(count));
-    if (count > 0 && !ReadBytes(entries + rr::Array::vector, snapshot.data(),
-            snapshot.size() * sizeof(RefDictEntry))) {
-        return false;
-    }
-
-    if (requireStable && !SnapshotStable(dictionary, entries, count, version))
-        return false;
-
-    out.reserve(snapshot.size());
-    for (const auto& entry : snapshot) {
-        if (entry.next < rr::Dict::entry_allocated_min) continue;
-        if (entry.hash < 0) continue;
-        if (!entry.key || !entry.value) continue;
-        out.push_back(entry);
-    }
-    return true;
+    return false;
 }
 
 bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
@@ -200,23 +247,33 @@ bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
     out.clear();
     if (list <= 0x10000) return false;
 
-    const std::uintptr_t items = ReadPtr(list + rr::List::items);
-    const std::int32_t count = ReadInt32(list + rr::List::count);
-    if (items <= 0x10000 || count < 0 || count > 65536) return false;
-
-    const std::uint64_t capacity = ReadUInt64(items + rr::Array::max_length);
-    if (capacity < static_cast<std::uint64_t>(count)) return false;
-
-    std::vector<std::uintptr_t> snapshot(static_cast<std::size_t>(count));
-    if (count > 0 && !ReadBytes(items + rr::Array::vector, snapshot.data(),
-            snapshot.size() * sizeof(std::uintptr_t))) {
+    ListHeader header;
+    if (!ReadBytes(list + rr::List::items, &header, sizeof(header)))
         return false;
-    }
-
-    if (requireStable &&
-        (ReadPtr(list + rr::List::items) != items ||
-         ReadInt32(list + rr::List::count) != count)) {
+    if (header.items <= 0x10000 || header.count < 0 || header.count > 65536)
         return false;
+
+    const std::size_t elementBytes =
+        static_cast<std::size_t>(header.count) * sizeof(std::uintptr_t);
+    std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
+    if (!ReadBytes(header.items + rr::Array::max_length, raw.data(), raw.size()))
+        return false;
+
+    std::uint64_t capacity = 0;
+    std::memcpy(&capacity, raw.data(), sizeof(capacity));
+    if (capacity < static_cast<std::uint64_t>(header.count))
+        return false;
+
+    std::vector<std::uintptr_t> snapshot(static_cast<std::size_t>(header.count));
+    if (elementBytes)
+        std::memcpy(snapshot.data(), raw.data() + sizeof(capacity), elementBytes);
+
+    if (requireStable) {
+        ListHeader after;
+        if (!ReadBytes(list + rr::List::items, &after, sizeof(after)))
+            return false;
+        if (after.items != header.items || after.count != header.count)
+            return false;
     }
 
     out = std::move(snapshot);

@@ -114,11 +114,15 @@ Implementation: `Il2Cpp::Fields`, `Il2Cpp::FindField`,
 | `+0x10` | `uint64 value` |
 
 Allocated entry predicate used by this runtime: `next >= -1`. Enumerate `count`
-entries, skip removed entries and null values. Re-read entries/count/version
-after capture and discard a changed snapshot.
+entries, skip removed entries and null values. The header (entries, count, free
+list, free count, version) is read in one transaction, then the backing-array
+length and elements are read in a second. A structural change is detected by
+re-reading the header; a strict version change is retried once, while world
+collections opt out of the version check because they mutate continuously.
+Rejected snapshots are retried once before the pass gives up.
 
 Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
-`ReadString`.
+`ReadString`, `LooksLikeDictionary`.
 
 ---
 
@@ -131,9 +135,9 @@ Implementation: `RobRunMemory::ReadDictInt`, `ReadDictRef`, `ReadList`,
 | `Game.Game +0x20` | active updater `List<reference>` |
 | `Game.Game +0xD0` | `Game.GameModel*` |
 | `Game.GameModel +0x10` | `Game.Battle.BattleModel*` |
-| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` (dump path) |
-| `BattleModel +0x60` | `WorldEntitiesModel*` fallback |
-| `BattleModel +0x510` | `WorldEntitiesModel*` legacy fallback |
+| `BattleModel +0x510` | `WorldEntitiesModel*` (current offset set) |
+| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` fallback |
+| `BattleModel +0x60` | `WorldEntitiesModel*` legacy fallback |
 | `BattleModel +0x90` | `Game.Battle.BattleEntitiesModel*` |
 | `BattleModel +0x248` | character slots model (dump path) |
 | `BattleModel +0x4C8` | character slots model legacy fallback |
@@ -598,23 +602,45 @@ Implementation: `RobRunReader::ReadHealth`, `ReadRoleAndVehicle`.
 
 | Address / field | Value |
 | --- | --- |
-| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` (current offset set) |
-| `BattleModel +0x510` | `WorldEntitiesModel*` (legacy fallback) |
+| `BattleModel +0x510` | `WorldEntitiesModel*` (current offset set) |
+| `BattleEntitiesModel +0x60` | `WorldEntitiesModel*` fallback |
+| `BattleModel +0x60` | `WorldEntitiesModel*` legacy fallback |
 | `WorldEntitiesModel +0x18` | battleCharacters dictionary |
 | `WorldEntitiesModel +0x20` | containers dictionary |
-| `WorldEntitiesModel +0x38` | loots dictionary |
+| `WorldEntitiesModel +0x30` | securityAlarms dictionary |
+| `WorldEntitiesModel +0x38` | droppedLootBags dictionary |
 | `WorldEntitiesModel +0x40` | vehicleLoots dictionary |
+| `WorldEntitiesModel +0x48` | doors dictionary |
 | `WorldEntitiesModel +0x58` | vehicles dictionary |
 | `WorldEntitiesModel +0x60` | cars dictionary |
 | `WorldEntitiesModel +0x68` | helicopters dictionary |
 | `WorldEntitiesModel +0x98` | staticLootObjects dictionary |
 | `WorldEntitiesModel +0xA0` | randomLootObjects dictionary |
+| `WorldEntitiesModel +0xB0` | lootNodes dictionary |
+| `WorldEntitiesModel +0xC0` | vehicleTrunks dictionary |
+| `WorldEntitiesModel +0xC8` | cargos dictionary |
+| `WorldEntitiesModel +0xD8` | collectionTables dictionary |
+| `WorldEntitiesModel +0x110` | safeDoors dictionary |
+| `WorldEntitiesModel +0x128` | storageBoxes dictionary |
+| `WorldEntitiesModel +0x140` | plotContainers dictionary |
+| `WorldEntitiesModel +0x148` | shelvings dictionary |
+| `WorldEntitiesModel +0x158` | moneyWorkbenches dictionary |
 | `WorldEntitiesModel +0x1A0` | grenades dictionary |
+| `WorldEntitiesModel +0x1C8` | settlementCash dictionary |
+| `WorldEntitiesModel +0x220` | furnitureLoots dictionary |
+| `WorldEntitiesModel +0x238` | buildingLoots dictionary |
+| `WorldEntitiesModel +0x268` | cashLootNodes dictionary |
+| `WorldEntitiesModel +0x270` | pointsOfInterest dictionary |
+| `WorldEntitiesModel +0x290` | firstAidCabinets dictionary |
+| `WorldEntitiesModel +0x2D8` | cryptoWorkbenchesPublic dictionary |
+| `WorldEntitiesModel +0x2F0` | plotLoots dictionary |
 
 Each collection is resolved directly first, then through the common `+0x10`
-and `+0x18` reference-wrapper slots. Root validation accepts any of
-battleCharacters, containers, loots, vehicles or cars, so an empty early-match
-scene does not look like a bad pointer.
+and `+0x18` reference-wrapper slots. Root validation is a cheap header/capacity
+probe (no full dictionary copy) and accepts any of battleCharacters,
+containers, loots, vehicles, cars, safes, loot nodes, cash nodes, settlement
+cash or points of interest, so an empty early-match scene does not look like a
+bad pointer.
 
 Additional dictionaries exist at `+0x10` through `+0x8D0`; the commonly used
 ones are exposed in `rr::WorldEntitiesModel`.
@@ -634,12 +660,36 @@ ones are exposed in `rr::WorldEntitiesModel`.
 | `GrenadeModel +0x18` | description; `+0x30` `GrenadeTransformModel*` |
 | `GrenadeTransformModel +0x18` | inline position `V3` |
 
+New dump collections used by the ESP:
+
+| Model | Description / transform | Position |
+| --- | --- | --- |
+| `LootNodeModel` | description `+0x10` | description `+0x38` |
+| `SafeDoorModel` | description `+0x28` | description `+0x14` |
+| `StorageBoxModel` | description `+0x20` | description `+0x34` |
+| `ShelvingModel` | description `+0x18` | description `+0x20` |
+| `CollectionTableModel` | description `+0x10` | description `+0x20` |
+| `PlotContainerModel` | description `+0x10` | description `+0x50` |
+| `CashLootNodeModel` | description `+0x18` | description `+0x24` |
+| `SettlementCashModel` | description `+0x18` | description `+0x1C` |
+| `MoneyWorkbenchModel` | description `+0x20` | description `+0x20` |
+| `PointOfInterestModel` | description `+0x38` | description `+0x30` |
+| `DroppedBagModel` | transform `+0x20` | interact position `+0x28` |
+| `VehicleLootModel` | transform `+0x20` | interact position `+0x28` |
+| `CargoModel` | transform `+0x30` | interact position `+0x38` |
+| `PlotLootModel` | - | position `+0x18` |
+| `FurnitureLootModel` | - | position `+0x18` |
+| `BuildingLootModel` | - | position `+0x18` |
+
 `TransformModel` scalar position wrappers: `+0x10/+0x18/+0x20`, x/y/z.
 
 `BattleCharacterModel +0x1C8` -> `InVehicleModel*`;
 `InVehicleModel +0x10` entityId wrapper, `+0x18` seatSlot wrapper, `+0x20`
 vehicleType wrapper. `VehicleSeatData +0x20` Occupied wrapper, `+0x28` EntityId
 wrapper. Seat zero has not been established as the driver seat.
+
+World reads are metadata-only: unopened container contents and remote player
+health are not replicated to the client, so the overlay cannot show them.
 
 Implementation: `RobRunWorld::Read`, `Esp/WorldEsp.cpp`.
 
