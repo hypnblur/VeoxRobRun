@@ -117,19 +117,28 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     std::vector<U> transforms(count);
     if (!m.array(matrices,local,false) || !m.array(parents,parent,true) ||
         !m.array(pointers,transforms,true) || !m.stable()) return false;
-    for (int p : parent) if (p < -1 || p >= count) return false;
+    // Validate each bone's parent chain individually. A bone whose parent
+    // index is out of range or forms a cycle is marked unreachable rather
+    // than rejecting the entire layout.
+    std::vector<unsigned char> reachable(count, 0);
     for (int b = 0; b < count; ++b) {
+        bool ok = true;
         int p = b, steps = 0;
-        while (p != -1 && steps < count) { p = parent[p]; ++steps; }
-        if (p != -1) return false;
+        while (p != -1 && steps < count) {
+            if (p < -1 || p >= count) { ok = false; break; }
+            p = parent[p]; ++steps;
+        }
+        if (p != -1) ok = false;
+        if (ok) reachable[b] = 1;
     }
     auto ancestor = [&](int a, int b) {
-        for (; b != -1; b = parent[b]) if (a == b) return true;
+        for (; b != -1 && b >= 0 && b < count; b = parent[b])
+            if (a == b) return true;
         return false;
     };
     auto indexOf = [&](U n) {
         int index = -1;
-        for (int b = 0; b < count; ++b) if (transforms[b] == n) {
+        for (int b = 0; b < count; ++b) if (transforms[b] == n && reachable[b]) {
             if (index != -1) return -1;
             index = b;
         }
@@ -137,15 +146,12 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     };
     int root = indexOf(native);
     if (root < 0) return false;
-    // Pose validity is handled per bone in SampleLayout. Rejecting the whole
-    // layout because one bone had a bad quaternion at build time made some
-    // characters permanently skeletonless while the animator was settling.
     auto resolve = [&](U transform) {
         if (!m.is(transform,"Transform")) return -1;
         U n = m.ptr(transform,0x10);
         if (n <= 0x10000 || m.ptr(n,0x28) != hierarchy) return -1;
         int index = indexOf(n);
-        return index >= 0 && ancestor(root,index) ? index : -1;
+        return index >= 0 && reachable[index] && ancestor(root,index) ? index : -1;
     };
     U animation = m.ptr(view,0x28), weapon = m.ptr(view,0x30);
     const bool animationOk = m.isOneOf(animation,{"CharacterAnimationView","AnimationView"});
@@ -421,9 +427,10 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         if (!boneValid[b]) continue;
         Vec v = local[b].p;
         bool ok = true;
-        for (int p = layout.parent[b]; p != -1; p = layout.parent[p]) {
-            if (!boneValid[p]) { ok = false; break; }
+        for (int p = layout.parent[b]; p != -1; ) {
+            if (p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
             v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
+            p = layout.parent[p];
         }
         if (!ok || !Finite(v)) continue;
         world[b] = v;
@@ -440,9 +447,6 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
 
     if (localOut) {
         for (int b = 0; b < count; ++b) {
-            // Invalid bones are written as a neutral pose instead of raw
-            // memory so the animator-motion comparison never sees NaN/garbage
-            // and does not freeze the character for one bad read.
             if (!boneValid[b]) {
                 localOut[b].position = {};
                 localOut[b].rotation[0] = 0.f;
@@ -462,10 +466,6 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
     }
 
     if (points) {
-        // A tolerant layout may only resolve some of the four central anchors.
-        // Expose the pose as valid when at least one of them sampled, and leave
-        // the missing points at the origin so the caller's sanity distance
-        // check falls back to the body-relative height.
         auto anchorOk = [&](int idx) {
             return idx >= 0 && idx < count && worldValid[idx] != 0;
         };
@@ -529,9 +529,10 @@ bool ProcessPoseData(const RigLayout& layout, const void* poseData,
         if (!boneValid[b]) continue;
         Vec v = local[b].p;
         bool ok = true;
-        for (int p = layout.parent[b]; p != -1; p = layout.parent[p]) {
-            if (!boneValid[p]) { ok = false; break; }
+        for (int p = layout.parent[b]; p != -1; ) {
+            if (p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
             v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
+            p = layout.parent[p];
         }
         if (!ok || !Finite(v)) continue;
         world[b] = v;
@@ -684,7 +685,14 @@ bool ValidateHierarchy(const RigLayout& layout, const Read& read)
     std::int32_t currentCount = 0;
     if (!read(currentHierarchy + 0x38, &currentCount, sizeof(currentCount)))
         return false;
-    return currentCount == layout.count;
+    if (currentCount < 2 || currentCount > 512)
+        return false;
+    // Tolerate count drift: the hierarchy is valid as long as every
+    // selected bone index is still within the current count.
+    for (std::size_t b = 0; b < layout.selected.size(); ++b)
+        if (layout.selected[b] && static_cast<std::int32_t>(b) >= currentCount)
+            return false;
+    return true;
 }
 
 // Name-based bone fallback. Reads each transform's GameObject name from the
@@ -719,15 +727,26 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     if (!m.array(matrices, local, false) || !m.array(parents, parent, true) ||
         !m.array(pointers, transforms, true))
         return false;
-    for (int p : parent) if (p < -1 || p >= count) return false;
+    std::vector<unsigned char> reachable(count, 0);
+    for (int b = 0; b < count; ++b) {
+        bool ok = true;
+        int p = b, steps = 0;
+        while (p != -1 && steps < count) {
+            if (p < -1 || p >= count) { ok = false; break; }
+            p = parent[p]; ++steps;
+        }
+        if (p != -1) ok = false;
+        if (ok) reachable[b] = 1;
+    }
 
     int root = -1;
     for (int b = 0; b < count; ++b)
-        if (transforms[b] == native) { root = b; break; }
+        if (reachable[b] && transforms[b] == native) { root = b; break; }
     if (root < 0) return false;
 
     auto ancestor = [&](int a, int b) {
-        for (; b != -1; b = parent[b]) if (a == b) return true;
+        for (int steps = 0; b != -1 && b >= 0 && b < count && steps < count; b = parent[b], ++steps)
+            if (a == b) return true;
         return false;
     };
 
@@ -736,7 +755,7 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     struct NamedBone { int index; std::string name; };
     std::vector<NamedBone> namedBones;
     for (int b = 0; b < count; ++b) {
-        if (!ancestor(root, b)) continue;
+        if (!reachable[b] || !ancestor(root, b)) continue;
         U gameObject = 0;
         if (!read(transforms[b] + 0x30, &gameObject, sizeof(gameObject)) || gameObject <= 0x10000)
             continue;
