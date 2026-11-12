@@ -37,18 +37,22 @@ namespace VeoxMenu {
 namespace {
 
 // ---- geometry -------------------------------------------------------------
-constexpr float kW = 900.f;
-constexpr float kH = 560.f;
+// kW/kH/kCardW are refreshed every frame from the actual window size so the
+// menu can be resized; the rest of the layout hangs off them.
+float kW = 900.f;
+float kH = 560.f;
 constexpr float kTop = 66.f;
 constexpr float kSide = 176.f;
 constexpr float kPad = 18.f;
 constexpr float kGap = 14.f;
 constexpr float kCardHeader = 40.f;
 constexpr float kRow = 22.f;
-constexpr float kCardW = (kW - kSide - kPad * 2.f - kGap) * 0.5f;
-// The ImGui window is a little larger than the visible panel so the drop
-// shadow around the panel is not clipped away by the window draw list.
-constexpr float kGlow = 14.f;
+float kCardW = 337.f;
+constexpr float kMinW = 680.f;
+constexpr float kMinH = 420.f;
+// The panel fills the whole ImGui window, so ImGui's own resize borders and
+// grip line up exactly with the visible menu edges.
+constexpr float kGlow = 0.f;
 
 // ---- palette --------------------------------------------------------------
 const ImVec4 kAccent = ImVec4(124 / 255.f, 92 / 255.f, 255 / 255.f, 1.f);
@@ -77,16 +81,15 @@ void ApplyPalette()
 {
 	if (g_highContrast)
 	{
-		// Solid fills and brighter strokes/text so the menu stays readable
-		// over bright game scenes.
-		kBgTop = ImVec4(18 / 255.f, 16 / 255.f, 27 / 255.f, 1.f);
-		kBgBottom = ImVec4(8 / 255.f, 7 / 255.f, 12 / 255.f, 1.f);
-		kPanel = ImVec4(1.f, 1.f, 1.f, 0.07f);
-		kCard = ImVec4(25 / 255.f, 23 / 255.f, 35 / 255.f, 1.f);
-		kCardTop = ImVec4(35 / 255.f, 32 / 255.f, 49 / 255.f, 1.f);
-		kPopup = ImVec4(25 / 255.f, 23 / 255.f, 35 / 255.f, 1.f);
-		kStroke = ImVec4(1.f, 1.f, 1.f, 0.17f);
-		kTrack = ImVec4(1.f, 1.f, 1.f, 0.22f);
+		// Flat, fully opaque surfaces: no gradient, no translucent panels.
+		kBgTop = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
+		kBgBottom = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
+		kPanel = ImVec4(21 / 255.f, 19 / 255.f, 31 / 255.f, 1.f);
+		kCard = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
+		kCardTop = ImVec4(38 / 255.f, 34 / 255.f, 53 / 255.f, 1.f);
+		kPopup = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
+		kStroke = ImVec4(1.f, 1.f, 1.f, 0.20f);
+		kTrack = ImVec4(1.f, 1.f, 1.f, 0.24f);
 		kText = ImVec4(1.f, 1.f, 1.f, 1.f);
 		kTextDim = ImVec4(0.82f, 0.80f, 0.90f, 1.f);
 		kTextFaint = ImVec4(0.64f, 0.62f, 0.74f, 1.f);
@@ -114,6 +117,9 @@ float g_fade = 1.f;
 float g_slide = 0.f;
 float g_slideDir = 1.f;
 bool g_scrollReset = false;
+bool g_dragging = false;
+ImVec2 g_dragDelta = ImVec2(0.f, 0.f);
+ImVec2 g_lastPos = ImVec2(-1.f, -1.f);
 char g_search[96] = "";
 bool g_readCatalog = false;
 
@@ -296,8 +302,13 @@ bool ToggleRow(const char* label, bool* v)
 	const ImVec2 tmax(tmin.x + tw, tmin.y + th);
 	dl->AddRectFilled(tmin, tmax, C(Mix(kTrack, kAccent, t), 0.35f + 0.65f * t), th * 0.5f);
 	if (t > 0.01f)
+	{
+		// Keep the glow inside the switch instead of letting it halo the row.
+		dl->PushClipRect(tmin, tmax, true);
 		dl->AddShadowCircle(ImVec2((tmin.x + tmax.x) * 0.5f, (tmin.y + tmax.y) * 0.5f),
 			th * 0.5f, C(kAccent, 0.30f * t), 18.f, ImVec2(0, 0), 0);
+		dl->PopClipRect();
+	}
 
 	const float kx = ImLerp(tmin.x + 10.f, tmax.x - 10.f, t);
 	dl->AddCircleFilled(ImVec2(kx, (tmin.y + tmax.y) * 0.5f), 7.f,
@@ -344,8 +355,13 @@ bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
 
 	dl->AddRectFilled(track.Min, track.Max, C(Mix(kTrack, kAccent, t), 0.35f + 0.65f * t), th * 0.5f);
 	if (t > 0.01f)
+	{
+		// Clip the glow to the switch so it does not bleed past the track.
+		dl->PushClipRect(track.Min, track.Max, true);
 		dl->AddShadowCircle(ImVec2((track.Min.x + track.Max.x) * 0.5f, (track.Min.y + track.Max.y) * 0.5f),
 			th * 0.5f, C(kAccent, 0.30f * t), 18.f, ImVec2(0, 0), 0);
+		dl->PopClipRect();
+	}
 	const float kx = ImLerp(track.Min.x + 10.f, track.Max.x - 10.f, t);
 	dl->AddCircleFilled(ImVec2(kx, (track.Min.y + track.Max.y) * 0.5f), 7.f,
 		C(Mix(kTextDim, ImVec4(1, 1, 1, 1), t)));
@@ -1448,8 +1464,8 @@ void ApplyStyleColors()
 	colors[ImGuiCol_TitleBgCollapsed] = kPopup;
 	colors[ImGuiCol_MenuBarBg] = kPopup;
 	colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-	colors[ImGuiCol_ScrollbarGrab] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.55f);
-	colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.8f);
+	colors[ImGuiCol_ScrollbarGrab] = ImVec4(1.f, 1.f, 1.f, g_highContrast ? 0.28f : 0.16f);
+	colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.75f);
 	colors[ImGuiCol_ScrollbarGrabActive] = kAccent;
 	colors[ImGuiCol_CheckMark] = kAccentBright;
 	colors[ImGuiCol_SliderGrab] = kAccent;
@@ -1536,35 +1552,87 @@ void Draw(bool attached, const std::string& statusText)
 		ApplyStyleColors();
 	}
 
-	ImGui::SetNextWindowSize(ImVec2(kW + kGlow * 2.f, kH + kGlow * 2.f), ImGuiCond_Always);
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - kW) * 0.5f - kGlow,
-		(io.DisplaySize.y - kH) * 0.5f - kGlow), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(kW + kGlow * 2.f, kH + kGlow * 2.f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(
+		ImVec2(kMinW + kGlow * 2.f, kMinH + kGlow * 2.f),
+		ImVec2(io.DisplaySize.x, io.DisplaySize.y));
+	if (g_dragDelta.x != 0.f || g_dragDelta.y != 0.f)
+	{
+		// Apply last frame's drag, clamped so the top bar stays reachable.
+		ImVec2 target = (g_lastPos.x >= 0.f)
+			? g_lastPos + g_dragDelta
+			: ImVec2((io.DisplaySize.x - kW) * 0.5f, (io.DisplaySize.y - kH) * 0.5f);
+		target.x = ImClamp(target.x, -kW * 0.5f, ImMax(io.DisplaySize.x - kW * 0.5f, 0.f));
+		target.y = ImClamp(target.y, 0.f, ImMax(io.DisplaySize.y - kTop, 0.f));
+		ImGui::SetNextWindowPos(target, ImGuiCond_Always);
+		g_dragDelta = ImVec2(0.f, 0.f);
+	}
+	else
+	{
+		ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - kW) * 0.5f - kGlow,
+			(io.DisplaySize.y - kH) * 0.5f - kGlow), ImGuiCond_FirstUseEver);
+	}
 
 	ImGui::Begin("##ROBRUN", nullptr,
-		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
 		ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar |
 		ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings |
 		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
 	{
+		ImGuiWindow* window = ImGui::GetCurrentWindow();
+		const ImVec2 winSize = window->Size;
+		kW = ImMax(winSize.x - kGlow * 2.f, kMinW);
+		kH = ImMax(winSize.y - kGlow * 2.f, kMinH);
+		kCardW = (kW - kSide - kPad * 2.f - kGap) * 0.5f;
+
 		const ImVec2 pos = ImGui::GetWindowPos() + ImVec2(kGlow, kGlow);
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 
-		// drop shadow
-		dl->AddShadowRect(pos, pos + ImVec2(kW, kH), C(kAccent, 0.22f), 34.f, ImVec2(0, 4), 0, 16.f);
-		dl->AddShadowRect(pos, pos + ImVec2(kW, kH), C(ImVec4(0, 0, 0, 1), 0.55f), 18.f, ImVec2(0, 3), 0, 16.f);
+		// ---- drag by the top bar ------------------------------------------
+		// The window has no title bar, so dragging is handled here. The search
+		// field and close button are excluded so they keep their clicks. The
+		// accumulated delta is applied at the start of the next frame, which
+		// keeps ImGui's clip/hit rects consistent.
+		{
+			const float fieldW = 320.f;
+			const float fieldX = pos.x + kSide + ((kW - kSide) - fieldW) * 0.5f;
+			const ImRect dragZone(pos, pos + ImVec2(kW, kTop));
+			const ImRect searchRect(ImVec2(fieldX - 8.f, pos.y + 10.f),
+				ImVec2(fieldX + fieldW + 8.f, pos.y + 56.f));
+			const ImRect closeRect(pos + ImVec2(kW - 52.f, 13.f),
+				pos + ImVec2(kW - 14.f, 51.f));
+			const ImVec2 mouse = io.MousePos;
+			const bool inZone = dragZone.Contains(mouse) &&
+				!searchRect.Contains(mouse) && !closeRect.Contains(mouse);
 
-		// base gradient
-		dl->AddRectFilledMultiColor(pos, pos + ImVec2(kW, kH),
-			C(kBgTop), C(kBgTop), C(kBgBottom), C(kBgBottom), 14.f);
+			if (!ImGui::IsMouseDown(ImGuiMouseButton_Left))
+				g_dragging = false;
+			else if (inZone && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+				!ImGui::IsAnyItemActive())
+				g_dragging = true;
+
+			if (g_dragging)
+				g_dragDelta += io.MouseDelta;
+		}
+
+		// base surface: gradient normally, one flat fill in high contrast
+		if (g_highContrast)
+			dl->AddRectFilled(pos, pos + ImVec2(kW, kH), C(kBgTop), 14.f);
+		else
+			dl->AddRectFilledMultiColor(pos, pos + ImVec2(kW, kH),
+				C(kBgTop), C(kBgTop), C(kBgBottom), C(kBgBottom), 14.f);
 		dl->AddRect(pos, pos + ImVec2(kW, kH), C(kStroke, 1.f), 14.f, 0, 1.f);
 
 		// ambient purple glow behind the content
-		dl->PushClipRect(pos + ImVec2(kSide, kTop), pos + ImVec2(kW, kH), true);
-		dl->AddShadowCircle(pos + ImVec2(kSide, kTop + 120.f), 110.f, C(kAccent, 0.10f), 320.f, ImVec2(0, 0), 0);
-		dl->AddShadowCircle(pos + ImVec2(kW, kTop + 120.f), 110.f, C(kAccent, 0.10f), 320.f, ImVec2(0, 0), 0);
-		dl->AddShadowCircle(pos + ImVec2((kSide + kW) * 0.5f, kH), 120.f, C(kAccent, 0.08f), 320.f, ImVec2(0, 0), 0);
-		dl->PopClipRect();
+		if (!g_highContrast)
+		{
+			dl->PushClipRect(pos + ImVec2(kSide, kTop), pos + ImVec2(kW, kH), true);
+			dl->AddShadowCircle(pos + ImVec2(kSide, kTop + 120.f), 110.f, C(kAccent, 0.10f), 320.f, ImVec2(0, 0), 0);
+			dl->AddShadowCircle(pos + ImVec2(kW, kTop + 120.f), 110.f, C(kAccent, 0.10f), 320.f, ImVec2(0, 0), 0);
+			dl->AddShadowCircle(pos + ImVec2((kSide + kW) * 0.5f, kH), 120.f, C(kAccent, 0.08f), 320.f, ImVec2(0, 0), 0);
+			dl->PopClipRect();
+		}
 
 		// top bar divider
 		dl->AddLine(pos + ImVec2(kSide, kTop), pos + ImVec2(kW, kTop), C(kStroke), 1.f);
@@ -1626,6 +1694,16 @@ void Draw(bool attached, const std::string& statusText)
 		ImGui::EndChild();
 		ImGui::PopStyleColor();
 		ImGui::PopStyleVar(3);
+
+		// resize hint: two short diagonals in the bottom-right corner
+		{
+			const ImVec2 c(pos.x + kW - 6.f, pos.y + kH - 6.f);
+			const ImU32 col = C(kTextFaint, 0.85f);
+			dl->AddLine(ImVec2(c.x - 10.f, c.y), ImVec2(c.x, c.y - 10.f), col, 1.4f);
+			dl->AddLine(ImVec2(c.x - 4.f, c.y), ImVec2(c.x, c.y - 4.f), col, 1.4f);
+		}
+
+		g_lastPos = window->Pos;
 	}
 
 	ImGui::End();
