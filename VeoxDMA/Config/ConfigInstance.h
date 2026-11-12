@@ -4,6 +4,7 @@
 #include "OverlayConfig.h"
 #include "WorldConfig.h"
 #include "AimConfig.h"
+#include "RadarConfig.h"
 
 class ConfigInstances
 {
@@ -12,6 +13,7 @@ public:
 	OverlayConfig Overlay = OverlayConfig(LIT("Overlay"));
 	WorldConfig World = WorldConfig(LIT("World"));
 	AimConfig Aim = AimConfig(LIT("Aim"));
+	RadarConfig Radar = RadarConfig(LIT("Radar"));
 
 	json ToJson()
 	{
@@ -20,6 +22,7 @@ public:
 		jsoned.merge_patch(Overlay.ToJson());
 		jsoned.merge_patch(World.ToJson());
 		jsoned.merge_patch(Aim.ToJson());
+		jsoned.merge_patch(Radar.ToJson());
 		return jsoned;
 	}
 
@@ -29,6 +32,7 @@ public:
 		Overlay.FromJson(jsoned);
 		World.FromJson(jsoned);
 		Aim.FromJson(jsoned);
+		Radar.FromJson(jsoned);
 	}
 };
 inline ConfigInstances ConfigInstance;

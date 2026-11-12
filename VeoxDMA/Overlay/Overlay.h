@@ -51,6 +51,9 @@ bool GetMonitorInfo(int index, MonitorInfo& out);
 
 void RequestExit();
 
+ID3D11Device* GetDevice();
+ID3D11DeviceContext* GetDeviceContext();
+
 // Corner toast. Colour is IM_COL32-formatted; seconds is the lifetime.
 void Notify(const char* msg, unsigned int colour = 0xFFFFFFFFu, float seconds = 2.f);
 

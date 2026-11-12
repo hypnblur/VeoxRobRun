@@ -154,6 +154,7 @@
     <ClCompile Include="Esp\PlayerEsp.cpp" />
     <ClCompile Include="Esp\EspDraw.cpp" />
     <ClCompile Include="Aim\AimController.cpp" />
+    <ClCompile Include="Overlay\Backdrop.cpp" />
     <ClCompile Include="Overlay\Overlay.cpp" />
     <ClCompile Include="Overlay\OverlayNotify.cpp" />
     <ClCompile Include="Main.cpp" />
@@ -170,6 +171,7 @@
     <ClCompile Include="SDK\RobRunCamera.cpp" />
     <ClCompile Include="SDK\Inventory.cpp" />
     <ClCompile Include="SDK\WorldEntities.cpp" />
+    <ClCompile Include="Esp\Radar.cpp" />
     <ClCompile Include="Esp\WorldEsp.cpp" />
     <ClCompile Include="Misc\Colour.cpp" />
     <ClCompile Include="UI\VeoxMenu.cpp" />
@@ -208,9 +210,12 @@
     <ClInclude Include="Config\OverlayConfig.h" />
     <ClInclude Include="Config\WorldConfig.h" />
     <ClInclude Include="Config\AimConfig.h" />
+    <ClInclude Include="Config\RadarConfig.h" />
     <ClInclude Include="Esp\PlayerEsp.h" />
+    <ClInclude Include="Esp\Radar.h" />
     <ClInclude Include="Esp\WorldEsp.h" />
     <ClInclude Include="Esp\EspDraw.h" />
+    <ClInclude Include="Overlay\Backdrop.h" />
     <ClInclude Include="Overlay\Overlay.h" />
     <ClInclude Include="Overlay\OverlayNotify.h" />
     <ClInclude Include="Misc\CheatFunction.h" />

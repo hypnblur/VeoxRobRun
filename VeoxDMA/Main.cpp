@@ -6,17 +6,21 @@
 #include "ConfigFile.h"
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
+#include "Esp/Radar.h"
 #include "Aim/AimController.h"
 #include "Input/InputManager.h"
 #include "UI/VeoxMenu.h"
 #include "Overlay/Overlay.h"
+#include "Overlay/Backdrop.h"
 #include <atomic>
 #include <mutex>
 
 static std::atomic<bool> g_attached{ false };
 static std::atomic<bool> g_stopAttach{ false };
 static std::atomic<bool> g_pendingAttachToast{ false };
+static std::atomic<bool> g_pendingBackdrop{ false };
 static std::thread g_attachThread;
+static HINSTANCE g_hInstance = nullptr;
 
 static std::mutex g_statusMutex;
 static std::string g_attachStatus = "Waiting for DMA card...";
@@ -61,6 +65,7 @@ static bool AttachGame()
 	SetAttachStatus("Attached.");
 	g_attached.store(true, std::memory_order_release);
 	g_pendingAttachToast.store(true);
+	g_pendingBackdrop.store(true);
 	return true;
 }
 
@@ -85,7 +90,12 @@ static void StopAttachLoop()
 static void TickOverlay()
 {
 	if (g_pendingAttachToast.exchange(false))
-		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f); // IM_COL32(100,220,140,255)
+		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
+
+	if (g_pendingBackdrop.exchange(false)) {
+		Backdrop::Create(g_hInstance);
+		Backdrop::Show();
+	}
 
 	// Persist settings whenever the menu closes, so a user does not have to
 	// remember a separate save step. Shutdown saves again as a backstop.
@@ -98,6 +108,7 @@ static void TickOverlay()
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
+	g_hInstance = hInstance;
 	AllocConsole();
 	FILE* fDummy;
 	freopen_s(&fDummy, "CONIN$", "r", stdin);
@@ -113,6 +124,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	Overlay::Callbacks callbacks;
 	callbacks.init = [] {
 		VeoxMenu::Init();
+		Radar::Init();
 	};
 	callbacks.tick = [] {
 		TickOverlay();
@@ -127,6 +139,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			RobRunReader::RefreshCamera();
 		DrawPlayers();
 		DrawWorldEntities();
+		Radar::Draw();
 		Aim::Draw();
 		Aim::DrawDebug();
 		if (Overlay::MenuOpen())
@@ -134,6 +147,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	};
 	callbacks.shutdown = [] {
 		ConfigFile::Save();
+		Radar::Shutdown();
+		Backdrop::Destroy();
 		StopAttachLoop();
 		RobRunReader::Shutdown();
 	};

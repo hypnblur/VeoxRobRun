@@ -322,6 +322,9 @@ bool GetMonitorInfo(int index, MonitorInfo& out)
 
 void RequestExit() { g_requestExit.store(true); }
 
+ID3D11Device* GetDevice() { return g_device; }
+ID3D11DeviceContext* GetDeviceContext() { return g_context; }
+
 void Notify(const char* msg, unsigned int colour, float seconds)
 {
 	OverlayNotify::Show(msg, colour, seconds);

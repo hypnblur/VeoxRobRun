@@ -7,6 +7,8 @@
 #include "InputManager.h"
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
+#include "../Esp/Radar.h"
+#include "../Overlay/Backdrop.h"
 #include "../ImGUI/imgui.h"
 #include <cstdio>
 #include <cstring>
@@ -587,6 +589,69 @@ static void DrawPanelMisc()
 	ImGui::PopStyleVar();
 }
 
+static void DrawPanelRadar()
+{
+	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, CHROME_R);
+	float pw = MENU_W - SIDE_W - 24.f;
+	float ph = MENU_H - LOGO_H - 24.f;
+	ImGui::SetCursorPos(ImVec2(SIDE_W + 8.f, LOGO_H + 8.f));
+	ImGui::BeginChild("##radar_panel", ImVec2(pw, ph), true);
+
+	ImGui::Text("Radar");
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	ImGui::Checkbox("Enable Radar", &ConfigInstance.Radar.Enabled);
+
+	{
+		const auto& maps = Radar::GetMapFiles();
+		int mapIdx = Radar::GetCurrentMapIndex();
+		const char* preview = (mapIdx >= 0 && mapIdx < (int)maps.size())
+			? maps[mapIdx].c_str() : "No maps found";
+		ImGui::SetNextItemWidth(220.f);
+		if (ImGui::BeginCombo("Map", preview)) {
+			for (int i = 0; i < (int)maps.size(); i++) {
+				bool selected = (i == mapIdx);
+				if (ImGui::Selectable(maps[i].c_str(), selected))
+					Radar::SetMap(i);
+				if (selected)
+					ImGui::SetItemDefaultFocus();
+			}
+			ImGui::EndCombo();
+		}
+	}
+
+	ImGui::Spacing();
+	ImGui::Checkbox("Show Players", &ConfigInstance.Radar.ShowPlayers);
+	ImGui::Checkbox("Show Vehicles", &ConfigInstance.Radar.ShowVehicles);
+	ImGui::Checkbox("Show Loot", &ConfigInstance.Radar.ShowLoot);
+	ImGui::Checkbox("Rotate with camera", &ConfigInstance.Radar.RotateWithCamera);
+
+	ImGui::Spacing();
+	ImGui::SliderFloat("Radar Size", &ConfigInstance.Radar.Size, 150.f, 800.f, "%.0f px");
+	ImGui::SliderFloat("Zoom", &ConfigInstance.Radar.Zoom, 0.2f, 10.f, "%.1fx");
+	ImGui::SliderFloat("Opacity", &ConfigInstance.Radar.Opacity, 0.1f, 1.f, "%.2f");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::Text("World Coordinate Bounds");
+	ImGui::TextDisabled("Adjust these to align the map to world positions.");
+	ImGui::DragFloat("Min X", &ConfigInstance.Radar.WorldMinX, 1.f, -5000.f, 5000.f);
+	ImGui::DragFloat("Max X", &ConfigInstance.Radar.WorldMaxX, 1.f, -5000.f, 5000.f);
+	ImGui::DragFloat("Min Z", &ConfigInstance.Radar.WorldMinZ, 1.f, -5000.f, 5000.f);
+	ImGui::DragFloat("Max Z", &ConfigInstance.Radar.WorldMaxZ, 1.f, -5000.f, 5000.f);
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::TextDisabled("Scroll wheel on the radar window to zoom.");
+	ImGui::TextDisabled("Drag the radar window to reposition it.");
+
+	ImGui::EndChild();
+	ImGui::PopStyleVar();
+}
+
 static void DrawPanelSettings(bool attached, const std::string& statusText)
 {
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, CHROME_R);
@@ -676,6 +741,36 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 	}
 
 	ImGui::TextDisabled("Insert toggles the menu.");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::Text("Backdrop Window");
+	{
+		bool vis = Backdrop::IsVisible();
+		if (ImGui::Checkbox("Show backdrop", &vis)) {
+			if (vis) Backdrop::Show();
+			else Backdrop::Hide();
+		}
+		ImGui::TextDisabled("Fullscreen black window behind the overlay.");
+
+		static int bdW = 0;
+		static int bdH = 0;
+		static bool customRes = false;
+		ImGui::Checkbox("Custom resolution", &customRes);
+		if (customRes) {
+			ImGui::SetNextItemWidth(100.f);
+			ImGui::InputInt("Width##bd", &bdW, 0);
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(100.f);
+			ImGui::InputInt("Height##bd", &bdH, 0);
+			if (ImGui::Button("Apply resolution", ImVec2(140, 0)))
+				Backdrop::SetResolution(bdW, bdH);
+		} else {
+			if (ImGui::Button("Reset to native", ImVec2(140, 0)))
+				Backdrop::SetFullscreen(true);
+		}
+	}
 
 	ImGui::Spacing();
 	ImGui::Separator();
@@ -782,12 +877,12 @@ void Draw(bool attached, const std::string& statusText)
 	ImGui::BeginChild("##sidebar_nav", ImVec2(SIDE_W - 6.f, MENU_H - LOGO_H - 8.f), false,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBackground);
 
-	static const char* tabs[] = { "ESP", "Device Connections", "Misc", "Settings" };
-	for (int i = 0; i < 4; i++)
+	static const char* tabs[] = { "ESP", "Radar", "Device Connections", "Misc", "Settings" };
+	for (int i = 0; i < 5; i++)
 	{
 		if (SidebarButton(tabs[i], g_tab == i, SIDE_W - 6.f))
 			g_tab = i;
-		if (i < 3) ImGui::Spacing();
+		if (i < 4) ImGui::Spacing();
 	}
 
 	// Status indicator at bottom
@@ -808,9 +903,10 @@ void Draw(bool attached, const std::string& statusText)
 	switch (g_tab)
 	{
 	case 0: DrawPanelESP(); break;
-	case 1: DrawPanelDevices(); break;
-	case 2: DrawPanelMisc(); break;
-	case 3: DrawPanelSettings(attached, statusText); break;
+	case 1: DrawPanelRadar(); break;
+	case 2: DrawPanelDevices(); break;
+	case 3: DrawPanelMisc(); break;
+	case 4: DrawPanelSettings(attached, statusText); break;
 	}
 
 	ImGui::End();
