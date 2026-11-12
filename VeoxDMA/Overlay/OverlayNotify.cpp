@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "OverlayNotify.h"
 #include "ConfigInstance.h"
+#include "Overlay.h"
 #include "ImGUI/imgui.h"
 #include <chrono>
 
@@ -38,6 +39,9 @@ void OverlayNotify::Show(const char* msg, unsigned int col, float seconds)
 void OverlayNotify::Draw()
 {
 	// ---- feature status window --------------------------------------------
+	// The menu draws its own info bar in the same corner, so hide this one
+	// while the menu is open.
+	if (!Overlay::MenuOpen())
 	{
 		const PlayerConfig& cfg = ConfigInstance.Player;
 		StatusEntry entries[] = {

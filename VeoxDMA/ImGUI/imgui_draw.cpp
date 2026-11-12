@@ -1483,10 +1483,54 @@ void ImDrawList::AddRectFilled(const ImVec2& p_min, const ImVec2& p_max, ImU32 c
 }
 
 // p_min = upper-left, p_max = lower-right
-void ImDrawList::AddRectFilledMultiColor(const ImVec2& p_min, const ImVec2& p_max, ImU32 col_upr_left, ImU32 col_upr_right, ImU32 col_bot_right, ImU32 col_bot_left)
+void ImDrawList::AddRectFilledMultiColor(const ImVec2& p_min, const ImVec2& p_max, ImU32 col_upr_left, ImU32 col_upr_right, ImU32 col_bot_right, ImU32 col_bot_left, float rounding, ImDrawFlags flags)
 {
     if (((col_upr_left | col_upr_right | col_bot_right | col_bot_left) & IM_COL32_A_MASK) == 0)
         return;
+
+    flags = FixRectCornerFlags(flags);
+    rounding = ImMin(rounding, ImFabs(p_max.x - p_min.x) * (((flags & ImDrawFlags_RoundCornersTop) == ImDrawFlags_RoundCornersTop) || ((flags & ImDrawFlags_RoundCornersBottom) == ImDrawFlags_RoundCornersBottom) ? 0.5f : 1.0f) - 1.0f);
+    rounding = ImMin(rounding, ImFabs(p_max.y - p_min.y) * (((flags & ImDrawFlags_RoundCornersLeft) == ImDrawFlags_RoundCornersLeft) || ((flags & ImDrawFlags_RoundCornersRight) == ImDrawFlags_RoundCornersRight) ? 0.5f : 1.0f) - 1.0f);
+
+    // https://github.com/ocornut/imgui/issues/3710#issuecomment-758555966
+    if (rounding > 0.0f)
+    {
+        const int size_before = VtxBuffer.Size;
+        AddRectFilled(p_min, p_max, IM_COL32_WHITE, rounding, flags);
+        const int size_after = VtxBuffer.Size;
+
+        for (int i = size_before; i < size_after; i++)
+        {
+            ImDrawVert* vert = VtxBuffer.Data + i;
+
+            ImVec4 upr_left = ImGui::ColorConvertU32ToFloat4(col_upr_left);
+            ImVec4 bot_left = ImGui::ColorConvertU32ToFloat4(col_bot_left);
+            ImVec4 up_right = ImGui::ColorConvertU32ToFloat4(col_upr_right);
+            ImVec4 bot_right = ImGui::ColorConvertU32ToFloat4(col_bot_right);
+
+            float X = ImClamp((vert->pos.x - p_min.x) / (p_max.x - p_min.x), 0.0f, 1.0f);
+
+            float r1 = upr_left.x + (up_right.x - upr_left.x) * X;
+            float r2 = bot_left.x + (bot_right.x - bot_left.x) * X;
+            float g1 = upr_left.y + (up_right.y - upr_left.y) * X;
+            float g2 = bot_left.y + (bot_right.y - bot_left.y) * X;
+            float b1 = upr_left.z + (up_right.z - upr_left.z) * X;
+            float b2 = bot_left.z + (bot_right.z - bot_left.z) * X;
+            float a1 = upr_left.w + (up_right.w - upr_left.w) * X;
+            float a2 = bot_left.w + (bot_right.w - bot_left.w) * X;
+
+            float Y = ImClamp((vert->pos.y - p_min.y) / (p_max.y - p_min.y), 0.0f, 1.0f);
+            float r = r1 + (r2 - r1) * Y;
+            float g = g1 + (g2 - g1) * Y;
+            float b = b1 + (b2 - b1) * Y;
+            float a = a1 + (a2 - a1) * Y;
+            ImVec4 RGBA(r, g, b, a);
+
+            RGBA = RGBA * ImGui::ColorConvertU32ToFloat4(vert->col);
+            vert->col = ImColor(RGBA);
+        }
+        return;
+    }
 
     const ImVec2 uv = _Data->TexUvWhitePixel;
     PrimReserve(6, 4);
@@ -1643,6 +1687,48 @@ void ImDrawList::AddEllipseFilled(const ImVec2& center, const ImVec2& radius, Im
     const float a_max = IM_PI * 2.0f * ((float)num_segments - 1.0f) / (float)num_segments;
     PathEllipticalArcTo(center, radius, rot, 0.0f, a_max, num_segments - 1);
     PathFillConvex(col);
+}
+
+void ImDrawList::AddShadowCircle(const ImVec2& obj_center, float obj_radius, ImU32 shadow_col, float shadow_thickness, const ImVec2& shadow_offset, ImDrawFlags flags, int num_segments)
+{
+    if ((shadow_col & IM_COL32_A_MASK) == 0 || shadow_thickness <= 0.0f)
+        return;
+    const int steps = 12;
+    const ImU32 base_a = (shadow_col >> IM_COL32_A_SHIFT) & 0xFF;
+    for (int i = steps; i >= 1; --i)
+    {
+        float t = (float)i / (float)steps;
+        float r = obj_radius + shadow_thickness * t;
+        ImU32 a = (ImU32)(base_a * (1.0f - t) * (1.0f - t));
+        if (a == 0) continue;
+        ImU32 col = (shadow_col & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+        AddCircleFilled(ImVec2(obj_center.x + shadow_offset.x, obj_center.y + shadow_offset.y), r, col, num_segments);
+    }
+}
+
+void ImDrawList::AddShadowRect(const ImVec2& obj_min, const ImVec2& obj_max, ImU32 shadow_col, float shadow_thickness, const ImVec2& shadow_offset, ImDrawFlags flags, float obj_rounding)
+{
+    if ((shadow_col & IM_COL32_A_MASK) == 0 || shadow_thickness <= 0.0f)
+        return;
+    const int steps = 12;
+    const ImU32 base_a = (shadow_col >> IM_COL32_A_SHIFT) & 0xFF;
+    for (int i = steps; i >= 1; --i)
+    {
+        float t = (float)i / (float)steps;
+        float expand = shadow_thickness * t;
+        ImU32 a = (ImU32)(base_a * (1.0f - t) * (1.0f - t));
+        if (a == 0) continue;
+        ImU32 col = (shadow_col & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+        AddRectFilled(
+            ImVec2(obj_min.x - expand + shadow_offset.x, obj_min.y - expand + shadow_offset.y),
+            ImVec2(obj_max.x + expand + shadow_offset.x, obj_max.y + expand + shadow_offset.y),
+            col, obj_rounding + expand * 0.5f, flags);
+    }
+}
+
+void ImDrawList::AddShadowNGon(const ImVec2& obj_center, float obj_radius, ImU32 shadow_col, float shadow_thickness, const ImVec2& shadow_offset, ImDrawFlags flags, int num_segments)
+{
+    AddShadowCircle(obj_center, obj_radius, shadow_col, shadow_thickness, shadow_offset, flags, num_segments);
 }
 
 // Cubic Bezier takes 4 controls points

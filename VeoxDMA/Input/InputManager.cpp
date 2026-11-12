@@ -113,6 +113,21 @@ namespace
 		return false;
 	}
 
+	// 22H2/23H2 keep gafAsyncKeyState in per-session state and the offset moved
+	// from 0x3690 to 0x36A8 partway through the servicing line. The build number
+	// is identical across that change, so read the target's update revision.
+	DWORD QueryTargetUbr()
+	{
+		DWORD type = REG_DWORD;
+		DWORD value = 0;
+		DWORD cb = sizeof(value);
+		if (!VMMDLL_WinReg_QueryValueExU(TargetProcess.vHandle,
+			(LPSTR)"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\UBR",
+			&type, (PBYTE)&value, &cb) || cb < sizeof(DWORD))
+			return 0;
+		return value;
+	}
+
 	bool InitFromEat()
 	{
 		PVMMDLL_MAP_EAT eat_map = NULL;
@@ -151,18 +166,32 @@ namespace
 		}
 
 		const bool is24H2 = build >= 26100;
+		// 22H2/23H2 (22621/22631) share a layout that only the update revision
+		// distinguishes; 24H2+ still resolves both values by signature.
+		const DWORD ubr = is24H2 ? 0 : QueryTargetUbr();
 		const char* mods[2] = { is24H2 ? "win32k.sys" : "win32ksgd.sys", is24H2 ? "win32ksgd.sys" : "win32k.sys" };
 		const char* failure = "no csrss.exe";
+		INPUT_LOG("[Input] session lookup: build %llu UBR %lu\n", build, ubr);
 
+		// Session space (where win32ksgd.sys lives on 22H2/23H2) is only mapped
+		// in processes of that session, so try the matching csrss first.
+		std::vector<std::pair<int, DWORD>> csrssProcs;
 		for (int pid : TargetProcess.GetPidListFromName("csrss.exe"))
 		{
-			VMMDLL_PROCESS_INFORMATION ci{};
-			ci.magic = VMMDLL_PROCESS_INFORMATION_MAGIC;
-			ci.wVersion = VMMDLL_PROCESS_INFORMATION_VERSION;
-			SIZE_T ccb = sizeof(ci);
+			VMMDLL_PROCESS_INFORMATION pi{};
+			pi.magic = VMMDLL_PROCESS_INFORMATION_MAGIC;
+			pi.wVersion = VMMDLL_PROCESS_INFORMATION_VERSION;
+			SIZE_T pcb = sizeof(pi);
 			DWORD csrssSession = 0;
-			if (VMMDLL_ProcessGetInformation(TargetProcess.vHandle, pid, &ci, &ccb))
-				csrssSession = ci.win.dwSessionId;
+			if (VMMDLL_ProcessGetInformation(TargetProcess.vHandle, pid, &pi, &pcb))
+				csrssSession = pi.win.dwSessionId;
+			csrssProcs.push_back({ pid, csrssSession });
+		}
+		std::stable_partition(csrssProcs.begin(), csrssProcs.end(),
+			[&](const std::pair<int, DWORD>& p) { return session != 0 && p.second == session; });
+
+		for (const auto& [pid, csrssSession] : csrssProcs)
+		{
 			INPUT_LOG("[Input] csrss pid %d session %lu\n", pid, csrssSession);
 
 			for (const char* mod : mods)
@@ -197,6 +226,15 @@ namespace
 						slotTables.push_back({ insn + 7 + rel, s.decrementSession });
 						break;
 					}
+				}
+				if (!is24H2 && strcmp(mod, "win32ksgd.sys") == 0)
+				{
+					// 22H2/23H2 keep gSessionGlobalSlots at a fixed RVA in
+					// win32ksgd.sys. Keep it as an extra candidate so a
+					// signature that lands on the wrong load instruction, or a
+					// scan that misses a paged-out page, still resolves.
+					slotTables.push_back({ modBase + 0x3110, false });
+					INPUT_LOG("[Input]   adding win32ksgd.sys+0x3110 slot candidate\n");
 				}
 				if (slotTables.empty() && is24H2 && strcmp(mod, "win32k.sys") == 0)
 				{
@@ -274,6 +312,7 @@ namespace
 				const OffSig offSigs[] = {
 					{ "48 8D 90 ? ? ? ? E8 ? ? ? ? 0F 57 C0", 3 },
 					{ "B9 00 80 FF FF ? 22 B4 ? ? ? ? ? 41", 9 },
+					{ "B9 00 80 FF FF 22 B4 ? ? ? ? ? 41", 8 },  // 22H2: no REX before AND
 					{ "40 0F B6 ? 48 C1 E9 02 8A 94 08 ? ? ? ?", 11 },
 				};
 				uint32_t gafOffset = 0;
@@ -289,8 +328,26 @@ namespace
 				}
 				if (!gafOffset)
 				{
-					failure = "gafAsyncKeyState offset signature not found";
-					continue;
+					if (!is24H2)
+					{
+						// 22H2/23H2 update-revision fallback. 0x36A8 from UBR 3880
+						// onwards, 0x3690 before; UBR 0 (query failed) assumes the
+						// current servicing line.
+						gafOffset = (ubr >= 3880 || ubr == 0) ? 0x36A8u : 0x3690u;
+						INPUT_LOG("[Input]   key offset fallback 0x%X (UBR %lu)\n", gafOffset, ubr);
+					}
+					else
+					{
+						failure = "gafAsyncKeyState offset signature not found";
+						continue;
+					}
+				}
+				else if (!is24H2 && ubr != 0)
+				{
+					const uint32_t expected = ubr >= 3880 ? 0x36A8u : 0x3690u;
+					if (gafOffset != expected)
+						INPUT_LOG("[Input]   warning: signature offset 0x%X != UBR %lu expected 0x%X\n",
+							gafOffset, ubr, expected);
 				}
 
 				for (uint64_t state : states)

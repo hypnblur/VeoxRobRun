@@ -175,6 +175,9 @@
     <ClCompile Include="Esp\WorldEsp.cpp" />
     <ClCompile Include="Misc\Colour.cpp" />
     <ClCompile Include="UI\VeoxMenu.cpp" />
+    <ClCompile Include="UI\imgui_edited.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="Input\kmbox.cpp" />
     <ClCompile Include="Input\kmboxNet.cpp" />
     <ClCompile Include="Input\MakcuTransport.cpp" />
@@ -236,6 +239,10 @@
     <ClInclude Include="SDK\WorldEntities.h" />
     <ClInclude Include="Security\XorStr.h" />
     <ClInclude Include="UI\VeoxMenu.h" />
+    <ClInclude Include="UI\imgui_edited.hpp" />
+    <ClInclude Include="UI\imgui_settings.h" />
+    <ClInclude Include="UI\font.h" />
+    <ClInclude Include="UI\textures.h" />
     <ClInclude Include="Input\kmbox.h" />
     <ClInclude Include="Input\kmboxNet.h" />
     <ClInclude Include="Input\kmboxNetWrapper.h" />
