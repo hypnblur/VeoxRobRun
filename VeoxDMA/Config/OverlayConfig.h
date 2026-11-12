@@ -18,6 +18,7 @@ public:
 	bool FPSEnabled = false;         // small FPS readout in the top-left
 	int FrameCap = 0;                // 0 = uncapped, otherwise 1..1000
 	bool Transparent = true;         // per-pixel alpha over the game
+	bool HighContrastMenu = false;   // solid menu fills for bright scenes
 	bool ClickThroughWhenClosed = true;
 	bool AlwaysOnTop = true;
 	D2D1::ColorF BackgroundColour = Colour(0, 0, 0);
@@ -47,6 +48,7 @@ public:
 		j[ConfigName][LIT("FPSEnabled")] = FPSEnabled;
 		j[ConfigName][LIT("FrameCap")] = FrameCap;
 		j[ConfigName][LIT("Transparent")] = Transparent;
+		j[ConfigName][LIT("HighContrastMenu")] = HighContrastMenu;
 		j[ConfigName][LIT("ClickThroughWhenClosed")] = ClickThroughWhenClosed;
 		j[ConfigName][LIT("AlwaysOnTop")] = AlwaysOnTop;
 		ToJsonColour(&j, LIT("BackgroundColour"), &BackgroundColour);
@@ -64,6 +66,8 @@ public:
 			FrameCap = j[ConfigName][LIT("FrameCap")];
 		if (j[ConfigName].contains(LIT("Transparent")))
 			Transparent = j[ConfigName][LIT("Transparent")];
+		if (j[ConfigName].contains(LIT("HighContrastMenu")))
+			HighContrastMenu = j[ConfigName][LIT("HighContrastMenu")];
 		if (j[ConfigName].contains(LIT("ClickThroughWhenClosed")))
 			ClickThroughWhenClosed = j[ConfigName][LIT("ClickThroughWhenClosed")];
 		if (j[ConfigName].contains(LIT("AlwaysOnTop")))

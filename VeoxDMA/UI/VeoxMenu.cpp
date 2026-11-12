@@ -53,20 +53,59 @@ constexpr float kGlow = 14.f;
 // ---- palette --------------------------------------------------------------
 const ImVec4 kAccent = ImVec4(124 / 255.f, 92 / 255.f, 255 / 255.f, 1.f);
 const ImVec4 kAccentBright = ImVec4(166 / 255.f, 140 / 255.f, 255 / 255.f, 1.f);
-const ImVec4 kBgTop = ImVec4(11 / 255.f, 9 / 255.f, 18 / 255.f, 1.f);
-const ImVec4 kBgBottom = ImVec4(4 / 255.f, 4 / 255.f, 7 / 255.f, 1.f);
-const ImVec4 kPanel = ImVec4(255 / 255.f, 255 / 255.f, 255 / 255.f, 0.028f);
-const ImVec4 kCard = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
-const ImVec4 kCardTop = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
-const ImVec4 kPopup = ImVec4(12 / 255.f, 11 / 255.f, 18 / 255.f, 1.f);
-const ImVec4 kStroke = ImVec4(1.f, 1.f, 1.f, 0.055f);
-const ImVec4 kTrack = ImVec4(1.f, 1.f, 1.f, 0.075f);
-const ImVec4 kText = ImVec4(236 / 255.f, 233 / 255.f, 247 / 255.f, 1.f);
-const ImVec4 kTextDim = ImVec4(140 / 255.f, 135 / 255.f, 166 / 255.f, 1.f);
-const ImVec4 kTextFaint = ImVec4(92 / 255.f, 88 / 255.f, 114 / 255.f, 1.f);
 const ImVec4 kGreen = ImVec4(74 / 255.f, 201 / 255.f, 126 / 255.f, 1.f);
 const ImVec4 kRed = ImVec4(255 / 255.f, 75 / 255.f, 75 / 255.f, 1.f);
 const ImVec4 kTransparent = ImVec4(0.f, 0.f, 0.f, 0.f);
+
+// Mutable so the High Contrast Menu setting can swap the whole surface at
+// runtime. ApplyPalette() resets them every frame.
+ImVec4 kBgTop = ImVec4(11 / 255.f, 9 / 255.f, 18 / 255.f, 1.f);
+ImVec4 kBgBottom = ImVec4(4 / 255.f, 4 / 255.f, 7 / 255.f, 1.f);
+ImVec4 kPanel = ImVec4(255 / 255.f, 255 / 255.f, 255 / 255.f, 0.028f);
+ImVec4 kCard = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
+ImVec4 kCardTop = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
+ImVec4 kPopup = ImVec4(12 / 255.f, 11 / 255.f, 18 / 255.f, 1.f);
+ImVec4 kStroke = ImVec4(1.f, 1.f, 1.f, 0.055f);
+ImVec4 kTrack = ImVec4(1.f, 1.f, 1.f, 0.075f);
+ImVec4 kText = ImVec4(236 / 255.f, 233 / 255.f, 247 / 255.f, 1.f);
+ImVec4 kTextDim = ImVec4(140 / 255.f, 135 / 255.f, 166 / 255.f, 1.f);
+ImVec4 kTextFaint = ImVec4(92 / 255.f, 88 / 255.f, 114 / 255.f, 1.f);
+
+bool g_highContrast = false;
+
+void ApplyPalette()
+{
+	if (g_highContrast)
+	{
+		// Solid fills and brighter strokes/text so the menu stays readable
+		// over bright game scenes.
+		kBgTop = ImVec4(18 / 255.f, 16 / 255.f, 27 / 255.f, 1.f);
+		kBgBottom = ImVec4(8 / 255.f, 7 / 255.f, 12 / 255.f, 1.f);
+		kPanel = ImVec4(1.f, 1.f, 1.f, 0.07f);
+		kCard = ImVec4(25 / 255.f, 23 / 255.f, 35 / 255.f, 1.f);
+		kCardTop = ImVec4(35 / 255.f, 32 / 255.f, 49 / 255.f, 1.f);
+		kPopup = ImVec4(25 / 255.f, 23 / 255.f, 35 / 255.f, 1.f);
+		kStroke = ImVec4(1.f, 1.f, 1.f, 0.17f);
+		kTrack = ImVec4(1.f, 1.f, 1.f, 0.22f);
+		kText = ImVec4(1.f, 1.f, 1.f, 1.f);
+		kTextDim = ImVec4(0.82f, 0.80f, 0.90f, 1.f);
+		kTextFaint = ImVec4(0.64f, 0.62f, 0.74f, 1.f);
+	}
+	else
+	{
+		kBgTop = ImVec4(11 / 255.f, 9 / 255.f, 18 / 255.f, 1.f);
+		kBgBottom = ImVec4(4 / 255.f, 4 / 255.f, 7 / 255.f, 1.f);
+		kPanel = ImVec4(255 / 255.f, 255 / 255.f, 255 / 255.f, 0.028f);
+		kCard = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
+		kCardTop = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
+		kPopup = ImVec4(12 / 255.f, 11 / 255.f, 18 / 255.f, 1.f);
+		kStroke = ImVec4(1.f, 1.f, 1.f, 0.055f);
+		kTrack = ImVec4(1.f, 1.f, 1.f, 0.075f);
+		kText = ImVec4(236 / 255.f, 233 / 255.f, 247 / 255.f, 1.f);
+		kTextDim = ImVec4(140 / 255.f, 135 / 255.f, 166 / 255.f, 1.f);
+		kTextFaint = ImVec4(92 / 255.f, 88 / 255.f, 114 / 255.f, 1.f);
+	}
+}
 
 // ---- state ----------------------------------------------------------------
 int g_page = 0;
@@ -543,7 +582,11 @@ bool ButtonRow(const char* label, const char* text, float width = 130.f, bool ac
 	if (label && *label && !Match(label)) return false;
 
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
-	const ImGuiID id = window->GetID(label);
+	// An empty label hashes to the window ID, which trips ImGui's
+	// "cannot have an empty ID at the root of a window" assert. Fall back to
+	// the button text so every row still gets a stable unique ID.
+	const char* idLabel = (label && *label) ? label : text;
+	const ImGuiID id = window->GetID((idLabel && *idLabel) ? idLabel : "##btn");
 	const ImVec2 p = window->DC.CursorPos;
 	const float w = ImGui::GetContentRegionAvail().x;
 	constexpr float rowH = 30.f;
@@ -1145,6 +1188,9 @@ void DrawSettings(bool attached, const std::string& statusText)
 		if (ToggleRow("Always On Top", &onTop))
 			Overlay::SetAlwaysOnTop(onTop);
 
+		ToggleRow("High Contrast Menu", &ConfigInstance.Overlay.HighContrastMenu);
+		Note("Solid card fills and brighter text, for bright game scenes.");
+
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
 
 		int cap = Overlay::FrameCap();
@@ -1383,6 +1429,52 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
+void ApplyStyleColors()
+{
+	ImGuiStyle& style = ImGui::GetStyle();
+	ImVec4* colors = style.Colors;
+	colors[ImGuiCol_Text] = kText;
+	colors[ImGuiCol_TextDisabled] = kTextFaint;
+	colors[ImGuiCol_WindowBg] = kPopup;
+	colors[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
+	colors[ImGuiCol_PopupBg] = kPopup;
+	colors[ImGuiCol_Border] = ImVec4(1, 1, 1, g_highContrast ? 0.16f : 0.08f);
+	colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
+	colors[ImGuiCol_FrameBg] = ImVec4(1, 1, 1, g_highContrast ? 0.10f : 0.05f);
+	colors[ImGuiCol_FrameBgHovered] = ImVec4(1, 1, 1, g_highContrast ? 0.14f : 0.08f);
+	colors[ImGuiCol_FrameBgActive] = ImVec4(1, 1, 1, g_highContrast ? 0.18f : 0.10f);
+	colors[ImGuiCol_TitleBg] = kPopup;
+	colors[ImGuiCol_TitleBgActive] = kPopup;
+	colors[ImGuiCol_TitleBgCollapsed] = kPopup;
+	colors[ImGuiCol_MenuBarBg] = kPopup;
+	colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
+	colors[ImGuiCol_ScrollbarGrab] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.55f);
+	colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.8f);
+	colors[ImGuiCol_ScrollbarGrabActive] = kAccent;
+	colors[ImGuiCol_CheckMark] = kAccentBright;
+	colors[ImGuiCol_SliderGrab] = kAccent;
+	colors[ImGuiCol_SliderGrabActive] = kAccentBright;
+	colors[ImGuiCol_Button] = ImVec4(1, 1, 1, 0.06f);
+	colors[ImGuiCol_ButtonHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f);
+	colors[ImGuiCol_ButtonActive] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.5f);
+	colors[ImGuiCol_Header] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.22f);
+	colors[ImGuiCol_HeaderHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.32f);
+	colors[ImGuiCol_HeaderActive] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.42f);
+	colors[ImGuiCol_Separator] = ImVec4(1, 1, 1, 0.07f);
+	colors[ImGuiCol_SeparatorHovered] = kAccent;
+	colors[ImGuiCol_SeparatorActive] = kAccentBright;
+	colors[ImGuiCol_ResizeGrip] = ImVec4(0, 0, 0, 0);
+	colors[ImGuiCol_ResizeGripHovered] = kAccent;
+	colors[ImGuiCol_ResizeGripActive] = kAccentBright;
+	colors[ImGuiCol_Tab] = ImVec4(1, 1, 1, 0.05f);
+	colors[ImGuiCol_TabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.3f);
+	colors[ImGuiCol_TabSelected] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f);
+	colors[ImGuiCol_TabDimmed] = ImVec4(1, 1, 1, 0.03f);
+	colors[ImGuiCol_TabDimmedSelected] = ImVec4(1, 1, 1, 0.06f);
+	colors[ImGuiCol_NavCursor] = kAccent;
+	colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+}
+
 void Init()
 {
 	ImGuiIO& io = ImGui::GetIO();
@@ -1421,47 +1513,9 @@ void Init()
 	style.AntiAliasedLines = true;
 	style.AntiAliasedFill = true;
 
-	ImVec4* colors = style.Colors;
-	colors[ImGuiCol_Text] = kText;
-	colors[ImGuiCol_TextDisabled] = kTextFaint;
-	colors[ImGuiCol_WindowBg] = kPopup;
-	colors[ImGuiCol_ChildBg] = ImVec4(0, 0, 0, 0);
-	colors[ImGuiCol_PopupBg] = kPopup;
-	colors[ImGuiCol_Border] = ImVec4(1, 1, 1, 0.08f);
-	colors[ImGuiCol_BorderShadow] = ImVec4(0, 0, 0, 0);
-	colors[ImGuiCol_FrameBg] = ImVec4(1, 1, 1, 0.05f);
-	colors[ImGuiCol_FrameBgHovered] = ImVec4(1, 1, 1, 0.08f);
-	colors[ImGuiCol_FrameBgActive] = ImVec4(1, 1, 1, 0.10f);
-	colors[ImGuiCol_TitleBg] = kPopup;
-	colors[ImGuiCol_TitleBgActive] = kPopup;
-	colors[ImGuiCol_TitleBgCollapsed] = kPopup;
-	colors[ImGuiCol_MenuBarBg] = kPopup;
-	colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
-	colors[ImGuiCol_ScrollbarGrab] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.55f);
-	colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.8f);
-	colors[ImGuiCol_ScrollbarGrabActive] = kAccent;
-	colors[ImGuiCol_CheckMark] = kAccentBright;
-	colors[ImGuiCol_SliderGrab] = kAccent;
-	colors[ImGuiCol_SliderGrabActive] = kAccentBright;
-	colors[ImGuiCol_Button] = ImVec4(1, 1, 1, 0.06f);
-	colors[ImGuiCol_ButtonHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f);
-	colors[ImGuiCol_ButtonActive] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.5f);
-	colors[ImGuiCol_Header] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.22f);
-	colors[ImGuiCol_HeaderHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.32f);
-	colors[ImGuiCol_HeaderActive] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.42f);
-	colors[ImGuiCol_Separator] = ImVec4(1, 1, 1, 0.07f);
-	colors[ImGuiCol_SeparatorHovered] = kAccent;
-	colors[ImGuiCol_SeparatorActive] = kAccentBright;
-	colors[ImGuiCol_ResizeGrip] = ImVec4(0, 0, 0, 0);
-	colors[ImGuiCol_ResizeGripHovered] = kAccent;
-	colors[ImGuiCol_ResizeGripActive] = kAccentBright;
-	colors[ImGuiCol_Tab] = ImVec4(1, 1, 1, 0.05f);
-	colors[ImGuiCol_TabHovered] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.3f);
-	colors[ImGuiCol_TabSelected] = ImVec4(kAccent.x, kAccent.y, kAccent.z, 0.35f);
-	colors[ImGuiCol_TabDimmed] = ImVec4(1, 1, 1, 0.03f);
-	colors[ImGuiCol_TabDimmedSelected] = ImVec4(1, 1, 1, 0.06f);
-	colors[ImGuiCol_NavCursor] = kAccent;
-	colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+	g_highContrast = ConfigInstance.Overlay.HighContrastMenu;
+	ApplyPalette();
+	ApplyStyleColors();
 
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 	g_icon[0] = LoadTextureFromMemory(visuals, sizeof(visuals));
@@ -1474,6 +1528,13 @@ void Init()
 void Draw(bool attached, const std::string& statusText)
 {
 	ImGuiIO& io = ImGui::GetIO();
+
+	if (g_highContrast != ConfigInstance.Overlay.HighContrastMenu)
+	{
+		g_highContrast = ConfigInstance.Overlay.HighContrastMenu;
+		ApplyPalette();
+		ApplyStyleColors();
+	}
 
 	ImGui::SetNextWindowSize(ImVec2(kW + kGlow * 2.f, kH + kGlow * 2.f), ImGuiCond_Always);
 	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - kW) * 0.5f - kGlow,
