@@ -187,6 +187,18 @@ static void DrawPanelESP()
 	ImGui::Spacing();
 	ImGui::Separator();
 	ImGui::Spacing();
+	ImGui::Text("Pose Smoothing");
+	ImGui::Checkbox("Enable smoothing", &ConfigInstance.Player.PoseSmoothing);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Interpolates between consecutive valid pose samples to reduce\n"
+			"skeleton jitter from partial or stale DMA reads.");
+	if (ConfigInstance.Player.PoseSmoothing)
+		ImGui::SliderFloat("Blend", &ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.f, "%.2f");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
 	ImGui::Text("Animator / Cull Check");
 	ImGui::Checkbox("Enable VisCheck", &ConfigInstance.Player.VisCheck);
 	if (ImGui::IsItemHovered())

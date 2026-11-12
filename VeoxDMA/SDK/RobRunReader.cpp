@@ -155,6 +155,9 @@ struct RigCacheEntry {
     // and the layout needs rebuilding.
     int poseFailures = 0;
     std::uint64_t poseFailureSince = 0;
+    std::vector<Skeleton::BoneSegment> smoothedBones;
+    Skeleton::BonePoints smoothedPoints;
+    bool smoothedValid = false;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -1017,6 +1020,7 @@ static void UpdateInternal()
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
+                rig.smoothedValid = false;
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
             }
@@ -1166,6 +1170,7 @@ static void UpdateInternal()
                         rig.layoutValid = false;
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
+                        rig.smoothedValid = false;
                         rig.poseFailures = 0;
                     }
                 } else {
@@ -1213,15 +1218,65 @@ static void UpdateInternal()
 
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
+
+                    if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
+                        rig.smoothedBones.size() == rig.bones.size()) {
+                        const float alpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
+                        const float inv = 1.0f - alpha;
+                        for (std::size_t i = 0; i < rig.bones.size(); ++i) {
+                            auto& s = rig.smoothedBones[i];
+                            const auto& r = rig.bones[i];
+                            s.a.x = s.a.x * inv + r.a.x * alpha;
+                            s.a.y = s.a.y * inv + r.a.y * alpha;
+                            s.a.z = s.a.z * inv + r.a.z * alpha;
+                            s.b.x = s.b.x * inv + r.b.x * alpha;
+                            s.b.y = s.b.y * inv + r.b.y * alpha;
+                            s.b.z = s.b.z * inv + r.b.z * alpha;
+                            s.visible = r.visible;
+                        }
+                        auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
+                            dst.x = dst.x * inv + src.x * alpha;
+                            dst.y = dst.y * inv + src.y * alpha;
+                            dst.z = dst.z * inv + src.z * alpha;
+                        };
+                        rig.smoothedPoints.valid = rig.points.valid;
+                        lerpVec(rig.smoothedPoints.head, rig.points.head);
+                        lerpVec(rig.smoothedPoints.neck, rig.points.neck);
+                        lerpVec(rig.smoothedPoints.chest, rig.points.chest);
+                        lerpVec(rig.smoothedPoints.pelvis, rig.points.pelvis);
+                        lerpVec(rig.smoothedPoints.leftShoulder, rig.points.leftShoulder);
+                        lerpVec(rig.smoothedPoints.leftElbow, rig.points.leftElbow);
+                        lerpVec(rig.smoothedPoints.leftHand, rig.points.leftHand);
+                        lerpVec(rig.smoothedPoints.rightShoulder, rig.points.rightShoulder);
+                        lerpVec(rig.smoothedPoints.rightElbow, rig.points.rightElbow);
+                        lerpVec(rig.smoothedPoints.rightHand, rig.points.rightHand);
+                        lerpVec(rig.smoothedPoints.leftHip, rig.points.leftHip);
+                        lerpVec(rig.smoothedPoints.leftKnee, rig.points.leftKnee);
+                        lerpVec(rig.smoothedPoints.leftFoot, rig.points.leftFoot);
+                        lerpVec(rig.smoothedPoints.rightHip, rig.points.rightHip);
+                        lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
+                        lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
+                    } else {
+                        rig.smoothedBones = rig.bones;
+                        rig.smoothedPoints = rig.points;
+                        rig.smoothedValid = true;
+                    }
                 }
             } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
                 rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
                 rig.points = Skeleton::BonePoints{};
+                rig.smoothedValid = false;
             }
-            entity.bones = rig.bones;
-            entity.bonePoints = rig.points;
+
+            if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid) {
+                entity.bones = rig.smoothedBones;
+                entity.bonePoints = rig.smoothedPoints;
+            } else {
+                entity.bones = rig.bones;
+                entity.bonePoints = rig.points;
+            }
             entity.visible = rig.animatorActive;
 
             if (ConfigInstance.Player.WallCheck && g_bvhScene.valid &&

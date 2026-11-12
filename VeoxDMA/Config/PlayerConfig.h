@@ -32,6 +32,8 @@ public:
 	// native matrices are the previous rendered frame and visibly trail when
 	// the camera moves, so this stays off by default.
 	bool NativeEspCamera = false;
+	bool PoseSmoothing = true;
+	float PoseSmoothAlpha = 0.5f;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
     {
         (*j)[ConfigName][name][LIT("r")] = colour->r;
@@ -68,6 +70,8 @@ public:
         j[ConfigName][LIT("WallCheck")] = WallCheck;
         j[ConfigName][LIT("BvhPath")] = BvhPath;
         j[ConfigName][LIT("NativeEspCameraV2")] = NativeEspCamera;
+        j[ConfigName][LIT("PoseSmoothing")] = PoseSmoothing;
+        j[ConfigName][LIT("PoseSmoothAlpha")] = PoseSmoothAlpha;
 
         return j;
     }
@@ -100,6 +104,10 @@ public:
             BvhPath = j[ConfigName][LIT("BvhPath")];
         if (j[ConfigName].contains(LIT("NativeEspCameraV2")))
             NativeEspCamera = j[ConfigName][LIT("NativeEspCameraV2")];
+        if (j[ConfigName].contains(LIT("PoseSmoothing")))
+            PoseSmoothing = j[ConfigName][LIT("PoseSmoothing")];
+        if (j[ConfigName].contains(LIT("PoseSmoothAlpha")))
+            PoseSmoothAlpha = j[ConfigName][LIT("PoseSmoothAlpha")];
     }
 };
 
