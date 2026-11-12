@@ -48,8 +48,12 @@ constexpr float kGap = 14.f;
 constexpr float kCardHeader = 40.f;
 constexpr float kRow = 22.f;
 float kCardW = 337.f;
+bool g_singleColumn = false;
 constexpr float kMinW = 680.f;
 constexpr float kMinH = 420.f;
+// Below this width the two-column grid gets too tight for the row labels, so
+// the pages fall back to a single full-width column.
+constexpr float kTwoColumnMin = 800.f;
 // The panel fills the whole ImGui window, so ImGui's own resize borders and
 // grip line up exactly with the visible menu edges.
 constexpr float kGlow = 0.f;
@@ -130,6 +134,7 @@ ID3D11ShaderResourceView* g_icon[kPageCount] = {};
 
 std::map<ImGuiID, float> g_cardHeights;
 std::map<ImGuiID, float> g_cardHover;
+std::map<ImGuiID, float> g_forcedHeights;
 ImGuiID g_currentCard = 0;
 
 // ---- helpers --------------------------------------------------------------
@@ -226,7 +231,9 @@ void BeginCard(const char* title, float width, float minHeight = 62.f)
 {
 	ImGuiWindow* parent = ImGui::GetCurrentWindow();
 	const ImGuiID id = parent->GetID(title);
-	const float h = g_cardHeights.count(id) ? g_cardHeights[id] : minHeight;
+	const float natural = g_cardHeights.count(id) ? g_cardHeights[id] : minHeight;
+	const float forced = g_forcedHeights.count(id) ? g_forcedHeights[id] : 0.f;
+	const float h = ImMax(natural, forced);
 
 	const ImVec2 p = parent->DC.CursorPos;
 	const ImRect bb(p, p + ImVec2(width, h));
@@ -254,7 +261,7 @@ void BeginCard(const char* title, float width, float minHeight = 62.f)
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.f, 12.f));
 	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.f, 7.f));
-	ImGui::BeginChild(id, ImVec2(width, h - kCardHeader), ImGuiChildFlags_None,
+	ImGui::BeginChild(id, ImVec2(width, h - kCardHeader), ImGuiChildFlags_AlwaysUseWindowPadding,
 		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
 		ImGuiWindowFlags_NoSavedSettings);
 	g_currentCard = id;
@@ -263,11 +270,33 @@ void BeginCard(const char* title, float width, float minHeight = 62.f)
 void EndCard()
 {
 	ImGuiWindow* child = ImGui::GetCurrentWindow();
-	const float content = child->ContentSize.y + ImGui::GetStyle().WindowPadding.y;
-	ImGui::EndChild();
+	// ContentSize excludes the padding on both sides, so add it back twice.
+	const float content = child->ContentSize.y + ImGui::GetStyle().WindowPadding.y * 2.f;
+	// Restore the page spacing before EndChild so the vertical gap between
+	// cards matches the horizontal gap between columns.
 	ImGui::PopStyleVar(2);
 	ImGui::PopStyleColor();
+	ImGui::EndChild();
 	g_cardHeights[g_currentCard] = kCardHeader + content + 1.f;
+}
+
+// Last frame's natural height of a card, used to line cards up before they are
+// drawn. Unknown cards return 0 so the caller can fall back to the partner.
+float CardNaturalHeight(const char* title)
+{
+	if (!title || !*title) return 0.f;
+	ImGuiWindow* parent = ImGui::GetCurrentWindow();
+	auto it = g_cardHeights.find(parent->GetID(title));
+	return it == g_cardHeights.end() ? 0.f : it->second;
+}
+
+// Force a card to at least this tall. The card still grows if its content
+// needs more room, so nothing is ever clipped.
+void ForceCardHeight(const char* title, float height)
+{
+	if (!title || !*title) return;
+	ImGuiWindow* parent = ImGui::GetCurrentWindow();
+	g_forcedHeights[parent->GetID(title)] = height;
 }
 
 // ---- widgets --------------------------------------------------------------
@@ -538,7 +567,10 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 	ImGui::ItemSize(bb);
 	if (!ImGui::ItemAdd(bb, id)) return false;
 
-	const ImRect field(ImVec2(p.x + w - fieldW, p.y + 2.f), ImVec2(p.x + w, p.y + 26.f));
+	// Never let the field run into the label when the card is narrow.
+	const float labelW = TextW(font::inter_medium_widget, label);
+	const float fw = ImClamp(fieldW, 80.f, ImMax(80.f, w - labelW - 14.f));
+	const ImRect field(ImVec2(p.x + w - fw, p.y + 2.f), ImVec2(p.x + w, p.y + 26.f));
 	bool hov, held, pressed = ImGui::ButtonBehavior(field, id, &hov, &held);
 
 	char popup[96];
@@ -555,9 +587,11 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 
 	int sel = ImClamp(*current, 0, count - 1);
 	const char* preview = items[sel] ? items[sel] : "-";
+	dl->PushClipRect(field.Min, ImVec2(field.Max.x - 22.f, field.Max.y), true);
 	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
 		ImVec2(field.Min.x + 10.f, RowTextY(field.Min.y, field.GetHeight(), font::inter_medium_small)),
 		C(kText), preview);
+	dl->PopClipRect();
 
 	// chevron
 	const ImVec2 cv(field.Max.x - 14.f, field.Min.y + 13.f);
@@ -766,21 +800,51 @@ ID3D11ShaderResourceView* LoadTextureFromMemory(const unsigned char* data, size_
 // ---------------------------------------------------------------------------
 void DrawVisuals()
 {
+	// Four rows of two cards. Each row is forced to its taller card, so the
+	// columns line up and end flush without leaving one huge empty card.
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("PLAYER ESP"), CardNaturalHeight("PLAYER WEAPONS"));
+		const float r2 = ImMax(CardNaturalHeight("PLAYER FLAGS"), CardNaturalHeight("RANGE"));
+		const float r3 = ImMax(CardNaturalHeight("TEXT & COLOURS"), CardNaturalHeight("COLOURS"));
+		const float r4 = ImMax(CardNaturalHeight("SKELETON"), CardNaturalHeight("WORLD ESP"));
+		ForceCardHeight("PLAYER ESP", r1);
+		ForceCardHeight("PLAYER WEAPONS", r1);
+		ForceCardHeight("PLAYER FLAGS", r2);
+		ForceCardHeight("RANGE", r2);
+		ForceCardHeight("TEXT & COLOURS", r3);
+		ForceCardHeight("COLOURS", r3);
+		ForceCardHeight("SKELETON", r4);
+		ForceCardHeight("WORLD ESP", r4);
+	}
+
 	ImGui::BeginGroup();
 	{
-		if (MatchAny({ "Box ESP", "Health", "Distance", "Primary Weapon", "Secondary Weapon",
-			"Weapon Name", "Looking At You", "Looking Alert", "Show Role" }))
+		if (MatchAny({ "Box ESP", "Health", "Distance" }))
 		{
 			BeginCard("PLAYER ESP", kCardW);
 			ColorToggleRow("Box ESP", &ConfigInstance.Player.BoxEsp, ConfigInstance.Player.BoxColour);
 			ColorToggleRow("Health", &ConfigInstance.Player.Health, ConfigInstance.Player.HealthTextColour);
 			ColorToggleRow("Distance", &ConfigInstance.Player.Distance, ConfigInstance.Player.DistanceColour);
-			ToggleRow("Primary Weapon", &ConfigInstance.Player.PrimaryWeapon);
-			ToggleRow("Secondary Weapon", &ConfigInstance.Player.SecondaryWeapon);
-			ColorToggleRow("Weapon Name", &ConfigInstance.Player.WeaponEsp, ConfigInstance.Player.WeaponColour);
+			EndCard();
+		}
+
+		if (MatchAny({ "Looking At You", "Looking Alert", "Show Role" }))
+		{
+			BeginCard("PLAYER FLAGS", kCardW);
 			ColorToggleRow("Looking At You", &ConfigInstance.Player.LookingAtYou, ConfigInstance.Player.LookingColour);
 			ToggleRow("Looking Alert", &ConfigInstance.Player.LookingAlert);
 			ColorToggleRow("Show Role", &ConfigInstance.Player.ShowRole, ConfigInstance.Player.RoleColour);
+			EndCard();
+		}
+
+		if (MatchAny({ "Name", "Distance", "Health", "Weapon" }))
+		{
+			BeginCard("TEXT & COLOURS", kCardW);
+			ColorRow("Name", ConfigInstance.Player.NameColour);
+			ColorRow("Distance", ConfigInstance.Player.DistanceColour);
+			ColorRow("Health", ConfigInstance.Player.HealthTextColour);
+			ColorRow("Weapon", ConfigInstance.Player.WeaponColour);
 			EndCard();
 		}
 
@@ -823,22 +887,17 @@ void DrawVisuals()
 	}
 	ImGui::EndGroup();
 
-	ImGui::SameLine(0.f, kGap);
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
 
 	ImGui::BeginGroup();
 	{
-		if (MatchAny({ "Name Colour", "Distance Colour", "Health Colour", "Weapon Colour",
-			"Role Colour", "Looking Colour", "State Colour", "Box Colour" }))
+		if (MatchAny({ "Primary Weapon", "Secondary Weapon", "Weapon Name" }))
 		{
-			BeginCard("TEXT & COLOURS", kCardW);
-			ColorRow("Name", ConfigInstance.Player.NameColour);
-			ColorRow("Distance", ConfigInstance.Player.DistanceColour);
-			ColorRow("Health", ConfigInstance.Player.HealthTextColour);
-			ColorRow("Weapon", ConfigInstance.Player.WeaponColour);
-			ColorRow("Role", ConfigInstance.Player.RoleColour);
-			ColorRow("Looking", ConfigInstance.Player.LookingColour);
-			ColorRow("State", ConfigInstance.Player.StateColour);
-			ColorRow("Box", ConfigInstance.Player.BoxColour);
+			BeginCard("PLAYER WEAPONS", kCardW);
+			ToggleRow("Primary Weapon", &ConfigInstance.Player.PrimaryWeapon);
+			ToggleRow("Secondary Weapon", &ConfigInstance.Player.SecondaryWeapon);
+			ColorToggleRow("Weapon Name", &ConfigInstance.Player.WeaponEsp, ConfigInstance.Player.WeaponColour);
 			EndCard();
 		}
 
@@ -850,7 +909,17 @@ void DrawVisuals()
 			EndCard();
 		}
 
-		if (MatchAny({ "World ESP", "Show Empty", "Show Distance", "World Distance", "World Font" }))
+		if (MatchAny({ "Role", "Looking", "State", "Box" }))
+		{
+			BeginCard("COLOURS", kCardW);
+			ColorRow("Role", ConfigInstance.Player.RoleColour);
+			ColorRow("Looking", ConfigInstance.Player.LookingColour);
+			ColorRow("State", ConfigInstance.Player.StateColour);
+			ColorRow("Box", ConfigInstance.Player.BoxColour);
+			EndCard();
+		}
+
+		if (MatchAny({ "Enable World ESP", "Show Empty", "Show Distance", "Max Distance", "Font Size" }))
 		{
 			BeginCard("WORLD ESP", kCardW);
 			ToggleRow("Enable World ESP", &ConfigInstance.World.Enabled);
@@ -866,6 +935,15 @@ void DrawVisuals()
 
 void DrawRadar()
 {
+	// Radar settings and their display controls share one card, and the bounds
+	// note lives with the bounds, so the page is two balanced cards.
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("RADAR"), CardNaturalHeight("MAP BOUNDS"));
+		ForceCardHeight("RADAR", r1);
+		ForceCardHeight("MAP BOUNDS", r1);
+	}
+
 	ImGui::BeginGroup();
 	{
 		BeginCard("RADAR", kCardW);
@@ -891,9 +969,8 @@ void DrawRadar()
 		ToggleRow("Show Vehicles", &ConfigInstance.Radar.ShowVehicles);
 		ToggleRow("Show Loot", &ConfigInstance.Radar.ShowLoot);
 		ToggleRow("Rotate With Camera", &ConfigInstance.Radar.RotateWithCamera);
-		EndCard();
 
-		BeginCard("DISPLAY", kCardW);
+		SectionLabel("DISPLAY");
 		SliderFloatRow("Size", &ConfigInstance.Radar.Size, 150.f, 800.f, "px");
 		SliderFloatRow("Zoom", &ConfigInstance.Radar.Zoom, 0.2f, 10.f, "x");
 		SliderFloatRow("Opacity", &ConfigInstance.Radar.Opacity, 0.1f, 1.f);
@@ -901,7 +978,8 @@ void DrawRadar()
 	}
 	ImGui::EndGroup();
 
-	ImGui::SameLine(0.f, kGap);
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
 
 	ImGui::BeginGroup();
 	{
@@ -920,9 +998,6 @@ void DrawRadar()
 			ConfigInstance.Radar.WorldMinZ = -400.f;
 			ConfigInstance.Radar.WorldMaxZ = 400.f;
 		}
-		EndCard();
-
-		BeginCard("NOTE", kCardW);
 		Note("The radar reads entity positions from the same snapshot as the ESP. "
 			"Bounds only affect where those positions land on the image.");
 		EndCard();
@@ -952,6 +1027,24 @@ void DrawAim()
 	static const int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
 	static const char* baudLabels[] = { "115200", "921600", "1500000", "2000000", "3000000", "4000000" };
 
+	// Four rows of two cards, paired by natural height so no card is left with
+	// a large empty area under its controls.
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("AIMBOT"), CardNaturalHeight("MEMORY AIM"));
+		const float r2 = ImMax(CardNaturalHeight("AIM TUNING"), CardNaturalHeight("AIM VISUALS"));
+		const float r3 = ImMax(CardNaturalHeight("WEAPON"), CardNaturalHeight("DEVICE"));
+		const float r4 = ImMax(CardNaturalHeight("PREDICTION"), CardNaturalHeight("LIVE STATE"));
+		ForceCardHeight("AIMBOT", r1);
+		ForceCardHeight("MEMORY AIM", r1);
+		ForceCardHeight("AIM TUNING", r2);
+		ForceCardHeight("AIM VISUALS", r2);
+		ForceCardHeight("WEAPON", r3);
+		ForceCardHeight("DEVICE", r3);
+		ForceCardHeight("PREDICTION", r4);
+		ForceCardHeight("LIVE STATE", r4);
+	}
+
 	ImGui::BeginGroup();
 	{
 		BeginCard("AIMBOT", kCardW);
@@ -964,16 +1057,36 @@ void DrawAim()
 		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, bones, IM_ARRAYSIZE(bones));
 
 		ComboRow("Aim Key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(), Aim::KeyCount());
+		EndCard();
 
+		BeginCard("AIM TUNING", kCardW);
 		SliderIntRow("FOV", &ConfigInstance.Aim.Fov, 5, 180, " deg");
 		SliderIntRow("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
 		SliderIntRow("Max Distance", &ConfigInstance.Aim.MaxDistance, 10, 1000, "m");
-
-		ToggleRow("Visible Bones Only", &ConfigInstance.Aim.VisibleBonesOnly);
-		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
-		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();
 
+		BeginCard("WEAPON", kCardW);
+		ToggleRow("No Recoil", &ConfigInstance.Aim.NoRecoil);
+		ToggleRow("No Spread", &ConfigInstance.Aim.NoSpread);
+		EndCard();
+
+		BeginCard("PREDICTION", kCardW);
+		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
+		if (ConfigInstance.Aim.Prediction)
+		{
+			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
+			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
+		}
+		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
 		BeginCard("MEMORY AIM", kCardW);
 		ToggleRow("Write Camera Angles", &ConfigInstance.Aim.MemoryWrite);
 		if (ConfigInstance.Aim.MemoryWrite)
@@ -984,26 +1097,11 @@ void DrawAim()
 				"from its own input, so a write can be reverted.");
 		}
 		EndCard();
-	}
-	ImGui::EndGroup();
 
-	ImGui::SameLine(0.f, kGap);
-
-	ImGui::BeginGroup();
-	{
-		BeginCard("PREDICTION", kCardW);
-		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
-		if (ConfigInstance.Aim.Prediction)
-		{
-			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
-			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
-		}
-		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
-		EndCard();
-
-		BeginCard("WEAPON", kCardW);
-		ToggleRow("No Recoil", &ConfigInstance.Aim.NoRecoil);
-		ToggleRow("No Spread", &ConfigInstance.Aim.NoSpread);
+		BeginCard("AIM VISUALS", kCardW);
+		ToggleRow("Visible Bones Only", &ConfigInstance.Aim.VisibleBonesOnly);
+		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
+		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();
 
 		BeginCard("DEVICE", kCardW);
@@ -1121,6 +1219,18 @@ void DrawAim()
 
 void DrawMisc()
 {
+	// Two rows of two cards. Session stats sit under the catalog, while the
+	// read-only notes and shortcuts share the other column.
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("ITEM CATALOG"), CardNaturalHeight("READ-ONLY DMA"));
+		const float r2 = ImMax(CardNaturalHeight("SESSION"), CardNaturalHeight("SHORTCUTS"));
+		ForceCardHeight("ITEM CATALOG", r1);
+		ForceCardHeight("READ-ONLY DMA", r1);
+		ForceCardHeight("SESSION", r2);
+		ForceCardHeight("SHORTCUTS", r2);
+	}
+
 	ImGui::BeginGroup();
 	{
 		BeginCard("ITEM CATALOG", kCardW);
@@ -1146,36 +1256,39 @@ void DrawMisc()
 		}
 		EndCard();
 
+		BeginCard("SESSION", kCardW);
+		{
+			const auto snapshot = RobRunReader::GetSnapshot();
+			if (snapshot)
+			{
+				const auto world = snapshot->world ? *snapshot->world : RobRunWorld::State{};
+				Note("Entities %zu  (C:%d L:%d V:%d G:%d)", snapshot->entities.size(),
+					world.containers, world.loots, world.vehicles, world.grenades);
+				Note("Skeletons %u | Aim poses %u | Pose retries %u", snapshot->skeletonCount,
+					snapshot->poseCount, snapshot->poseFailures);
+				Note("Read failures %u", snapshot->failureCount);
+			}
+			else
+			{
+				Note("No snapshot yet. Waiting for the game process.");
+			}
+			Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
+		}
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
 		BeginCard("READ-ONLY DMA", kCardW);
 		Note("ROB RUN is an external DMA reader. It never injects into the game process.");
 		Note("- VisCheck compares animator poses. It is not a wall check.");
 		Note("- WallCheck needs a city_colliders.bvh next to the exe.");
 		Note("- Memory aim writes the camera block over DMA; the game can rebuild it from input.");
 		Note("- Hardware aim sends the same pixel delta through the selected device.");
-		EndCard();
-	}
-	ImGui::EndGroup();
-
-	ImGui::SameLine(0.f, kGap);
-
-	ImGui::BeginGroup();
-	{
-		BeginCard("SESSION", kCardW);
-		const auto snapshot = RobRunReader::GetSnapshot();
-		if (snapshot)
-		{
-			const auto world = snapshot->world ? *snapshot->world : RobRunWorld::State{};
-			Note("Entities %zu  (C:%d L:%d V:%d G:%d)", snapshot->entities.size(),
-				world.containers, world.loots, world.vehicles, world.grenades);
-			Note("Skeletons %u | Aim poses %u | Pose retries %u", snapshot->skeletonCount,
-				snapshot->poseCount, snapshot->poseFailures);
-			Note("Read failures %u", snapshot->failureCount);
-		}
-		else
-		{
-			Note("No snapshot yet. Waiting for the game process.");
-		}
-		Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
 		EndCard();
 
 		BeginCard("SHORTCUTS", kCardW);
@@ -1189,6 +1302,21 @@ void DrawMisc()
 
 void DrawSettings(bool attached, const std::string& statusText)
 {
+	// Three rows of two cards: overlay/display settings on the left, backdrop,
+	// config and about on the right.
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("OVERLAY"), CardNaturalHeight("BACKDROP"));
+		const float r2 = ImMax(CardNaturalHeight("DISPLAY"), CardNaturalHeight("CONFIG"));
+		const float r3 = ImMax(CardNaturalHeight("STATUS"), CardNaturalHeight("ABOUT"));
+		ForceCardHeight("OVERLAY", r1);
+		ForceCardHeight("BACKDROP", r1);
+		ForceCardHeight("DISPLAY", r2);
+		ForceCardHeight("CONFIG", r2);
+		ForceCardHeight("STATUS", r3);
+		ForceCardHeight("ABOUT", r3);
+	}
+
 	ImGui::BeginGroup();
 	{
 		BeginCard("OVERLAY", kCardW);
@@ -1206,7 +1334,9 @@ void DrawSettings(bool attached, const std::string& statusText)
 
 		ToggleRow("High Contrast Menu", &ConfigInstance.Overlay.HighContrastMenu);
 		Note("Solid card fills and brighter text, for bright game scenes.");
+		EndCard();
 
+		BeginCard("DISPLAY", kCardW);
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
 
 		int cap = Overlay::FrameCap();
@@ -1235,6 +1365,25 @@ void DrawSettings(bool attached, const std::string& statusText)
 		}
 		EndCard();
 
+		BeginCard("STATUS", kCardW);
+		Note("%s", attached ? "DMA connected" : "DMA disconnected");
+		Note("%s", statusText.c_str());
+		Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
+		{
+			const auto snapshot = RobRunReader::GetSnapshot();
+			if (snapshot)
+				Note("%zu entities | %u skeletons | %u read failures", snapshot->entities.size(),
+					snapshot->skeletonCount, snapshot->failureCount);
+		}
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
 		BeginCard("BACKDROP", kCardW);
 		bool vis = Backdrop::IsVisible();
 		if (ToggleRow("Show Backdrop", &vis))
@@ -1265,13 +1414,7 @@ void DrawSettings(bool attached, const std::string& statusText)
 			Backdrop::SetFullscreen(true);
 		}
 		EndCard();
-	}
-	ImGui::EndGroup();
 
-	ImGui::SameLine(0.f, kGap);
-
-	ImGui::BeginGroup();
-	{
 		BeginCard("CONFIG", kCardW);
 		if (ButtonRow("", "Save Config", 130.f, true))
 		{
@@ -1287,16 +1430,6 @@ void DrawSettings(bool attached, const std::string& statusText)
 		}
 		Note("C:\\VeoxDMA\\RobRun\\config.json");
 		Note("Saved automatically when the overlay closes.");
-		EndCard();
-
-		BeginCard("STATUS", kCardW);
-		Note("%s", attached ? "DMA connected" : "DMA disconnected");
-		Note("%s", statusText.c_str());
-		Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
-		const auto snapshot = RobRunReader::GetSnapshot();
-		if (snapshot)
-			Note("%zu entities | %u skeletons | %u read failures", snapshot->entities.size(),
-				snapshot->skeletonCount, snapshot->failureCount);
 		EndCard();
 
 		BeginCard("ABOUT", kCardW);
@@ -1395,8 +1528,16 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 {
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 
-	ImGui::SetCursorScreenPos(pos + ImVec2(12.f, kTop + 16.f));
-	ImGui::BeginGroup();
+	// The nav list lives in a child that stops above the footer, so a short
+	// window can never draw the footer status over the page buttons.
+	constexpr float footerH = 92.f;
+	const float navTop = kTop + 16.f;
+	const float navH = ImMax(kH - navTop - footerH, 44.f);
+
+	ImGui::SetCursorScreenPos(pos + ImVec2(12.f, navTop));
+	ImGui::BeginChild("##nav", ImVec2(kSide - 24.f, navH), ImGuiChildFlags_None,
+		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+		ImGuiWindowFlags_NoSavedSettings);
 	{
 		const ImTextureID icons[kPageCount] = {
 			(ImTextureID)(intptr_t)g_icon[0],
@@ -1409,12 +1550,12 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 			if (PageButton(i, kPageNames[i], icons[i], kSide - 24.f))
 				g_page = i;
 	}
-	ImGui::EndGroup();
+	ImGui::EndChild();
 
 	// footer status
 	const auto snapshot = RobRunReader::GetSnapshot();
-	const float footerY = kH - 84.f;
-	dl->AddLine(pos + ImVec2(14.f, footerY), pos + ImVec2(kSide - 14.f, footerY), C(kStroke), 1.f);
+	const float footerY = pos.y + kH - footerH;
+	dl->AddLine(ImVec2(pos.x + 14.f, footerY), ImVec2(pos.x + kSide - 14.f, footerY), C(kStroke), 1.f);
 
 	const ImVec2 dot(pos.x + 20.f, footerY + 18.f);
 	dl->AddCircleFilled(dot, 4.f, C(attached ? kGreen : kRed));
@@ -1584,7 +1725,7 @@ void Draw(bool attached, const std::string& statusText)
 		const ImVec2 winSize = window->Size;
 		kW = ImMax(winSize.x - kGlow * 2.f, kMinW);
 		kH = ImMax(winSize.y - kGlow * 2.f, kMinH);
-		kCardW = (kW - kSide - kPad * 2.f - kGap) * 0.5f;
+		g_singleColumn = kW < kTwoColumnMin;
 
 		const ImVec2 pos = ImGui::GetWindowPos() + ImVec2(kGlow, kGlow);
 		ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1673,13 +1814,19 @@ void Draw(bool attached, const std::string& statusText)
 		ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.f, kGap));
 		ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
 		ImGui::SetCursorScreenPos(contentMin);
-		ImGui::BeginChild("##content", contentSize, ImGuiChildFlags_None,
+		ImGui::BeginChild("##content", contentSize, ImGuiChildFlags_AlwaysUseWindowPadding,
 			ImGuiWindowFlags_NoSavedSettings);
+		// Width comes from the live content region so the cards stay centred
+		// whether or not the page needs a scrollbar.
+		const float availW = ImGui::GetContentRegionAvail().x;
+		kCardW = g_singleColumn ? availW : (availW - kGap) * 0.5f;
 		if (g_scrollReset)
 		{
 			ImGui::SetScrollY(0.f);
 			g_scrollReset = false;
 		}
+
+		g_forcedHeights.clear();
 
 		switch (g_drawnPage)
 		{
