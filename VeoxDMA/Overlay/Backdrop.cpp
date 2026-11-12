@@ -130,9 +130,33 @@ void SetResolution(int width, int height)
 void SetFullscreen(bool fullscreen)
 {
 	g_fullscreen = fullscreen;
-	if (fullscreen)
-		SetResolution(0, 0);
+	if (!g_hwnd) return;
+
+	RefreshMonitors();
+	int idx = std::clamp(g_monitorIndex, 0, (int)g_monitors.size() - 1);
+	const RECT& r = g_monitors[idx].rc;
+
+	if (fullscreen) {
+		SetWindowLongPtr(g_hwnd, GWL_STYLE, WS_POPUP);
+		SetWindowLongPtr(g_hwnd, GWL_EXSTYLE, WS_EX_TOOLWINDOW | WS_EX_TOPMOST);
+		int w = g_customW > 0 ? g_customW : (r.right - r.left);
+		int h = g_customH > 0 ? g_customH : (r.bottom - r.top);
+		SetWindowPos(g_hwnd, HWND_TOPMOST, r.left, r.top, w, h,
+			SWP_NOACTIVATE | SWP_FRAMECHANGED);
+	} else {
+		SetWindowLongPtr(g_hwnd, GWL_STYLE, WS_OVERLAPPEDWINDOW);
+		SetWindowLongPtr(g_hwnd, GWL_EXSTYLE, WS_EX_TOOLWINDOW | WS_EX_TOPMOST);
+		int w = g_customW > 0 ? g_customW : 1280;
+		int h = g_customH > 0 ? g_customH : 720;
+		int x = r.left + ((r.right - r.left) - w) / 2;
+		int y = r.top + ((r.bottom - r.top) - h) / 2;
+		SetWindowPos(g_hwnd, HWND_TOPMOST, x, y, w, h,
+			SWP_NOACTIVATE | SWP_FRAMECHANGED);
+		ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+	}
 }
+
+bool IsFullscreen() { return g_fullscreen; }
 
 void SetMonitor(int index)
 {

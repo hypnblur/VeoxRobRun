@@ -36,6 +36,7 @@ struct DebugInfo {
 };
 
 void Tick();
+void TickRecoilSpread();
 void Draw();
 void DrawDebug();
 DebugInfo GetDebug();

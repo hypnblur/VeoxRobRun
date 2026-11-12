@@ -111,6 +111,7 @@ static bool fallbackViewProjectionValid = false;
 // refreshed a few times per second and copied into every snapshot.
 struct DetailCacheEntry {
     std::uintptr_t characterModel = 0;
+    std::uintptr_t transform = 0;
     std::uint64_t stamp = 0;
     float health = -1.f;
     float maxHealth = -1.f;
@@ -124,6 +125,7 @@ struct DetailCacheEntry {
     int role = 0;
     std::wstring nickname;
     std::wstring clanTag;
+    std::wstring weaponName;
 };
 static std::unordered_map<std::int32_t, DetailCacheEntry> detailCache;
 
@@ -590,6 +592,27 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     }
 }
 
+static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out)
+{
+    out.clear();
+    if (characterModel <= 0x10000) return;
+    const std::uintptr_t itemInHands = ReadPtr(
+        characterModel + rr::BattleCharacterModel::ItemInHands);
+    if (itemInHands <= 0x10000) return;
+    const std::uintptr_t current = ReadPtr(
+        itemInHands + rr::ItemInHandsModel::Current);
+    if (current <= 0x10000) return;
+    const std::uintptr_t data = ReadPtr(
+        current + rr::EquipItemModel::Data);
+    if (data <= 0x10000) return;
+    const std::uintptr_t description = ReadPtr(data + rr::ReferenceData::Value);
+    if (description <= 0x10000) return;
+    const std::uintptr_t nameStr = ReadPtr(
+        description + rr::Description::Name);
+    if (nameStr > 0x10000)
+        RobRunMemory::ReadString(nameStr, out);
+}
+
 // Read a slot identity string. The new offset set stores Il2CppString*
 // directly on BattleCharacterSlotData (+0x30 / +0x38); older sessions put a
 // reference wrapper at that field whose value is +0x18. Validate the runtime
@@ -923,45 +946,119 @@ static void UpdateInternal()
         };
 
         // ---------------------------------------------------------------
-        // Phase 1: Resolve characterModel and transform for each entity.
-        // These pointer chains are mostly cached, so sequential is fine.
+        // Phase 1a: Scatter-read characterModel pointers for all
+        // entities. One device transaction replaces N sequential reads.
+        // Also pre-read SimulatedModel so the fallback path avoids an
+        // extra round trip for new/changed entities.
         // ---------------------------------------------------------------
-        std::vector<EntityWork> work;
-        work.reserve(entityEntries.size());
-
+        struct PreResolve {
+            std::int32_t key = 0;
+            std::uintptr_t entityModel = 0;
+            std::uintptr_t clientModel = 0;
+            std::uintptr_t simulatedModel = 0;
+        };
+        std::vector<PreResolve> pre;
+        pre.reserve(entityEntries.size());
         for (const auto& entry : entityEntries) {
-            const std::uintptr_t entityModel = entry.value;
-            if (entityModel <= 0x10000) continue;
+            if (entry.value <= 0x10000) continue;
+            pre.push_back({ entry.key, entry.value, 0, 0 });
+        }
 
-            std::uintptr_t characterModel = ReadPtr(
-                entityModel + rr::BattleCharacterEntityModel::ClientModel);
+        if (!pre.empty()) {
+            auto sc = TargetProcess.CreateScatterHandleCached();
+            if (sc) {
+                for (auto& p : pre) {
+                    TargetProcess.AddScatterReadRequest(sc,
+                        p.entityModel + rr::BattleCharacterEntityModel::ClientModel,
+                        &p.clientModel, sizeof(std::uintptr_t));
+                    TargetProcess.AddScatterReadRequest(sc,
+                        p.entityModel + rr::BattleCharacterEntityModel::SimulatedModel,
+                        &p.simulatedModel, sizeof(std::uintptr_t));
+                }
+                TargetProcess.ExecuteScatterReadCached(sc);
+                TargetProcess.CloseScatterHandle(sc);
+            }
+        }
 
-            const auto cachedDetail = detailCache.find(entry.key);
+        for (auto& p : pre) {
+            std::uintptr_t characterModel = p.clientModel;
+            if (characterModel <= 0x10000) characterModel = 0;
+
+            const auto cachedDetail = detailCache.find(p.key);
             const bool clientModelKnown = characterModel > 0x10000 &&
                 cachedDetail != detailCache.end() &&
                 cachedDetail->second.characterModel == characterModel;
-            if (!clientModelKnown && !IsClass(characterModel, "BattleCharacterModel")) {
-                const std::uintptr_t simulated = ReadPtr(
-                    entityModel + rr::BattleCharacterEntityModel::SimulatedModel);
-                if (IsClass(simulated, "BattleCharacterModel"))
-                    characterModel = simulated;
-                else if (IsClass(entityModel, "BattleCharacterModel"))
-                    characterModel = entityModel;
+            if (characterModel > 0x10000 && !clientModelKnown &&
+                !IsClass(characterModel, "BattleCharacterModel"))
+            {
+                if (p.simulatedModel > 0x10000 &&
+                    IsClass(p.simulatedModel, "BattleCharacterModel"))
+                    characterModel = p.simulatedModel;
+                else if (IsClass(p.entityModel, "BattleCharacterModel"))
+                    characterModel = p.entityModel;
                 else
                     characterModel = 0;
             }
-            if (characterModel <= 0x10000) continue;
+            p.clientModel = characterModel;
+        }
 
-            const std::uintptr_t transform = ReadPtr(
-                characterModel + rr::BattleCharacterModel::CharacterTransformModel);
-            if (transform <= 0x10000) continue;
+        // ---------------------------------------------------------------
+        // Phase 1b: Scatter-read transform pointers. Entities whose
+        // transform was cached from the previous pass skip the read.
+        // ---------------------------------------------------------------
+        std::vector<EntityWork> work;
+        work.reserve(pre.size());
+        std::vector<std::size_t> needTransform;
 
+        for (const auto& p : pre) {
+            if (p.clientModel <= 0x10000) continue;
             EntityWork w{};
-            w.entityId = entry.key;
-            w.characterModel = characterModel;
-            w.transform = transform;
-            w.blockAddress = transform + rr::CharacterTransformModel::Position;
+            w.entityId = p.key;
+            w.characterModel = p.clientModel;
+            const auto cd = detailCache.find(p.key);
+            if (cd != detailCache.end() &&
+                cd->second.characterModel == p.clientModel &&
+                cd->second.transform > 0x10000)
+            {
+                w.transform = cd->second.transform;
+                w.blockAddress = w.transform +
+                    rr::CharacterTransformModel::Position;
+            } else {
+                needTransform.push_back(work.size());
+            }
             work.push_back(w);
+        }
+
+        if (!needTransform.empty()) {
+            auto sc = TargetProcess.CreateScatterHandleCached();
+            if (sc) {
+                for (auto idx : needTransform)
+                    TargetProcess.AddScatterReadRequest(sc,
+                        work[idx].characterModel +
+                            rr::BattleCharacterModel::CharacterTransformModel,
+                        &work[idx].transform, sizeof(std::uintptr_t));
+                TargetProcess.ExecuteScatterReadCached(sc);
+                TargetProcess.CloseScatterHandle(sc);
+            }
+            for (auto idx : needTransform) {
+                if (work[idx].transform > 0x10000) {
+                    work[idx].blockAddress = work[idx].transform +
+                        rr::CharacterTransformModel::Position;
+                    detailCache[work[idx].entityId].transform =
+                        work[idx].transform;
+                }
+            }
+        }
+
+        {
+            std::size_t dst = 0;
+            for (std::size_t src = 0; src < work.size(); ++src) {
+                if (work[src].transform > 0x10000) {
+                    if (dst != src) work[dst] = std::move(work[src]);
+                    ++dst;
+                }
+            }
+            work.resize(dst);
         }
 
         // ---------------------------------------------------------------
@@ -1069,7 +1166,10 @@ static void UpdateInternal()
 
         // ---------------------------------------------------------------
         // Phase 5: Process poses, build entities, wall check.
+        // Cap periodic detail refreshes per pass so a full lobby never
+        // stalls the loop with 20 sequential refresh chains at once.
         // ---------------------------------------------------------------
+        int detailBudget = 3;
         for (auto& w : work) {
             if (!w.positionValid) continue;
 
@@ -1088,11 +1188,16 @@ static void UpdateInternal()
             }
 
             auto& detail = detailCache[entity.entityId];
-            if (detail.characterModel != w.characterModel ||
-                now - detail.stamp > 500)
+            const bool detailModelChanged =
+                detail.characterModel != w.characterModel;
+            const bool detailExpired = now - detail.stamp > 500;
+            if (detailModelChanged ||
+                (detailExpired && detailBudget > 0))
             {
+                if (!detailModelChanged) --detailBudget;
                 detail = DetailCacheEntry{};
                 detail.characterModel = w.characterModel;
+                detail.transform = w.transform;
                 detail.stamp = now;
 
                 EntityData scratch{};
@@ -1120,6 +1225,8 @@ static void UpdateInternal()
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
 
+                ReadWeaponName(w.characterModel, detail.weaponName);
+
                 const auto slotIt = slots.find(w.entityId);
                 if (slotIt != slots.end()) {
                     ReadSlotIdentity(slotIt->second, scratch);
@@ -1140,6 +1247,7 @@ static void UpdateInternal()
             entity.vehicleId = detail.vehicleId;
             entity.nickname = detail.nickname;
             entity.clanTag = detail.clanTag;
+            entity.weaponName = detail.weaponName;
 
             const auto viewIt = views.find(w.entityId);
             if (viewIt != views.end())
@@ -1418,6 +1526,12 @@ void RefreshCamera()
     if (model) {
         managed = RobRunCamera::Read(model);
         if (managed.valid) {
+            // The managed read gets FOV from Cinemachine, but some games
+            // modify the Unity Camera's FOV directly (e.g. speed-based zoom).
+            // Read the native projection to get the real rendered FOV.
+            const float nativeFov = CameraFinder::ReadNativeFov();
+            if (nativeFov > 0.f)
+                managed.verticalFov = nativeFov;
             std::lock_guard<std::mutex> lock(g_freshCameraMutex);
             g_freshCamera = managed;
         }

@@ -882,3 +882,31 @@ void Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 		LOG("[-] Failed to clear Scatter\n");
 	}
 }
+
+VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached()
+{
+	VMMDLL_SCATTER_HANDLE h = VMMDLL_Scatter_Initialize(this->vHandle, this->current_process.PID, 0);
+	if (!h)
+		LOG("[!] Failed to create cached scatter handle\n");
+	return h;
+}
+
+VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached(int pid)
+{
+	VMMDLL_SCATTER_HANDLE h = VMMDLL_Scatter_Initialize(this->vHandle, pid, 0);
+	if (!h)
+		LOG("[!] Failed to create cached scatter handle\n");
+	return h;
+}
+
+void Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
+{
+	if (!VMMDLL_Scatter_ExecuteRead(handle))
+	{
+		LOG("[-] Failed to Execute Cached Scatter Read\n");
+	}
+	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0))
+	{
+		LOG("[-] Failed to clear Cached Scatter\n");
+	}
+}

@@ -288,6 +288,10 @@ public:
 	void ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle);
 	void ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle);
 
+	VMMDLL_SCATTER_HANDLE CreateScatterHandleCached();
+	VMMDLL_SCATTER_HANDLE CreateScatterHandleCached(int pid);
+	void ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle);
+
 	/*the FPGA handle*/
 	VMM_HANDLE vHandle;
 };

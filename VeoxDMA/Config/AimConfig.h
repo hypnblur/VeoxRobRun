@@ -55,6 +55,10 @@ public:
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
 	bool HardLock = false;        // keep the current target outside the FOV
 
+	// --- Recoil / spread suppression ----------------------------------
+	bool NoRecoil = false;
+	bool NoSpread = false;
+
 	json ToJson()
 	{
 		json j;
@@ -75,6 +79,8 @@ public:
 		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
 		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
 		j[ConfigName][LIT("HardLock")] = HardLock;
+		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
+		j[ConfigName][LIT("NoSpread")] = NoSpread;
 		return j;
 	}
 
@@ -116,5 +122,9 @@ public:
 			PredictionYScale = j[ConfigName][LIT("PredictionYScale")];
 		if (j[ConfigName].contains(LIT("HardLock")))
 			HardLock = j[ConfigName][LIT("HardLock")];
+		if (j[ConfigName].contains(LIT("NoRecoil")))
+			NoRecoil = j[ConfigName][LIT("NoRecoil")];
+		if (j[ConfigName].contains(LIT("NoSpread")))
+			NoSpread = j[ConfigName][LIT("NoSpread")];
 	}
 };

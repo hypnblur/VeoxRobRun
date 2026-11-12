@@ -32,6 +32,20 @@ public:
 	// native matrices are the previous rendered frame and visibly trail when
 	// the camera moves, so this stays off by default.
 	bool NativeEspCamera = false;
+	bool WeaponEsp = true;
+	bool LookingAtYou = true;
+	bool LookingAlert = true;
+	bool ShowRole = true;
+
+	D2D1::ColorF NameColour = Colour(255, 255, 255);
+	D2D1::ColorF DistanceColour = Colour(200, 200, 200);
+	D2D1::ColorF HealthTextColour = Colour(100, 255, 100);
+	D2D1::ColorF WeaponColour = Colour(255, 200, 50);
+	D2D1::ColorF RoleColour = Colour(50, 200, 255);
+	D2D1::ColorF LookingColour = Colour(255, 50, 50);
+	D2D1::ColorF StateColour = Colour(255, 180, 0);
+	D2D1::ColorF BoxColour = Colour(255, 255, 255);
+
 	bool PoseSmoothing = true;
 	float PoseSmoothAlpha = 0.5f;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
@@ -70,6 +84,18 @@ public:
         j[ConfigName][LIT("WallCheck")] = WallCheck;
         j[ConfigName][LIT("BvhPath")] = BvhPath;
         j[ConfigName][LIT("NativeEspCameraV2")] = NativeEspCamera;
+        j[ConfigName][LIT("WeaponEsp")] = WeaponEsp;
+        j[ConfigName][LIT("LookingAtYou")] = LookingAtYou;
+        j[ConfigName][LIT("LookingAlert")] = LookingAlert;
+        j[ConfigName][LIT("ShowRole")] = ShowRole;
+        ToJsonColour(&j, LIT("NameColour"), &NameColour);
+        ToJsonColour(&j, LIT("DistanceColour"), &DistanceColour);
+        ToJsonColour(&j, LIT("HealthTextColour"), &HealthTextColour);
+        ToJsonColour(&j, LIT("WeaponColour"), &WeaponColour);
+        ToJsonColour(&j, LIT("RoleColour"), &RoleColour);
+        ToJsonColour(&j, LIT("LookingColour"), &LookingColour);
+        ToJsonColour(&j, LIT("StateColour"), &StateColour);
+        ToJsonColour(&j, LIT("BoxColour"), &BoxColour);
         j[ConfigName][LIT("PoseSmoothing")] = PoseSmoothing;
         j[ConfigName][LIT("PoseSmoothAlpha")] = PoseSmoothAlpha;
 
@@ -104,6 +130,22 @@ public:
             BvhPath = j[ConfigName][LIT("BvhPath")];
         if (j[ConfigName].contains(LIT("NativeEspCameraV2")))
             NativeEspCamera = j[ConfigName][LIT("NativeEspCameraV2")];
+        if (j[ConfigName].contains(LIT("WeaponEsp")))
+            WeaponEsp = j[ConfigName][LIT("WeaponEsp")];
+        if (j[ConfigName].contains(LIT("LookingAtYou")))
+            LookingAtYou = j[ConfigName][LIT("LookingAtYou")];
+        if (j[ConfigName].contains(LIT("LookingAlert")))
+            LookingAlert = j[ConfigName][LIT("LookingAlert")];
+        if (j[ConfigName].contains(LIT("ShowRole")))
+            ShowRole = j[ConfigName][LIT("ShowRole")];
+        FromJsonColour(j, LIT("NameColour"), &NameColour);
+        FromJsonColour(j, LIT("DistanceColour"), &DistanceColour);
+        FromJsonColour(j, LIT("HealthTextColour"), &HealthTextColour);
+        FromJsonColour(j, LIT("WeaponColour"), &WeaponColour);
+        FromJsonColour(j, LIT("RoleColour"), &RoleColour);
+        FromJsonColour(j, LIT("LookingColour"), &LookingColour);
+        FromJsonColour(j, LIT("StateColour"), &StateColour);
+        FromJsonColour(j, LIT("BoxColour"), &BoxColour);
         if (j[ConfigName].contains(LIT("PoseSmoothing")))
             PoseSmoothing = j[ConfigName][LIT("PoseSmoothing")];
         if (j[ConfigName].contains(LIT("PoseSmoothAlpha")))

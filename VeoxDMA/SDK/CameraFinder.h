@@ -36,4 +36,6 @@ CameraData GetCameraMatrices();
 CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
     const Vector3& expectedForward, float expectedVerticalFovDegrees);
 
+float ReadNativeFov();
+
 } // namespace CameraFinder

@@ -131,6 +131,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	};
 	callbacks.draw = [] {
 		Aim::Tick();
+		Aim::TickRecoilSpread();
 		// Read the camera after the aim has written its angles. The ESP must use
 		// the same camera state the game will render this frame; reading before
 		// the write projected with last frame's angle, which made skeletons drift

@@ -995,6 +995,65 @@ void Tick()
     }
 }
 
+static std::uintptr_t g_cachedPlayerClient = 0;
+static std::uint64_t g_lastRecoilGen = 0;
+
+void TickRecoilSpread()
+{
+    const auto& cfg = ConfigInstance.Aim;
+    if (!cfg.NoRecoil && !cfg.NoSpread) return;
+
+    const auto snapshot = RobRunReader::GetSnapshot();
+    if (!snapshot || snapshot->battleModel <= 0x10000) return;
+
+    if (snapshot->sessionGeneration != g_lastRecoilGen) {
+        g_cachedPlayerClient = 0;
+        g_lastRecoilGen = snapshot->sessionGeneration;
+    }
+
+    if (g_cachedPlayerClient <= 0x10000) {
+        const std::uintptr_t battleEnts = RobRunMemory::ReadPtr(
+            snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
+        if (battleEnts <= 0x10000) return;
+        const std::uintptr_t localPlayer = RobRunMemory::ReadPtr(
+            battleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel);
+        if (localPlayer <= 0x10000) return;
+        g_cachedPlayerClient = RobRunMemory::ReadPtr(
+            localPlayer + rr::PlayerEntityModel::Client);
+        if (g_cachedPlayerClient <= 0x10000) return;
+    }
+
+    VMMDLL_SCATTER_HANDLE handle = TargetProcess.CreateScatterHandle();
+    if (!handle) return;
+
+    struct { float x, y, z; } zero3 = {0.f, 0.f, 0.f};
+
+    if (cfg.NoRecoil) {
+        const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
+            g_cachedPlayerClient + rr::PlayerClient::Recoil);
+        if (recoilModel > 0x10000)
+            TargetProcess.AddScatterWriteRequest(handle,
+                recoilModel + rr::RecoilModel::OffsetVec, &zero3, sizeof(zero3));
+    }
+
+    if (cfg.NoSpread) {
+        const std::uintptr_t spreadModel = RobRunMemory::ReadPtr(
+            g_cachedPlayerClient + rr::PlayerClient::FakeSpread);
+        if (spreadModel > 0x10000) {
+            float zero = 0.f;
+            TargetProcess.AddScatterWriteRequest(handle,
+                spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
+            TargetProcess.AddScatterWriteRequest(handle,
+                spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
+            TargetProcess.AddScatterWriteRequest(handle,
+                spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
+        }
+    }
+
+    TargetProcess.ExecuteScatterWrite(handle);
+    TargetProcess.CloseScatterHandle(handle);
+}
+
 void Draw()
 {
     const auto& cfg = ConfigInstance.Aim;

@@ -490,4 +490,27 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
     return data;
 }
 
+float ReadNativeFov()
+{
+    std::uintptr_t node = g_cameraNode.load(std::memory_order_acquire);
+    std::uintptr_t projOff = g_projOff.load(std::memory_order_acquire);
+
+    if (!node) {
+        node = FindMainCamera();
+        if (!node) return 0.f;
+        projOff = 0xB0;
+    }
+    if (!projOff) projOff = 0xB0;
+
+    const float yScale = TargetProcess.Read<float>(
+        node + projOff + sizeof(float) * 5);
+    if (!std::isfinite(yScale) || yScale <= 0.f)
+        return 0.f;
+
+    const float fovRad = 2.f * std::atan(1.f / yScale);
+    const float fovDeg = fovRad * 180.f / 3.14159265358979323846f;
+    if (fovDeg < 1.f || fovDeg > 179.f) return 0.f;
+    return fovDeg;
+}
+
 } // namespace CameraFinder

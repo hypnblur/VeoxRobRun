@@ -9,6 +9,7 @@
 #include "../Overlay/Overlay.h"
 #include "../Esp/Radar.h"
 #include "../Overlay/Backdrop.h"
+#include "../Esp/EspDraw.h"
 #include "../ImGUI/imgui.h"
 #include <cstdio>
 #include <cstring>
@@ -131,14 +132,135 @@ static void DrawPanelESP()
 	ImGui::Separator();
 	ImGui::Spacing();
 
+	auto ColorBtn = [](const char* label, D2D1::ColorF& colour) {
+		float c[4] = { colour.r, colour.g, colour.b, colour.a };
+		ImGui::SameLine();
+		ImGui::PushID(label);
+		if (ImGui::ColorEdit4("##clr", c,
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoLabel))
+			colour = D2D1::ColorF(c[0], c[1], c[2], c[3]);
+		ImGui::PopID();
+	};
+
 	ImGui::Checkbox("Box ESP", &ConfigInstance.Player.BoxEsp);
+	ColorBtn("box", ConfigInstance.Player.BoxColour);
 	ImGui::Checkbox("Health", &ConfigInstance.Player.Health);
+	ColorBtn("hp", ConfigInstance.Player.HealthTextColour);
 	ImGui::Checkbox("Distance", &ConfigInstance.Player.Distance);
+	ColorBtn("dist", ConfigInstance.Player.DistanceColour);
 	ImGui::Checkbox("Primary Weapon", &ConfigInstance.Player.PrimaryWeapon);
 	ImGui::Checkbox("Secondary Weapon", &ConfigInstance.Player.SecondaryWeapon);
+	ImGui::Checkbox("Weapon Name", &ConfigInstance.Player.WeaponEsp);
+	ColorBtn("weap", ConfigInstance.Player.WeaponColour);
+	ImGui::Checkbox("Looking At You", &ConfigInstance.Player.LookingAtYou);
+	ColorBtn("look", ConfigInstance.Player.LookingColour);
+	ImGui::Checkbox("Looking Alert Window", &ConfigInstance.Player.LookingAlert);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Moveable/resizable alert when someone looks at you");
+	ImGui::Checkbox("Show Role", &ConfigInstance.Player.ShowRole);
+	ColorBtn("role", ConfigInstance.Player.RoleColour);
+	ImGui::Spacing();
+	{
+		float nc[4] = { ConfigInstance.Player.NameColour.r, ConfigInstance.Player.NameColour.g,
+			ConfigInstance.Player.NameColour.b, ConfigInstance.Player.NameColour.a };
+		if (ImGui::ColorEdit4("Name Color", nc,
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar))
+			ConfigInstance.Player.NameColour = D2D1::ColorF(nc[0], nc[1], nc[2], nc[3]);
+	}
+	{
+		float sc[4] = { ConfigInstance.Player.StateColour.r, ConfigInstance.Player.StateColour.g,
+			ConfigInstance.Player.StateColour.b, ConfigInstance.Player.StateColour.a };
+		if (ImGui::ColorEdit4("State Color", sc,
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar))
+			ConfigInstance.Player.StateColour = D2D1::ColorF(sc[0], sc[1], sc[2], sc[3]);
+	}
 	ImGui::Spacing();
 	ImGui::SliderInt("Max Distance", &ConfigInstance.Player.MaxDistance, 0, 1500, "%dm");
 	ImGui::SliderInt("Font Size", &ConfigInstance.Player.FontSize, 1, 24, "%dpx");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	static bool showPreview = false;
+	ImGui::Checkbox("ESP Preview", &showPreview);
+	if (showPreview)
+	{
+		ImDrawList* pdl = ImGui::GetWindowDrawList();
+		ImFont* pfont = ImGui::GetFont();
+		const auto& pc = ConfigInstance.Player;
+		const float fs = (float)pc.FontSize;
+		const float previewH = 220.f;
+		const ImVec2 origin = ImGui::GetCursorScreenPos();
+		ImGui::Dummy(ImVec2(0.f, previewH));
+		const float cx = origin.x + ImGui::GetContentRegionAvail().x * 0.5f;
+		const float cy = origin.y + 95.f;
+
+		auto toU32 = [](const D2D1::ColorF& c) -> ImU32 {
+			return IM_COL32((int)(c.r*255.f),(int)(c.g*255.f),(int)(c.b*255.f),(int)(c.a*255.f));
+		};
+
+		const float boxW = 30.f, boxH = 70.f;
+		ImVec2 bMin(cx - boxW, cy - boxH);
+		ImVec2 bMax(cx + boxW, cy + boxH);
+
+		const ImU32 boneCol = (pc.VisCheck || pc.WallCheck)
+			? toU32(pc.VisibleColour) : toU32(pc.TextColour);
+		pdl->AddCircle(ImVec2(cx, cy - 62.f), 7.f, boneCol, 12, 2.f);
+		pdl->AddLine(ImVec2(cx, cy - 55.f), ImVec2(cx, cy - 45.f), boneCol, 2.f);
+		pdl->AddLine(ImVec2(cx, cy - 45.f), ImVec2(cx, cy + 15.f), boneCol, 2.f);
+		pdl->AddLine(ImVec2(cx, cy - 40.f), ImVec2(cx - 22.f, cy - 10.f), boneCol, 2.f);
+		pdl->AddLine(ImVec2(cx, cy - 40.f), ImVec2(cx + 22.f, cy - 10.f), boneCol, 2.f);
+		pdl->AddLine(ImVec2(cx, cy + 15.f), ImVec2(cx - 16.f, cy + 55.f), boneCol, 2.f);
+		pdl->AddLine(ImVec2(cx, cy + 15.f), ImVec2(cx + 16.f, cy + 55.f), boneCol, 2.f);
+
+		if (pc.BoxEsp)
+			Esp::DrawCornerBox(pdl, ImVec2(bMin.x - 4.f, bMin.y - 4.f),
+				ImVec2(bMax.x + 4.f, bMax.y + 4.f), toU32(pc.BoxColour), 1.5f, 25.f, true);
+
+		if (pc.Health)
+		{
+			const float pct = 0.72f;
+			const ImU32 barCol = IM_COL32((int)(255.f*(1.f-pct)), (int)(255.f*pct), 60, 230);
+			const float barX = bMin.x - 13.f;
+			pdl->AddRectFilled(ImVec2(barX, bMin.y - 4.f),
+				ImVec2(barX + 3.f, bMax.y + 4.f), IM_COL32(0,0,0,180));
+			pdl->AddRectFilled(ImVec2(barX, bMax.y + 4.f - (bMax.y - bMin.y + 8.f) * pct),
+				ImVec2(barX + 3.f, bMax.y + 4.f), barCol);
+		}
+
+		struct PSeg { const char* text; ImU32 col; };
+		PSeg topSegs[8]; int topN = 0;
+		topSegs[topN++] = { "Player", toU32(pc.NameColour) };
+		topSegs[topN++] = { " <CLAN>", toU32(pc.NameColour) };
+		if (pc.Distance) topSegs[topN++] = { "[42m]", toU32(pc.DistanceColour) };
+		if (pc.Health) topSegs[topN++] = { "[72hp]", toU32(pc.HealthTextColour) };
+		if (pc.WeaponEsp) topSegs[topN++] = { "[AK-47]", toU32(pc.WeaponColour) };
+
+		float topW = 0.f;
+		for (int i = 0; i < topN; i++)
+			topW += pfont->CalcTextSizeA(fs, FLT_MAX, 0.f, topSegs[i].text).x;
+		float tx = cx - topW * 0.5f;
+		float ty = bMin.y - 4.f - pfont->CalcTextSizeA(fs, FLT_MAX, 0.f, "A").y;
+		for (int i = 0; i < topN; i++) {
+			Esp::DrawOutlinedText(pdl, ImVec2(tx, ty), topSegs[i].col, pfont, fs, topSegs[i].text);
+			tx += pfont->CalcTextSizeA(fs, FLT_MAX, 0.f, topSegs[i].text).x;
+		}
+
+		PSeg botSegs[8]; int botN = 0;
+		if (pc.ShowRole) botSegs[botN++] = { "[ROB]", toU32(pc.RoleColour) };
+		if (pc.LookingAtYou) botSegs[botN++] = { "[LOOKING]", toU32(pc.LookingColour) };
+		botSegs[botN++] = { "[S]", toU32(pc.StateColour) };
+
+		float botW = 0.f;
+		for (int i = 0; i < botN; i++)
+			botW += pfont->CalcTextSizeA(fs, FLT_MAX, 0.f, botSegs[i].text).x;
+		float bx = cx - botW * 0.5f;
+		float by = bMax.y + 8.f;
+		for (int i = 0; i < botN; i++) {
+			Esp::DrawOutlinedText(pdl, ImVec2(bx, by), botSegs[i].col, pfont, fs, botSegs[i].text);
+			bx += pfont->CalcTextSizeA(fs, FLT_MAX, 0.f, botSegs[i].text).x;
+		}
+	}
 
 	ImGui::Spacing();
 	ImGui::Text("Projection");
@@ -167,21 +289,6 @@ static void DrawPanelESP()
 				"Camera: native  d=%.2fm  a=%.1f deg  %s", cam.positionError,
 				180.f / 3.14159265f * std::acos(std::clamp(cam.forwardDot, -1.f, 1.f)),
 				pose);
-	}
-
-	ImGui::Spacing();
-	ImGui::Separator();
-	ImGui::Spacing();
-
-	float col[4] = {
-		ConfigInstance.Player.TextColour.r,
-		ConfigInstance.Player.TextColour.g,
-		ConfigInstance.Player.TextColour.b,
-		ConfigInstance.Player.TextColour.a
-	};
-	if (ImGui::ColorEdit4("ESP Color", col, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar))
-	{
-		ConfigInstance.Player.TextColour = D2D1::ColorF(col[0], col[1], col[2], col[3]);
 	}
 
 	ImGui::Spacing();
@@ -455,6 +562,21 @@ static void DrawPanelDevices()
 
 	if (ConfigInstance.Aim.AimType == 1 && !Ready())
 		ImGui::TextDisabled("Hardware Aim needs a connected device below.");
+
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+	ImGui::Text("Weapon Mods");
+	ImGui::Checkbox("No Recoil", &ConfigInstance.Aim.NoRecoil);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Zeros the recoil offset vector each frame via DMA write.\n"
+			"Works independently of the aim system.");
+	ImGui::Checkbox("No Spread", &ConfigInstance.Aim.NoSpread);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip(
+			"Zeros the fake spread, air spread and move spread values\n"
+			"each frame via DMA write.");
 
 	ImGui::Spacing();
 	ImGui::Separator();
@@ -764,7 +886,11 @@ static void DrawPanelSettings(bool attached, const std::string& statusText)
 			if (vis) Backdrop::Show();
 			else Backdrop::Hide();
 		}
-		ImGui::TextDisabled("Fullscreen black window behind the overlay.");
+		bool fs = Backdrop::IsFullscreen();
+		if (ImGui::Checkbox("Fullscreen", &fs))
+			Backdrop::SetFullscreen(fs);
+		ImGui::SameLine();
+		ImGui::TextDisabled(fs ? "Borderless, locked to monitor" : "Windowed, drag to move");
 
 		static int bdW = 0;
 		static int bdH = 0;
