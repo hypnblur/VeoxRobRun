@@ -124,6 +124,8 @@ bool g_scrollReset = false;
 bool g_dragging = false;
 ImVec2 g_dragDelta = ImVec2(0.f, 0.f);
 ImVec2 g_lastPos = ImVec2(-1.f, -1.f);
+// The saved placement is applied once, on the first frame the menu is drawn.
+bool g_placementApplied = false;
 char g_search[96] = "";
 bool g_readCatalog = false;
 
@@ -1693,7 +1695,6 @@ void Draw(bool attached, const std::string& statusText)
 		ApplyStyleColors();
 	}
 
-	ImGui::SetNextWindowSize(ImVec2(kW + kGlow * 2.f, kH + kGlow * 2.f), ImGuiCond_FirstUseEver);
 	ImGui::SetNextWindowSizeConstraints(
 		ImVec2(kMinW + kGlow * 2.f, kMinH + kGlow * 2.f),
 		ImVec2(io.DisplaySize.x, io.DisplaySize.y));
@@ -1708,10 +1709,29 @@ void Draw(bool attached, const std::string& statusText)
 		ImGui::SetNextWindowPos(target, ImGuiCond_Always);
 		g_dragDelta = ImVec2(0.f, 0.f);
 	}
-	else
+	else if (!g_placementApplied)
 	{
-		ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - kW) * 0.5f - kGlow,
-			(io.DisplaySize.y - kH) * 0.5f - kGlow), ImGuiCond_FirstUseEver);
+		// First frame this run: reopen where the user left the menu. The
+		// placement is clamped so a smaller monitor can never hide the bar.
+		g_placementApplied = true;
+		const WindowPlacement& saved = ConfigInstance.Overlay.MenuWindow;
+		if (saved.Saved)
+		{
+			const float w = ImClamp(saved.Width, kMinW, io.DisplaySize.x);
+			const float h = ImClamp(saved.Height, kMinH, io.DisplaySize.y);
+			const ImVec2 target(
+				ImClamp(saved.X, -w * 0.5f, ImMax(io.DisplaySize.x - w * 0.5f, 0.f)),
+				ImClamp(saved.Y, 0.f, ImMax(io.DisplaySize.y - kTop, 0.f)));
+			ImGui::SetNextWindowPos(target, ImGuiCond_Always);
+			ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
+		}
+		else
+		{
+			ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - kW) * 0.5f - kGlow,
+				(io.DisplaySize.y - kH) * 0.5f - kGlow), ImGuiCond_FirstUseEver);
+			ImGui::SetNextWindowSize(ImVec2(kW + kGlow * 2.f, kH + kGlow * 2.f),
+				ImGuiCond_FirstUseEver);
+		}
 	}
 
 	ImGui::Begin("##ROBRUN", nullptr,
@@ -1728,6 +1748,20 @@ void Draw(bool attached, const std::string& statusText)
 		g_singleColumn = kW < kTwoColumnMin;
 
 		const ImVec2 pos = ImGui::GetWindowPos() + ImVec2(kGlow, kGlow);
+
+		// Keep the saved placement in sync while the menu is open, so closing
+		// the menu (which saves the config) records the final position.
+		{
+			WindowPlacement& place = ConfigInstance.Overlay.MenuWindow;
+			const ImVec2 wp = ImGui::GetWindowPos();
+			const ImVec2 ws = ImGui::GetWindowSize();
+			place.Saved = true;
+			place.X = wp.x;
+			place.Y = wp.y;
+			place.Width = ws.x;
+			place.Height = ws.y;
+		}
+
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 
 		// ---- drag by the top bar ------------------------------------------

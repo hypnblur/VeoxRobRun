@@ -209,7 +209,29 @@ void Draw()
 	const auto& cfg = ConfigInstance.Radar;
 	const float radarSize = cfg.Size;
 
-	ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f), ImGuiCond_FirstUseEver);
+	// Restore the last on-screen placement, and follow the Size setting when
+	// the user changes it (the window itself is still freely resizable).
+	const WindowPlacement& savedPlace = ConfigInstance.Overlay.RadarWindow;
+	static float s_lastSizeSetting = -1.f;
+	if (savedPlace.Saved)
+	{
+		ImGui::SetNextWindowPos(ImVec2(savedPlace.X, savedPlace.Y), ImGuiCond_FirstUseEver);
+		if (savedPlace.Width > 50.f && savedPlace.Height > 50.f)
+			ImGui::SetNextWindowSize(ImVec2(savedPlace.Width, savedPlace.Height),
+				ImGuiCond_FirstUseEver);
+		else
+			ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f),
+				ImGuiCond_FirstUseEver);
+	}
+	else
+	{
+		ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f),
+			ImGuiCond_FirstUseEver);
+	}
+	if (s_lastSizeSetting >= 0.f && s_lastSizeSetting != cfg.Size)
+		ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f), ImGuiCond_Always);
+	s_lastSizeSetting = cfg.Size;
+
 	ImGui::SetNextWindowBgAlpha(cfg.Opacity);
 
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
@@ -227,6 +249,18 @@ void Draw()
 		ImGui::PopStyleColor(4);
 		ImGui::PopStyleVar(2);
 		return;
+	}
+
+	// Track the live placement so it is saved with the rest of the config.
+	{
+		WindowPlacement& place = ConfigInstance.Overlay.RadarWindow;
+		const ImVec2 wp = ImGui::GetWindowPos();
+		const ImVec2 ws = ImGui::GetWindowSize();
+		place.Saved = true;
+		place.X = wp.x;
+		place.Y = wp.y;
+		place.Width = ws.x;
+		place.Height = ws.y;
 	}
 
 	ImVec2 contentPos = ImGui::GetCursorScreenPos();

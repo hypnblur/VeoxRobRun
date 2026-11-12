@@ -258,6 +258,9 @@ void DrawPlayers()
 
 	if (pcfg.LookingAlert && !lookingNames.empty())
 	{
+		const WindowPlacement& savedAlert = ConfigInstance.Overlay.AlertWindow;
+		if (savedAlert.Saved)
+			ImGui::SetNextWindowPos(ImVec2(savedAlert.X, savedAlert.Y), ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(280.f, 0.f), ImGuiCond_FirstUseEver);
 		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 0, 0, 200));
 		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 50, 50, 200));
@@ -269,6 +272,15 @@ void DrawPlayers()
 		ImGui::Begin("Looking Alert", nullptr,
 			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
 			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+
+		// Remember where the alert was dragged so it reopens there.
+		{
+			WindowPlacement& place = ConfigInstance.Overlay.AlertWindow;
+			const ImVec2 wp = ImGui::GetWindowPos();
+			place.Saved = true;
+			place.X = wp.x;
+			place.Y = wp.y;
+		}
 
 		const ImU32 alertCol = D2DColorToImU32(pcfg.LookingColour);
 		for (const auto& name : lookingNames)
