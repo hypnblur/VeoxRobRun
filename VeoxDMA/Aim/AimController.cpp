@@ -57,6 +57,12 @@ bool g_haveWrittenForward = false;
 bool g_writeHealthy = false;
 const char* g_lastVerdict = "-";
 
+// Memory aim write gate. A level transition destroys the camera/input objects;
+// writes stay blocked for a second after the reader reports a new session so
+// the new objects can be re-resolved first.
+std::uint64_t g_lastSessionGeneration = 0;
+std::uint64_t g_writeBlockedUntil = 0;
+
 // Previous feet position per entity, used for target leading. Kept on the
 // render thread because the reader snapshot only carries one position.
 struct MotionSample {
@@ -268,37 +274,78 @@ struct WriteOutcome {
     bool scatter = false;
 };
 
-bool WriteCameraAngles(std::uintptr_t cameraModel, float yaw, float pitch,
+bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
+    float yaw, float pitch,
     WriteOutcome& outcome, Vector3* liveForwardOut = nullptr,
     std::uintptr_t lookDirModel = 0, std::uintptr_t lookDirDirect = 0,
     std::uintptr_t playerRotInput = 0)
 {
     outcome = WriteOutcome{};
-    if (cameraModel <= 0x10000) return false;
+    if (cameraModel <= 0x10000 || battleModel <= 0x10000) return false;
 
     Vector3 forward = EulerToForward(yaw, pitch);
     Vector3 right = RightFromYaw(yaw);
     Vector3 up = UpFromYawPitch(yaw, pitch);
     AimQuat q = QuatFromBasis(right, up, forward);
 
-    // Batch both validation reads into one scatter instead of two separate
-    // ReadBytesFresh calls. Each ReadBytesFresh is a full device transaction;
-    // batching halves the DMA traffic and avoids starving the reader worker.
+    // Validate every target in one scatter transaction before writing a byte.
+    // After a level change the cached pointers can still satisfy the old
+    // numeric checks (freed memory keeps the last values), so the only reliable
+    // read-only proof is that BattleModel still points at this exact camera
+    // object and that each auxiliary object still looks structurally valid.
     float liveQuat[4]{};
     Vector3 liveForward{};
+    std::uintptr_t liveCamera = 0;
+    Vector3 lookModelValue{};
+    Vector3 lookDirectValue{};
+    float lookDirectYaw = 0.f;
+    float lookDirectPitch = 0.f;
+    float rotYaw = 0.f;
+    float rotPitch = 0.f;
     {
         VMMDLL_SCATTER_HANDLE rh = TargetProcess.CreateScatterHandle();
         if (!rh) return false;
+        TargetProcess.AddScatterReadRequest(rh,
+            battleModel + rr::BattleModel::BattleCameraModel, &liveCamera,
+            sizeof(liveCamera));
         TargetProcess.AddScatterReadRequest(rh,
             cameraModel + rr::BattleCameraModelOffsets::Orientation,
             liveQuat, sizeof(liveQuat));
         TargetProcess.AddScatterReadRequest(rh,
             cameraModel + rr::BattleCameraModelOffsets::Forward,
             &liveForward, sizeof(liveForward));
+        if (lookDirModel > 0x10000)
+            TargetProcess.AddScatterReadRequest(rh,
+                lookDirModel + rr::ReferenceData::Value, &lookModelValue,
+                sizeof(lookModelValue));
+        if (lookDirDirect > 0x10000) {
+            TargetProcess.AddScatterReadRequest(rh,
+                lookDirDirect + rr::LookDirectionModel::Value, &lookDirectValue,
+                sizeof(lookDirectValue));
+            TargetProcess.AddScatterReadRequest(rh,
+                lookDirDirect + rr::LookDirectionModel::Yaw, &lookDirectYaw,
+                sizeof(lookDirectYaw));
+            TargetProcess.AddScatterReadRequest(rh,
+                lookDirDirect + rr::LookDirectionModel::Pitch, &lookDirectPitch,
+                sizeof(lookDirectPitch));
+        }
+        if (playerRotInput > 0x10000) {
+            TargetProcess.AddScatterReadRequest(rh,
+                playerRotInput + rr::PlayerRotationInputModel::Yaw, &rotYaw,
+                sizeof(rotYaw));
+            TargetProcess.AddScatterReadRequest(rh,
+                playerRotInput + rr::PlayerRotationInputModel::Pitch, &rotPitch,
+                sizeof(rotPitch));
+        }
         TargetProcess.ExecuteReadScatter(rh);
         TargetProcess.CloseScatterHandle(rh);
     }
     if (liveForwardOut) *liveForwardOut = liveForward;
+
+    // The camera object must still be the one BattleModel currently owns. This
+    // is the hard gate that stops writes into a camera freed by a level change.
+    if (liveCamera != cameraModel) return false;
+
     const float quatLength2 = liveQuat[0] * liveQuat[0] + liveQuat[1] * liveQuat[1] +
         liveQuat[2] * liveQuat[2] + liveQuat[3] * liveQuat[3];
     if (!std::isfinite(quatLength2) || std::fabs(quatLength2 - 1.f) > 0.15f) return false;
@@ -308,6 +355,29 @@ bool WriteCameraAngles(std::uintptr_t cameraModel, float yaw, float pitch,
         liveForward.z * liveForward.z);
     if (!std::isfinite(forwardLength) || forwardLength < 0.9f || forwardLength > 1.1f)
         return false;
+
+    // Auxiliary input models are optional. If one no longer looks valid, drop
+    // that target instead of writing into a reused object.
+    const auto unitVector = [](const Vector3& v) {
+        if (!Finite(v)) return false;
+        const float len2 = v.x * v.x + v.y * v.y + v.z * v.z;
+        return std::isfinite(len2) && len2 > 0.64f && len2 < 1.44f;
+    };
+    const auto angleOk = [](float angle) {
+        return std::isfinite(angle) && std::fabs(angle) <= 7.0f;
+    };
+    const auto pitchOk = [](float angle) {
+        return std::isfinite(angle) && std::fabs(angle) <= 1.75f;
+    };
+    if (lookDirModel > 0x10000 && !unitVector(lookModelValue))
+        lookDirModel = 0;
+    if (lookDirDirect > 0x10000 &&
+        (!unitVector(lookDirectValue) || !angleOk(lookDirectYaw) ||
+         !pitchOk(lookDirectPitch)))
+        lookDirDirect = 0;
+    if (playerRotInput > 0x10000 &&
+        (!angleOk(rotYaw) || !pitchOk(rotPitch)))
+        playerRotInput = 0;
 
     outcome.attempted = true;
 
@@ -607,6 +677,17 @@ void Tick()
     }
     g_debug.entities = static_cast<int>(snapshot->entities.size());
 
+    // A scene/session change (level transition, new match) invalidates every
+    // pointer the aim was holding. Reset smoothing and block memory writes
+    // until the reader has published fresh, re-resolved objects.
+    if (snapshot->sessionGeneration != g_lastSessionGeneration) {
+        g_lastSessionGeneration = snapshot->sessionGeneration;
+        resetSmoothing();
+        g_lastTarget = -1;
+        g_motion.clear();
+        g_writeBlockedUntil = GetTickCount64() + 1000;
+    }
+
     // One-off, cheap enough to do on the first attached tick: write the runtime
     // field tables that the reference memory aim writes through, so the missing
     // input/rotation offsets can be taken from real metadata.
@@ -768,64 +849,78 @@ void Tick()
         g_debug.writeMode = true;
 
         const std::uintptr_t cameraModel = snapshot->cameraModel;
-        if (cameraModel <= 0x10000) {
+        const std::uintptr_t battleModel = snapshot->battleModel;
+        const std::uint64_t now = GetTickCount64();
+        // Never write from a stale snapshot, and never while the roots are
+        // missing or the reader has just reported a new scene. The write path
+        // re-checks BattleModel -> camera itself, but gating here stops the
+        // 16 ms stream during the teardown/rebuild window entirely.
+        const bool freshSnapshot =
+            snapshot->stampMs != 0 && now - snapshot->stampMs <= 250;
+        const bool validRoots = cameraModel > 0x10000 &&
+            battleModel > 0x10000 && snapshot->localCharacter > 0x10000;
+        if (!validRoots) {
             g_writeHealthy = false;
-            g_lastVerdict = "no camera model";
-        } else {
-            const std::uint64_t now = GetTickCount64();
-            if (g_lastWriteTick == 0 || now - g_lastWriteTick >= kWriteIntervalMs) {
-                const float dtMs = g_lastWriteTick == 0
-                    ? 16.f
-                    : std::clamp(static_cast<float>(now - g_lastWriteTick), 0.5f, 24.f);
-                g_lastWriteTick = now;
+            g_lastVerdict = "waiting for session";
+        } else if (!freshSnapshot) {
+            g_writeHealthy = false;
+            g_lastVerdict = "stale snapshot";
+        } else if (now < g_writeBlockedUntil) {
+            g_writeHealthy = false;
+            g_lastVerdict = "level transition";
+        } else if (g_lastWriteTick == 0 || now - g_lastWriteTick >= kWriteIntervalMs) {
+            const float dtMs = g_lastWriteTick == 0
+                ? 16.f
+                : std::clamp(static_cast<float>(now - g_lastWriteTick), 0.5f, 24.f);
+            g_lastWriteTick = now;
 
-                const float gain = 1.f - std::exp(-dtMs / responseMs);
-                const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
+            const float gain = 1.f - std::exp(-dtMs / responseMs);
+            const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
 
-                if (!g_smoothInit || g_smoothTarget != bestId) {
-                    g_curYaw = targetYaw;
-                    g_curPitch = targetPitch;
-                    g_carryYaw = g_carryPitch = 0.f;
-                    g_smoothInit = true;
-                    g_smoothTarget = bestId;
-                } else {
-                    float dYaw = targetYaw - g_curYaw;
-                    while (dYaw > kPi) dYaw -= 2.f * kPi;
-                    while (dYaw < -kPi) dYaw += 2.f * kPi;
-                    const float dPitch = targetPitch - g_curPitch;
+            if (!g_smoothInit || g_smoothTarget != bestId) {
+                g_curYaw = targetYaw;
+                g_curPitch = targetPitch;
+                g_carryYaw = g_carryPitch = 0.f;
+                g_smoothInit = true;
+                g_smoothTarget = bestId;
+            } else {
+                float dYaw = targetYaw - g_curYaw;
+                while (dYaw > kPi) dYaw -= 2.f * kPi;
+                while (dYaw < -kPi) dYaw += 2.f * kPi;
+                const float dPitch = targetPitch - g_curPitch;
 
-                    if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
-                    if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
+                if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
+                if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
 
-                    const float stepYaw = dYaw * gain + g_carryYaw;
-                    const float stepPitch = dPitch * verticalGain + g_carryPitch;
-                    g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
-                    g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
-                    g_curYaw += stepYaw;
-                    g_curPitch += stepPitch;
-                }
+                const float stepYaw = dYaw * gain + g_carryYaw;
+                const float stepPitch = dPitch * verticalGain + g_carryPitch;
+                g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
+                g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
+                g_curYaw += stepYaw;
+                g_curPitch += stepPitch;
+            }
 
-                WriteOutcome outcome;
-                Vector3 liveForward{};
-                g_writeHealthy = WriteCameraAngles(cameraModel, g_curYaw, g_curPitch, outcome, &liveForward,
-                    snapshot->lookDirectionModel, snapshot->lookDirDirect,
-                    snapshot->playerRotationInput);
-                g_debug.tgtYawDeg = g_curYaw * 180.f / kPi;
-                g_debug.tgtPitchDeg = g_curPitch * 180.f / kPi;
+            WriteOutcome outcome;
+            Vector3 liveForward{};
+            g_writeHealthy = WriteCameraAngles(battleModel, cameraModel, g_curYaw,
+                g_curPitch, outcome, &liveForward,
+                snapshot->lookDirectionModel, snapshot->lookDirDirect,
+                snapshot->playerRotationInput);
+            g_debug.tgtYawDeg = g_curYaw * 180.f / kPi;
+            g_debug.tgtPitchDeg = g_curPitch * 180.f / kPi;
 
-                // Verdict on the previous write using the forward the scatter
-                // validation read fetched (before the new write replaced it).
-                if (g_haveWrittenForward && Finite(liveForward))
-                    g_lastVerdict = CompareToWritten(g_writtenForward, liveForward);
+            // Verdict on the previous write using the forward the scatter
+            // validation read fetched (before the new write replaced it).
+            if (g_haveWrittenForward && Finite(liveForward))
+                g_lastVerdict = CompareToWritten(g_writtenForward, liveForward);
 
-                if (!g_writeHealthy) {
-                    g_lastVerdict = "write failed";
-                } else {
-                    g_writtenForward = EulerToForward(g_curYaw, g_curPitch);
-                    g_haveWrittenForward = true;
-                    if (g_lastVerdict[0] == '-' || g_lastVerdict[0] == '\0')
-                        g_lastVerdict = "writing";
-                }
+            if (!g_writeHealthy) {
+                g_lastVerdict = "write failed";
+            } else {
+                g_writtenForward = EulerToForward(g_curYaw, g_curPitch);
+                g_haveWrittenForward = true;
+                if (g_lastVerdict[0] == '-' || g_lastVerdict[0] == '\0')
+                    g_lastVerdict = "writing";
             }
         }
 

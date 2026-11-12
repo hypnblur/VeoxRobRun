@@ -29,6 +29,58 @@ static std::uintptr_t cachedLookDirDirect = 0;
 static std::uintptr_t cachedPlayerRotationInput = 0;
 static std::uintptr_t cachedUpdater = 0;
 
+// Scene/session identity. Every root change (level transition, new match)
+// bumps the generation so memory aim can stop writing until the new objects
+// have been re-resolved.
+static int32_t localEntityId = -1;
+static std::uint64_t sessionGeneration = 0;
+static std::uint64_t sessionChangedMs = 0;
+static std::uintptr_t lastBattleModel = 0;
+static std::uintptr_t lastBattleEntities = 0;
+static std::uintptr_t lastCameraModel = 0;
+static std::uintptr_t lastLocalCharacter = 0;
+static std::uintptr_t lastUpdater = 0;
+static std::int32_t lastLocalEntityId = -1;
+static bool lastSessionValid = false;
+
+static void MarkSessionChanged()
+{
+    ++sessionGeneration;
+    sessionChangedMs = GetTickCount64();
+}
+
+// Called once per pass after resolution. Any change in the scene roots means
+// the previous pointers may now point at freed/reused memory.
+static void NoteSessionState()
+{
+    if (!lastSessionValid) {
+        lastSessionValid = true;
+        lastBattleModel = cachedBattleModel;
+        lastBattleEntities = cachedBattleEntities;
+        lastCameraModel = cachedCameraModel;
+        lastLocalCharacter = cachedLocalCharacter;
+        lastUpdater = cachedUpdater;
+        lastLocalEntityId = localEntityId;
+        return;
+    }
+
+    if (cachedBattleModel == lastBattleModel &&
+        cachedBattleEntities == lastBattleEntities &&
+        cachedCameraModel == lastCameraModel &&
+        cachedLocalCharacter == lastLocalCharacter &&
+        cachedUpdater == lastUpdater &&
+        localEntityId == lastLocalEntityId)
+        return;
+
+    MarkSessionChanged();
+    lastBattleModel = cachedBattleModel;
+    lastBattleEntities = cachedBattleEntities;
+    lastCameraModel = cachedCameraModel;
+    lastLocalCharacter = cachedLocalCharacter;
+    lastUpdater = cachedUpdater;
+    lastLocalEntityId = localEntityId;
+}
+
 static std::vector<EntityData> entities;
 // World/inventory state is built on a separate worker thread and published as
 // immutable shared objects. Copying the whole state into every snapshot (and,
@@ -42,7 +94,6 @@ static std::shared_ptr<const RobRunInventory::State> g_inventoryState =
 static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
-static int32_t localEntityId = -1;
 static Vector3 localPosition{};
 static std::uint32_t failureCount = 0;
 static std::uint32_t poseFailureCount = 0;
@@ -180,6 +231,8 @@ static void PublishSnapshot()
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
     snapshot->stampMs = GetTickCount64();
+    snapshot->sessionGeneration = sessionGeneration;
+    snapshot->sessionChangedMs = sessionChangedMs;
     for (const auto& entity : entities) {
         if (!entity.bones.empty()) ++snapshot->skeletonCount;
         if (entity.bonePoints.valid) ++snapshot->poseCount;
@@ -217,6 +270,15 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     cachedLookDirDirect = 0;
     cachedPlayerRotationInput = 0;
     cachedUpdater = 0;
+    sessionGeneration = 0;
+    sessionChangedMs = 0;
+    lastBattleModel = 0;
+    lastBattleEntities = 0;
+    lastCameraModel = 0;
+    lastLocalCharacter = 0;
+    lastUpdater = 0;
+    lastLocalEntityId = -1;
+    lastSessionValid = false;
     failureCount = 0;
     updateCounter = 0;
     gameRetryCountdown = 0;
@@ -651,6 +713,14 @@ static void UpdateInternal()
         }
         worldRefreshStamp = 0;
         inventoryRefreshStamp = 0;
+        // The old camera/input pointers are meaningless once BattleModel is
+        // gone. Drop them so a stale pointer can never be advertised to aim.
+        cachedCameraModel = 0;
+        cachedLookDirectionModel = 0;
+        cachedLookDirDirect = 0;
+        cachedPlayerRotationInput = 0;
+        cachedLocalCharacter = 0;
+        NoteSessionState();
         ++failureCount;
         return;
     }
@@ -668,12 +738,27 @@ static void UpdateInternal()
         }
     }
     if (cachedBattleEntities <= 0x10000) {
+        cachedCameraModel = 0;
+        cachedLookDirectionModel = 0;
+        cachedLookDirDirect = 0;
+        cachedPlayerRotationInput = 0;
+        cachedLocalCharacter = 0;
+        NoteSessionState();
         ++failureCount;
         return;
     }
 
-    if (!cachedCameraModel)
-        cachedCameraModel = ReadPtr(cachedBattleModel + rr::BattleModel::BattleCameraModel);
+    // Re-resolve every pass instead of only when zero. A level change destroys
+    // and recreates the camera object; keeping the first pointer made memory
+    // aim keep writing into freed/reused memory, which crashed the game.
+    {
+        const std::uintptr_t cameraCandidate = ReadPtr(
+            cachedBattleModel + rr::BattleModel::BattleCameraModel);
+        cachedCameraModel =
+            (cameraCandidate > 0x10000 &&
+             IsClass(cameraCandidate, "BattleCameraModel"))
+            ? cameraCandidate : 0;
+    }
     g_renderCameraModel.store(cachedCameraModel, std::memory_order_release);
     cameraState = RobRunCamera::Read(cachedCameraModel);
 
@@ -1191,6 +1276,10 @@ static void UpdateInternal()
         }
         inventoryRefreshStamp = passNow;
     }
+
+    // A root change here means this pass rebuilt the scene identity. Bump the
+    // generation so memory aim blocks writes while the new objects settle.
+    NoteSessionState();
 
     PruneCaches();
     failureCount = 0;

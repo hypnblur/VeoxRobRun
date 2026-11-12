@@ -410,8 +410,27 @@ up      = ( sin(yaw)*sin(pitch),  cos(pitch),  cos(yaw)*sin(pitch) )
 The quaternion is converted from that orthonormal basis (columns
 right/up/forward), not from Euler angles, so the quaternion and the basis
 vectors always describe the same rotation. Before writing, the live block must
-still pass a sanity check (unit orientation quaternion, unit forward vector) so
-a stale pointer from a scene change cannot scribble over reused memory.
+still pass a sanity check (unit orientation quaternion, unit forward vector).
+
+A level transition destroys and recreates the camera and input objects, and
+freed memory keeps the last values, so the numeric check alone is not enough.
+The write path therefore:
+
+1. Re-resolves `BattleModel +0x358` on every reader pass and validates the
+   candidate with `IsClass(..., "BattleCameraModel")`.
+2. Publishes a `sessionGeneration` that changes whenever `Game`,
+   `BattleModel`, `BattleEntitiesModel`, `BattleEntitiesUpdater`, the local
+   character or the local entity id changes.
+3. Blocks memory writes for one second after a generation change, and while
+   the snapshot is older than 250 ms or any root pointer is missing.
+4. Scatter-reads `BattleModel +0x358` before each write and aborts unless it
+   still equals the camera pointer being written.
+5. Structurally validates the optional `LookDirectionModel`,
+   `BattleCameraModel +0x70` and `PlayerRotationInput` targets (finite unit
+   vectors, sane yaw/pitch) and drops any target that fails.
+
+Without this, memory aim could keep writing into a camera object that the
+level load had already freed and reused, which crashed the game.
 
 Each step is rate-limited to one write per 8 ms. The step size is an
 exponential response:

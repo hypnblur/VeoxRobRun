@@ -78,6 +78,13 @@ struct Snapshot {
     // Publish time (GetTickCount64). Lets the overlay report how old the pose
     // data it is drawing actually is.
     std::uint64_t stampMs = 0;
+    // Monotonic id that changes whenever a scene/session root changes (game,
+    // BattleModel, BattleEntitiesModel, updater, local character or local
+    // entity id). Memory aim uses this to stop writing while the level is
+    // being torn down and rebuilt instead of scribbling over freed objects.
+    std::uint64_t sessionGeneration = 0;
+    // Time the generation last changed (GetTickCount64).
+    std::uint64_t sessionChangedMs = 0;
 };
 
 using SnapshotPtr = std::shared_ptr<const Snapshot>;
