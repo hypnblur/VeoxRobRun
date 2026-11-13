@@ -149,6 +149,15 @@ struct DetailCacheEntry {
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
+    int weaponIndex = -1;
+    bool isFiring = false;
+    bool isReloading = false;
+    bool hasArmor = false;
+    bool isKnockedDown = false;
+    bool isKnockedOut = false;
+    bool isSurrendered = false;
+    bool isHandcuffed = false;
+    std::string reloadPhase;
 };
 static std::unordered_map<std::int32_t, DetailCacheEntry> detailCache;
 
@@ -180,15 +189,13 @@ struct RigCacheEntry {
     // and the layout needs rebuilding.
     int poseFailures = 0;
     std::uint64_t poseFailureSince = 0;
-    // Live-hierarchy check (view -> movement view -> _transform() -> hierarchy).
-    // A cached matrix array belongs to one hierarchy instance; a new native
-    // transform, hierarchy, array or bone count means the cached indices
-    // describe a rig that no longer exists.
-    int targetFailures = 0;
-    // Consecutive failed 2 s layout revalidations. A good rig must survive a
-    // single unreadable rebuild, otherwise the skeleton blinks off every time
-    // the hierarchy check happens to land on a bad read.
-    int layoutFailures = 0;
+    // Worker-side exponential smoothing of the published pose. The overlay
+    // draws these directly; there is no render-thread interpolation, so the
+    // latency between the sampled pose and the drawn pose is at most one pass
+    // and never extrapolates past the newest sample.
+    std::vector<Skeleton::BoneSegment> smoothedBones;
+    Skeleton::BonePoints smoothedPoints;
+    bool smoothedValid = false;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -780,7 +787,7 @@ static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity
 }
 
 // New offset set: BattleCharacterModel+0x40 -> Data+0x20 -> CommonData.
-// One traversal covers role, movement state, death and vehicle id.
+// One traversal covers role, movement state, death, firing and vehicle id.
 static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
 {
     if (characterModel <= 0x10000) return;
@@ -795,12 +802,17 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
         entity.role = role;
 
     bool flag = false;
+    if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsFiring), flag))
+        entity.isFiring = flag;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsSprinting), flag))
         entity.isSprinting = flag;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsCrouching), flag))
         entity.isCrouching = flag;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsDead), flag))
         entity.isDead = flag;
+    if (Il2Cpp::ReadPrimitiveBool(
+            ReadPtr(characterModel + rr::BattleCharacterModel::HasArmor), flag))
+        entity.hasArmor = flag;
 
     std::int32_t vehicleId = 0;
     if (Il2Cpp::ReadPrimitiveInt(ReadPtr(common + rr::CommonModel::VehicleEntityId), vehicleId)) {
@@ -809,9 +821,122 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     }
 }
 
-static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out)
+// Current battle clock in Unix milliseconds. Reload/knockdown end timestamps
+// are compared against this instead of the wall clock: the server clock can
+// drift, and a timestamp that is already in the past must not read as active.
+static std::int64_t ReadBattleNowMs(std::uintptr_t battleEntities)
+{
+    if (battleEntities > 0x10000) {
+        const std::uintptr_t localPlayer = ReadPtr(
+            battleEntities + rr::BattleEntitiesModel::LocalPlayerEntityModel);
+        const std::uintptr_t client = localPlayer > 0x10000
+            ? ReadPtr(localPlayer + rr::PlayerEntityModel::Client)
+            : 0;
+        const std::uintptr_t intention = client > 0x10000
+            ? ReadPtr(client + rr::PlayerClient::InventoryIntention)
+            : 0;
+        const std::uintptr_t nowObj = intention > 0x10000
+            ? ReadPtr(intention + rr::InventoryIntentionModel::Now)
+            : 0;
+        if (nowObj > 0x10000) {
+            const std::int64_t t = RobRunMemory::ReadInt64(
+                nowObj + rr::InventoryIntentionModel::TimeMs);
+            if (t > 1000000000000LL) return t;
+        }
+    }
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    const std::uint64_t t100ns =
+        (static_cast<std::uint64_t>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+    constexpr std::uint64_t epochDiff = 116444736000000000ULL;
+    return (t100ns > epochDiff)
+        ? static_cast<std::int64_t>((t100ns - epochDiff) / 10000ULL) : 0;
+}
+
+// Reference wrapper -> ReferenceData -> value, then the timestamp payload.
+static std::int64_t ReadTimestampData(std::uintptr_t tsWrapper)
+{
+    if (tsWrapper <= 0x10000) return 0;
+    return RobRunMemory::ReadInt64(tsWrapper + 0x18);
+}
+
+static void ReadReloadAndKnockdownState(std::uintptr_t characterModel,
+    std::int64_t battleNowMs, EntityData& entity)
+{
+    if (characterModel <= 0x10000) return;
+    constexpr std::int64_t kSentinelTs = 1767225600000LL;
+
+    // 1) Reload state via WeaponReloadModel._state (ReferenceData -> +0x18
+    //    non-null while reloading).
+    const std::uintptr_t reloadModel = ReadPtr(
+        characterModel + rr::BattleCharacterModel::WeaponReload);
+    if (reloadModel > 0x10000) {
+        const std::uintptr_t stateRef = ReadPtr(
+            reloadModel + rr::WeaponReloadModel::State);
+        const std::uintptr_t stateDesc = stateRef > 0x10000
+            ? ReadPtr(stateRef + rr::ReferenceData::Value)
+            : 0;
+        if (stateDesc > 0x10000) {
+            entity.isReloading = true;
+            std::wstring w;
+            RobRunMemory::ReadString(
+                ReadPtr(stateDesc + rr::Description::Name), w);
+            entity.reloadPhase = RobRunMemory::WideToUtf8(w);
+        }
+        if (!entity.isReloading && battleNowMs > 0) {
+            const std::int64_t endTs = ReadTimestampData(
+                ReadPtr(reloadModel + rr::WeaponReloadModel::EndTs));
+            if (endTs > kSentinelTs && endTs > battleNowMs)
+                entity.isReloading = true;
+        }
+    }
+    if (!entity.isReloading) {
+        bool bgReload = false;
+        if (Il2Cpp::ReadPrimitiveBool(
+                ReadPtr(characterModel + rr::BattleCharacterModel::IsBackgroundReload),
+                bgReload) && bgReload) {
+            entity.isReloading = true;
+        }
+    }
+
+    // 2) KnockdownModel._endTs (active while after the sentinel and now).
+    const std::uintptr_t kdModel = ReadPtr(
+        characterModel + rr::BattleCharacterModel::Knockdown);
+    if (kdModel > 0x10000 && battleNowMs > 0) {
+        const std::int64_t kdEndTs = ReadTimestampData(
+            ReadPtr(kdModel + rr::KnockdownModel::EndTs));
+        if (kdEndTs > kSentinelTs && kdEndTs > battleNowMs)
+            entity.isKnockedDown = true;
+    }
+
+    // 3) KnockoutModel (phase non-null, active endTs, surrendered / handcuffed).
+    const std::uintptr_t koModel = ReadPtr(
+        characterModel + rr::BattleCharacterModel::Knockout);
+    if (koModel > 0x10000) {
+        const std::uintptr_t phaseRef = ReadPtr(
+            koModel + rr::KnockoutModel::Phase);
+        const std::uintptr_t phaseDesc = phaseRef > 0x10000
+            ? ReadPtr(phaseRef + rr::ReferenceData::Value)
+            : 0;
+        if (phaseDesc > 0x10000) {
+            entity.isKnockedOut = true;
+        } else if (battleNowMs > 0) {
+            const std::int64_t koEndTs = ReadTimestampData(
+                ReadPtr(koModel + rr::KnockoutModel::EndTs));
+            if (koEndTs > kSentinelTs && koEndTs > battleNowMs)
+                entity.isKnockedOut = true;
+        }
+        entity.isSurrendered =
+            RobRunMemory::ReadUInt8(koModel + rr::KnockoutModel::IsSurrendered) != 0;
+        entity.isHandcuffed =
+            RobRunMemory::ReadUInt8(koModel + rr::KnockoutModel::IsHandcuffed) != 0;
+    }
+}
+
+static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out, int& weaponIndex)
 {
     out.clear();
+    weaponIndex = -1;
     if (characterModel <= 0x10000) return;
     const std::uintptr_t itemInHands = ReadPtr(
         characterModel + rr::BattleCharacterModel::ItemInHands);
@@ -828,6 +953,9 @@ static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out)
         description + rr::Description::Name);
     if (nameStr > 0x10000)
         RobRunMemory::ReadString(nameStr, out);
+    const std::int32_t idx = RobRunMemory::ReadInt32(
+        description + rr::InventoryItemDescription::Index);
+    if (idx >= 0) weaponIndex = idx;
 }
 
 // Read a slot identity string. The new offset set stores Il2CppString*
@@ -1313,58 +1441,6 @@ static void UpdateInternal()
         }
 
         // ---------------------------------------------------------------
-        // Phase 2b: confirm the cached matrix array still belongs to the live
-        // transform hierarchy. The view is the per-entity registry entry, so
-        // the chain is re-navigated from it (movement view -> _transform() ->
-        // native Transform -> hierarchy) instead of trusting an array pointer
-        // read in an earlier pass. One entity is checked per pass, so a
-        // reallocated hierarchy is caught in about half a second rather than
-        // at the two-second rebuild timer.
-        // ---------------------------------------------------------------
-        if (!work.empty()) {
-            static std::size_t rigCheckSeed = 0;
-            auto& check = work[rigCheckSeed++ % work.size()];
-            auto rigIt = rigCache.find(check.entityId);
-            if (rigIt != rigCache.end() && rigIt->second.layoutValid &&
-                rigIt->second.layout.hierarchy > 0x10000)
-            {
-                auto& rig = rigIt->second;
-                std::uint64_t liveMatrices = 0;
-                const bool readOk = DmaRead(rig.layout.hierarchy + 0x18,
-                    &liveMatrices, sizeof(liveMatrices));
-                if (readOk && liveMatrices == rig.layout.matrices) {
-                    rig.targetFailures = 0;
-                } else {
-                    const auto viewIt = views.find(check.entityId);
-                    const std::uintptr_t checkView =
-                        (viewIt != views.end()) ? viewIt->second : 0;
-                    Skeleton::RigTarget target;
-                    if (checkView > 0x10000 &&
-                        Skeleton::ResolveRigTarget(checkView, DmaReadFresh, target))
-                    {
-                        rig.targetFailures = 0;
-                        if (!Skeleton::MatchesRigTarget(rig.layout, target)) {
-                            // The rig moved under us: rebuild before this
-                            // pass samples a pose from the old arrays.
-                            rig.layoutValid = false;
-                            rig.layoutStamp = 0;
-                            rig.bones.clear();
-                            rig.points = Skeleton::BonePoints{};
-                        }
-                    } else if (++rig.targetFailures >= 2) {
-                        // Two passes in a row with no reachable hierarchy:
-                        // the character is gone or pooled. Rebuild later.
-                        rig.targetFailures = 0;
-                        rig.layoutValid = false;
-                        rig.layoutStamp = 0;
-                        rig.bones.clear();
-                        rig.points = Skeleton::BonePoints{};
-                    }
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------
         // Pre-pass: collect pose requests from cached rig state so
         // positions and poses can be read in one device transaction.
         // ---------------------------------------------------------------
@@ -1452,34 +1528,47 @@ static void UpdateInternal()
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
+                rig.smoothedValid = false;
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
-                rig.targetFailures = 0;
-                rig.layoutFailures = 0;
             }
 
-            const bool dueForRebuild = !rig.layoutValid
-                ? (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250)
-                : (now - rig.layoutStamp >= 2000);
+            // Cheap liveness check every 1.5 s: three pointer reads instead of
+            // a full rebuild. Only a failed check forces the expensive path,
+            // so a healthy rig keeps the exact same bone indices (and the
+            // smoothed pose that goes with them) for as long as it exists.
+            if (rig.layoutValid && now - rig.layoutStamp >= 1500) {
+                rig.layoutStamp = now;
+                if (viewPtr <= 0x10000 ||
+                    !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
+                    rig.layoutValid = false;
+                    rig.layoutStamp = 0;
+                }
+            }
+            const bool dueForRebuild = !rig.layoutValid && viewPtr > 0x10000 &&
+                (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250);
             if (dueForRebuild) {
                 rig.layoutStamp = now;
-                Skeleton::RigLayout rebuilt;
-                const bool built = viewPtr > 0x10000 &&
-                    Skeleton::BuildLayoutFromView(viewPtr, DmaRead, rebuilt);
-                if (built) {
-                    rig.layout = std::move(rebuilt);
+                Skeleton::RigLayout candidate;
+                bool ok = Skeleton::BuildLayoutFromView(viewPtr, DmaRead, candidate);
+                if (!ok)
+                    ok = Skeleton::BuildLayoutByName(viewPtr, DmaRead, candidate);
+                if (ok) {
+                    rig.layout = std::move(candidate);
                     rig.layoutValid = true;
-                    rig.layoutFailures = 0;
-                } else if (!rig.layoutValid) {
-                    rig.bones.clear();
-                    rig.points = Skeleton::BonePoints{};
-                } else if (++rig.layoutFailures >= 2) {
-                    // Still bad after a retry: the hierarchy really moved.
-                    rig.layoutValid = false;
-                    rig.layoutFailures = 0;
-                    rig.bones.clear();
-                    rig.points = Skeleton::BonePoints{};
-                    rig.prevLocalValid = false;
+                    rig.poseFailures = 0;
+                    rig.poseFailureSince = 0;
+                    // New indices mean the old smoothed segments describe a
+                    // different bone set; restart from the fresh sample.
+                    rig.smoothedValid = false;
+                } else {
+                    if (rig.poseFailureSince == 0)
+                        rig.poseFailureSince = now;
+                    if (now - rig.poseFailureSince >= 2500) {
+                        rig.bones.clear();
+                        rig.points = Skeleton::BonePoints{};
+                        rig.smoothedValid = false;
+                    }
                 }
             }
 
@@ -1524,6 +1613,7 @@ static void UpdateInternal()
             if (g_freshCamera.valid) visCamera = g_freshCamera;
         }
         int detailBudget = 3;
+        const std::int64_t battleNowMs = ReadBattleNowMs(cachedBattleEntities);
         for (auto& w : work) {
             if (!w.positionValid) continue;
 
@@ -1572,14 +1662,23 @@ static void UpdateInternal()
                 scratch.isDead = detail.isDead;
                 ReadRoleAndVehicle(w.characterModel, scratch);
                 ReadCommonState(w.characterModel, scratch);
+                ReadReloadAndKnockdownState(w.characterModel, battleNowMs, scratch);
+                detail.isReloading = scratch.isReloading;
+                detail.isKnockedDown = scratch.isKnockedDown;
+                detail.isKnockedOut = scratch.isKnockedOut;
+                detail.isSurrendered = scratch.isSurrendered;
+                detail.isHandcuffed = scratch.isHandcuffed;
+                detail.reloadPhase = std::move(scratch.reloadPhase);
                 detail.isDead = scratch.isDead;
                 detail.isSprinting = scratch.isSprinting;
                 detail.isCrouching = scratch.isCrouching;
+                detail.hasArmor = scratch.hasArmor;
+                detail.isFiring = scratch.isFiring;
                 detail.role = scratch.role;
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
 
-                ReadWeaponName(w.characterModel, detail.weaponName);
+                ReadWeaponName(w.characterModel, detail.weaponName, detail.weaponIndex);
 
                 const auto slotIt = slots.find(w.entityId);
                 if (slotIt != slots.end()) {
@@ -1602,6 +1701,15 @@ static void UpdateInternal()
             entity.nickname = detail.nickname;
             entity.clanTag = detail.clanTag;
             entity.weaponName = detail.weaponName;
+            entity.weaponIndex = detail.weaponIndex;
+            entity.isFiring = detail.isFiring;
+            entity.isReloading = detail.isReloading;
+            entity.hasArmor = detail.hasArmor;
+            entity.isKnockedDown = detail.isKnockedDown;
+            entity.isKnockedOut = detail.isKnockedOut;
+            entity.isSurrendered = detail.isSurrendered;
+            entity.isHandcuffed = detail.isHandcuffed;
+            entity.reloadPhase = detail.reloadPhase;
 
             const auto viewIt = views.find(w.entityId);
             if (viewIt != views.end())
@@ -1628,14 +1736,25 @@ static void UpdateInternal()
                         rig.poseFailureSince = now;
                     ++rig.poseFailures;
                     ++poseFailureCount;
-                    if (now - rig.poseFailureSince >= 750) {
+                    // A pose that cannot be read means the matrix array moved
+                    // (or the character was pooled). Drop the layout so the
+                    // next pass rebuilds; keep the last bones until the
+                    // hierarchy has been unreadable for a while, so a single
+                    // bad read never blanks the skeleton.
+                    if (!Skeleton::ValidateHierarchy(rig.layout, DmaReadFresh) ||
+                        now - rig.poseFailureSince >= 350) {
                         rig.layoutValid = false;
+                        rig.layoutStamp = 0;
+                        rig.poseFailures = 0;
+                    }
+                    if (now - rig.poseFailureSince >= 2500) {
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
-                        rig.poseFailures = 0;
+                        rig.smoothedValid = false;
                     }
                 } else {
                     rig.poseFailures = 0;
+                    rig.poseFailureSince = 0;
                     constexpr float kPosEpsSq  = 1.0e-6f;
                     constexpr float kRotEps    = 1.0e-6f;
                     constexpr float kScaleEps  = 1.0e-6f;
@@ -1676,14 +1795,67 @@ static void UpdateInternal()
 
                     // Default visibility is animator state. It is only a
                     // fallback: when the occluder scene is loaded the BVH pass
-                    // below replaces it with true camera occlusion. Poses are
-                    // published raw; interpolation/extrapolation happens once
-                    // per rendered frame in PlayerEsp.
+                    // below replaces it with true camera occlusion.
                     for (auto& seg : rig.bones)
                         seg.visible = rig.animatorActive;
 
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
+
+                    // Exponential smoothing on the worker. PoseSmoothAlpha is
+                    // the weight of the new sample: 1 publishes the raw pose,
+                    // lower values damp the per-frame jitter that partial or
+                    // stale DMA reads add to the sample. Doing it here (and
+                    // drawing the result directly) means the overlay never
+                    // extrapolates past the newest pose, which is what made
+                    // the old render-side blend shake.
+                    if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
+                        rig.smoothedBones.size() == rig.bones.size()) {
+                        const float alpha = std::clamp(
+                            ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
+                        const float inv = 1.0f - alpha;
+                        for (std::size_t i = 0; i < rig.bones.size(); ++i) {
+                            auto& s = rig.smoothedBones[i];
+                            const auto& r = rig.bones[i];
+                            s.a.x = s.a.x * inv + r.a.x * alpha;
+                            s.a.y = s.a.y * inv + r.a.y * alpha;
+                            s.a.z = s.a.z * inv + r.a.z * alpha;
+                            s.b.x = s.b.x * inv + r.b.x * alpha;
+                            s.b.y = s.b.y * inv + r.b.y * alpha;
+                            s.b.z = s.b.z * inv + r.b.z * alpha;
+                            s.visible = r.visible;
+                        }
+                        auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
+                            dst.x = dst.x * inv + src.x * alpha;
+                            dst.y = dst.y * inv + src.y * alpha;
+                            dst.z = dst.z * inv + src.z * alpha;
+                        };
+                        rig.smoothedPoints.valid = rig.points.valid;
+                        rig.smoothedPoints.hasHead = rig.points.hasHead;
+                        rig.smoothedPoints.hasNeck = rig.points.hasNeck;
+                        rig.smoothedPoints.hasChest = rig.points.hasChest;
+                        rig.smoothedPoints.hasPelvis = rig.points.hasPelvis;
+                        lerpVec(rig.smoothedPoints.head, rig.points.head);
+                        lerpVec(rig.smoothedPoints.neck, rig.points.neck);
+                        lerpVec(rig.smoothedPoints.chest, rig.points.chest);
+                        lerpVec(rig.smoothedPoints.pelvis, rig.points.pelvis);
+                        lerpVec(rig.smoothedPoints.leftShoulder, rig.points.leftShoulder);
+                        lerpVec(rig.smoothedPoints.leftElbow, rig.points.leftElbow);
+                        lerpVec(rig.smoothedPoints.leftHand, rig.points.leftHand);
+                        lerpVec(rig.smoothedPoints.rightShoulder, rig.points.rightShoulder);
+                        lerpVec(rig.smoothedPoints.rightElbow, rig.points.rightElbow);
+                        lerpVec(rig.smoothedPoints.rightHand, rig.points.rightHand);
+                        lerpVec(rig.smoothedPoints.leftHip, rig.points.leftHip);
+                        lerpVec(rig.smoothedPoints.leftKnee, rig.points.leftKnee);
+                        lerpVec(rig.smoothedPoints.leftFoot, rig.points.leftFoot);
+                        lerpVec(rig.smoothedPoints.rightHip, rig.points.rightHip);
+                        lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
+                        lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
+                    } else {
+                        rig.smoothedBones = rig.bones;
+                        rig.smoothedPoints = rig.points;
+                        rig.smoothedValid = true;
+                    }
                 }
             } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
@@ -1695,11 +1867,17 @@ static void UpdateInternal()
                 if (!fallback.empty()) {
                     rig.bones = std::move(fallback);
                     rig.points = Skeleton::BonePoints{};
+                    rig.smoothedValid = false;
                 }
             }
 
-            entity.bones = rig.bones;
-            entity.bonePoints = rig.points;
+            if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid) {
+                entity.bones = rig.smoothedBones;
+                entity.bonePoints = rig.smoothedPoints;
+            } else {
+                entity.bones = rig.bones;
+                entity.bonePoints = rig.points;
+            }
             entity.visible = rig.animatorActive;
 
             // Camera-occlusion pass. VisCheck colours each bone by whether the

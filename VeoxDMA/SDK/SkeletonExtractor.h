@@ -27,7 +27,7 @@ struct BonePoints {
     Vec rightShoulder{}, rightElbow{}, rightHand{};
     Vec leftHip{}, leftKnee{}, leftFoot{};
     Vec rightHip{}, rightKnee{}, rightFoot{};
-    bool valid = false;
+    bool hasHead = false, hasNeck = false, hasChest = false, hasPelvis = false, valid = false;
 };
 
 using ReadFn = std::function<bool(uint64_t, void*, std::size_t)>;

@@ -153,6 +153,10 @@ inline constexpr std::uintptr_t WorldEntitiesModelAlt    = 0x60;
 
 inline constexpr std::uintptr_t CharacterSlotsModel = 0x248;
 inline constexpr std::uintptr_t CharacterSlotsModelLegacy = 0x4C8;
+inline constexpr std::uintptr_t ProlongedInteractionDialog = 0x188;
+inline constexpr std::uintptr_t CoinsModel                 = 0x4A8;
+inline constexpr std::uintptr_t CryptoCoinsModel           = 0x4B0;
+inline constexpr std::uintptr_t DelayedUseAction           = 0x610;
 }
 
 namespace PlayerRotationInputModel {
@@ -228,9 +232,15 @@ inline constexpr std::uintptr_t Skeleton                = 0x138;
 inline constexpr std::uintptr_t Animator                = 0x140;
 inline constexpr std::uintptr_t IsSprinting             = 0x148;
 inline constexpr std::uintptr_t Weapon                  = 0x150;
+inline constexpr std::uintptr_t WeaponReload            = 0x158;
+inline constexpr std::uintptr_t IsBackgroundReload      = 0x200;
+inline constexpr std::uintptr_t RobberInventoryCost     = 0x268;
+inline constexpr std::uintptr_t Knockout                = 0x298;
+inline constexpr std::uintptr_t ProlongedInteraction    = 0x340;
 inline constexpr std::uintptr_t Crouch                  = 0x160;
 inline constexpr std::uintptr_t ItemInHands             = 0x170;
 inline constexpr std::uintptr_t CharacterSpeed          = 0x180;
+inline constexpr std::uintptr_t HasArmor                = 0x1B8;
 inline constexpr std::uintptr_t InVehicle               = 0x1C8;
 inline constexpr std::uintptr_t State                   = 0x1E0;
 inline constexpr std::uintptr_t PlayerRole              = 0x208;
@@ -254,6 +264,18 @@ inline constexpr std::uintptr_t HealthModelAlt = 0x38;
 inline constexpr std::uintptr_t Inventory      = 0x150;
 inline constexpr std::uintptr_t HealthModel    = 0x1B0;
 inline constexpr std::uintptr_t Aiming         = 0x1F0;
+inline constexpr std::uintptr_t EquipSlots     = 0x158;
+inline constexpr std::uintptr_t InitArmorModel = 0x168;
+inline constexpr std::uintptr_t Pockets        = 0x170;
+inline constexpr std::uintptr_t SprintModel    = 0x1D8;
+inline constexpr std::uintptr_t CheatSprintEnabled          = 0x238;
+inline constexpr std::uintptr_t CheatReduceIncomeDamage     = 0x240;
+inline constexpr std::uintptr_t CheatReduceIncomeDetention  = 0x250;
+inline constexpr std::uintptr_t InventoryUseItem            = 0x260;
+inline constexpr std::uintptr_t InteractModel               = 0x288;
+inline constexpr std::uintptr_t MoveSpeedModel              = 0x2C8;
+inline constexpr std::uintptr_t Stamina                     = 0x2E8;
+
 }
 
 namespace HealthModel {
@@ -274,8 +296,10 @@ namespace CommonModel {
 inline constexpr std::uintptr_t Role = 0x20;
 inline constexpr std::uintptr_t Position = 0x28;
 inline constexpr std::uintptr_t LookDirection = 0x30;
+inline constexpr std::uintptr_t IsFiring = 0x68;
 inline constexpr std::uintptr_t IsSprinting = 0x88;
 inline constexpr std::uintptr_t ReloadState = 0x90;
+inline constexpr std::uintptr_t IsBackgroundReload = 0xA0;
 inline constexpr std::uintptr_t IsCrouching = 0xA8;
 inline constexpr std::uintptr_t IsDead = 0xE0;
 inline constexpr std::uintptr_t VehicleEntityId = 0xF0;
@@ -297,6 +321,10 @@ namespace KnockoutModel {
 inline constexpr std::uintptr_t Phase            = 0x18;
 inline constexpr std::uintptr_t PhaseDescription = 0x18;
 inline constexpr std::uintptr_t DescriptionId    = 0x10;
+inline constexpr std::uintptr_t EndTs            = 0x10; // TimestampData (+0x18 i64)
+inline constexpr std::uintptr_t IsSurrendered    = 0x70;
+inline constexpr std::uintptr_t IsHandcuffing    = 0x71;
+inline constexpr std::uintptr_t IsHandcuffed     = 0x72;
 }
 
 namespace PlayerClient {
@@ -305,12 +333,17 @@ inline constexpr std::uintptr_t AimAssist  = 0x2A0;
 inline constexpr std::uintptr_t AutoFire   = 0x2A8;
 inline constexpr std::uintptr_t Recoil     = 0x2B8;
 inline constexpr std::uintptr_t FakeSpread = 0x2C0;
+inline constexpr std::uintptr_t InventoryProgressItem   = 0x1A8;
+inline constexpr std::uintptr_t InventoryIntention      = 0x1B0;
+inline constexpr std::uintptr_t AccelerationWeightSpeed = 0x258;
+inline constexpr std::uintptr_t AutoLootAfterBreak      = 0x2B0;
 }
 
 namespace AimAssist {
 inline constexpr std::uintptr_t IsActive   = 0x10;
 inline constexpr std::uintptr_t HasTarget  = 0x12;
 inline constexpr std::uintptr_t Correction = 0x28;
+inline constexpr std::uintptr_t BlockTimer = 0x34;
 }
 
 namespace RecoilModel {
@@ -592,40 +625,57 @@ inline constexpr std::uintptr_t EntityId = 0x28; // wrapper
 // World entities (metadata)
 // ------------------------------------------------------------------
 namespace WorldEntitiesModel {
-inline constexpr std::uintptr_t NotSpawnedBattleCharacters = 0x10;
-inline constexpr std::uintptr_t BattleCharacters           = 0x18;
-inline constexpr std::uintptr_t Containers                 = 0x20;
-inline constexpr std::uintptr_t AccessEntities             = 0x28;
-inline constexpr std::uintptr_t SecurityAlarms             = 0x30;
-inline constexpr std::uintptr_t DroppedLootBags            = 0x38; // old "Loots"
-inline constexpr std::uintptr_t Loots                      = 0x38;
-inline constexpr std::uintptr_t VehicleLoots               = 0x40;
-inline constexpr std::uintptr_t Doors                      = 0x48;
-inline constexpr std::uintptr_t Vehicles                   = 0x58;
-inline constexpr std::uintptr_t Cars                       = 0x60;
-inline constexpr std::uintptr_t Helicopters                = 0x68;
-inline constexpr std::uintptr_t StaticLootObjects          = 0x98;
-inline constexpr std::uintptr_t RandomLootObjects          = 0xA0;
-inline constexpr std::uintptr_t LootNodes                  = 0xB0;
-inline constexpr std::uintptr_t VehicleTrunks              = 0xC0;
-inline constexpr std::uintptr_t Cargos                     = 0xC8;
-inline constexpr std::uintptr_t CollectionTables           = 0xD8;
-inline constexpr std::uintptr_t SafeDoors                  = 0x110;
-inline constexpr std::uintptr_t StorageBoxes               = 0x128;
-inline constexpr std::uintptr_t PlotContainers             = 0x140;
-inline constexpr std::uintptr_t Shelvings                  = 0x148;
-inline constexpr std::uintptr_t MoneyWorkbenches           = 0x158;
-inline constexpr std::uintptr_t Grenades                   = 0x1A0;
-inline constexpr std::uintptr_t SettlementCash             = 0x1C8;
-inline constexpr std::uintptr_t FurnitureLoots             = 0x220;
-inline constexpr std::uintptr_t BuildingLoots              = 0x238;
-inline constexpr std::uintptr_t CashLootNodes              = 0x268;
-inline constexpr std::uintptr_t PointOfInterest            = 0x270;
-inline constexpr std::uintptr_t CargoSellers               = 0x3E0;
-inline constexpr std::uintptr_t BarterTraders              = 0x450;
-inline constexpr std::uintptr_t FirstAidCabinetModels      = 0x290;
-inline constexpr std::uintptr_t CryptoWorkbenchesPublic    = 0x2D8;
-inline constexpr std::uintptr_t PlotLoots                  = 0x2F0;
+inline constexpr std::uintptr_t NotSpawnedBattleCharacters = 0x480;
+inline constexpr std::uintptr_t BattleCharacters           = 0x488;
+inline constexpr std::uintptr_t Containers                 = 0x490;
+inline constexpr std::uintptr_t AccessEntities             = 0x498;
+inline constexpr std::uintptr_t SecurityAlarms             = 0x5E0;
+inline constexpr std::uintptr_t DroppedLootBags            = 0x4A0; // old "Loots"
+inline constexpr std::uintptr_t Loots                      = 0x4A0;
+inline constexpr std::uintptr_t VehicleLoots               = 0x4A8;
+inline constexpr std::uintptr_t Doors                      = 0x4B0;
+inline constexpr std::uintptr_t Vehicles                   = 0x4C0;
+inline constexpr std::uintptr_t Cars                       = 0x4C8;
+inline constexpr std::uintptr_t Helicopters                = 0x4D0;
+inline constexpr std::uintptr_t StaticLootObjects          = 0x4F0;
+inline constexpr std::uintptr_t RandomLootObjects          = 0x4F8;
+inline constexpr std::uintptr_t LootNodes                  = 0x500;
+inline constexpr std::uintptr_t VehicleTrunks              = 0x510;
+inline constexpr std::uintptr_t Cargos                     = 0x518;
+inline constexpr std::uintptr_t CollectionTables           = 0x528;
+inline constexpr std::uintptr_t SafeDoors                  = 0x5C8;
+inline constexpr std::uintptr_t StorageBoxes               = 0x560;
+inline constexpr std::uintptr_t PlotContainers             = 0x578;
+inline constexpr std::uintptr_t Shelvings                  = 0x580;
+inline constexpr std::uintptr_t MoneyWorkbenches           = 0x530;
+inline constexpr std::uintptr_t Grenades                   = 0x620;
+inline constexpr std::uintptr_t SettlementCash             = 0x650;
+inline constexpr std::uintptr_t FurnitureLoots             = 0x6A0;
+inline constexpr std::uintptr_t BuildingLoots              = 0x6B8;
+inline constexpr std::uintptr_t CashLootNodes              = 0x6E8;
+inline constexpr std::uintptr_t PointOfInterest            = 0x6F0;
+inline constexpr std::uintptr_t CargoSellers               = 0x858;
+inline constexpr std::uintptr_t BarterTraders              = 0x8A8;
+inline constexpr std::uintptr_t FirstAidCabinetModels      = 0x710;
+inline constexpr std::uintptr_t CryptoWorkbenchesPublic    = 0x758;
+inline constexpr std::uintptr_t PlotLoots                  = 0x770;
+inline constexpr std::uintptr_t LocationSecurityAlarms     = 0x7B0; // direct 0x320
+inline constexpr std::uintptr_t SecurityPanels             = 0x508;
+inline constexpr std::uintptr_t CryptoWorkbenchesRO        = 0x758;
+inline constexpr std::uintptr_t CargoOpenWorkbenches       = 0x538; // direct 0xE0
+inline constexpr std::uintptr_t CargoExchangeWorkbenches   = 0x548; // direct 0xF0
+inline constexpr std::uintptr_t CargoProductionWorkbenches = 0x740; // direct 0x2C0
+inline constexpr std::uintptr_t CargoChargeWorkbenches     = 0x750; // direct 0x2D0
+inline constexpr std::uintptr_t ArchitectTables            = 0x768; // direct 0x2E8
+inline constexpr std::uintptr_t Buyers                     = 0x720;
+inline constexpr std::uintptr_t CharacterLaunderers        = 0x8B0; // direct 0x458
+inline constexpr std::uintptr_t CashWithdrawal             = 0x8B8; // direct 0x460
+inline constexpr std::uintptr_t BankManagers               = 0x8C0; // direct 0x468
+inline constexpr std::uintptr_t InteractEntities           = 0x5B8;
+inline constexpr std::uintptr_t UnlockEntities             = 0x5A0;
+inline constexpr std::uintptr_t BreachEntities             = 0x5A8;
+inline constexpr std::uintptr_t LocationDoors              = 0x690; // direct 0x210
+inline constexpr std::uintptr_t SafeDoorsRO                = 0x5C8;
 }
 
 namespace ContainerModel {
@@ -708,7 +758,11 @@ inline constexpr std::uintptr_t DescriptionPosition = 0x20;
 
 namespace CollectionTableModel {
 inline constexpr std::uintptr_t DescriptionModel    = 0x10;
+inline constexpr std::uintptr_t DescValue           = 0x10; // LocationCollectionTableDescription
+inline constexpr std::uintptr_t Position            = 0x20; // Vector3
+inline constexpr std::uintptr_t Orientation         = 0x2C; // Vector3
 inline constexpr std::uintptr_t DescriptionPosition = 0x20;
+inline constexpr std::uintptr_t RewardModel         = 0x30;
 }
 
 namespace PlotContainerModel {
@@ -717,18 +771,45 @@ inline constexpr std::uintptr_t DescriptionPosition = 0x50;
 }
 
 namespace CashLootNodeModel {
-inline constexpr std::uintptr_t Description         = 0x18;
+inline constexpr std::uintptr_t CashAmountData      = 0x10; // CashAmountData -> +0x18 _value
+inline constexpr std::uintptr_t Description         = 0x18; // LocationCashLootNodeDescription
 inline constexpr std::uintptr_t DescriptionPosition = 0x24;
+inline constexpr std::uintptr_t Position            = 0x24;
 }
 
 namespace SettlementCashModel {
-inline constexpr std::uintptr_t Description         = 0x18;
+inline constexpr std::uintptr_t Data                = 0x10; // SettlementCashPublicData
+inline constexpr std::uintptr_t Description         = 0x18; // LocationSettlementCashDescription
 inline constexpr std::uintptr_t DescriptionPosition = 0x1C;
+inline constexpr std::uintptr_t EntityId            = 0x10; // int32
+inline constexpr std::uintptr_t TaxEntityId         = 0x14; // int32
+inline constexpr std::uintptr_t ConquestEntityId    = 0x18; // int32
+inline constexpr std::uintptr_t CashPoint           = 0x1C; // Vector3
+inline constexpr std::uintptr_t TaxPoint            = 0x28; // Vector3
+inline constexpr std::uintptr_t ConquestPoint       = 0x34; // Vector3
+}
+
+namespace SettlementCashPublicData {
+inline constexpr std::uintptr_t TaxCashAmount       = 0x28; // IntData -> +0x18 _value
+inline constexpr std::uintptr_t CashAmount          = 0x50; // IntData -> +0x18 _value
 }
 
 namespace MoneyWorkbenchModel {
-inline constexpr std::uintptr_t DescriptionModel    = 0x20;
+inline constexpr std::uintptr_t Data                = 0x10; // MoneyWorkbenchData
+inline constexpr std::uintptr_t DescriptionModel    = 0x20; // DescriptionModel<LocationMoneyWorkbenchDescription>
+inline constexpr std::uintptr_t DescValue           = 0x10; // LocationMoneyWorkbenchDescription
+inline constexpr std::uintptr_t Position            = 0x20; // Vector3
+inline constexpr std::uintptr_t Orientation         = 0x2C; // Vector3
 inline constexpr std::uintptr_t DescriptionPosition = 0x20;
+}
+
+namespace MoneyWorkbenchData {
+inline constexpr std::uintptr_t DirtyAmount         = 0x20; // CashAmountData -> +0x18 _value
+inline constexpr std::uintptr_t CleanAmount         = 0x28; // CashAmountData -> +0x18 _value
+}
+
+namespace CashAmountData {
+inline constexpr std::uintptr_t Value               = 0x18; // int32
 }
 
 namespace DroppedBagModel {
@@ -764,6 +845,167 @@ inline constexpr std::uintptr_t DescriptionPosition = 0x30;
 }
 
 // ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Verified player state, inventory, currency & experimental writes
+// ------------------------------------------------------------------
+namespace WeaponReloadModel {
+inline constexpr std::uintptr_t State = 0x10; // ReferenceData -> +0x18 non-null when reloading
+inline constexpr std::uintptr_t EndTs = 0x18; // TimestampData (+0x18 i64)
+}
+
+namespace KnockdownModel {
+inline constexpr std::uintptr_t EndTs           = 0x10; // TimestampData (+0x18 i64)
+inline constexpr std::uintptr_t IsKnockedForward = 0x18; // BoolData (+0x18 u8)
+}
+
+namespace CoinsByDataModel {
+inline constexpr std::uintptr_t Data  = 0x10; // IntData (+0x18 i32)
+inline constexpr std::uintptr_t Value = 0x18;
+}
+
+namespace RobberInventoryCostModel {
+inline constexpr std::uintptr_t CharacterInventory      = 0x10;
+inline constexpr std::uintptr_t VehicleInventory        = 0x14;
+inline constexpr std::uintptr_t CharacterEquip          = 0x18;
+inline constexpr std::uintptr_t CharacterInventoryCash  = 0x1C;
+inline constexpr std::uintptr_t CharacterInventoryItems = 0x20;
+inline constexpr std::uintptr_t VehicleInventoryCash    = 0x24;
+inline constexpr std::uintptr_t VehicleInventoryItems   = 0x28;
+}
+
+namespace EquipSlotsModel {
+inline constexpr std::uintptr_t Models            = 0x10; // Dictionary<EquipSlotDescription, EquipSlotModel>
+inline constexpr std::uintptr_t SlotDescriptionId = 0x10;
+inline constexpr std::uintptr_t ItemModel         = 0x18;
+inline constexpr std::uintptr_t DurabilityModel   = 0x20;
+}
+
+namespace PocketsModel {
+inline constexpr std::uintptr_t Slots      = 0x20; // -> +0x10 Dictionary<PocketSlotDescription, PocketSlotModel>
+inline constexpr std::uintptr_t Models     = 0x10;
+inline constexpr std::uintptr_t ItemModel  = 0x18;
+inline constexpr std::uintptr_t StackModel = 0x20;
+}
+
+namespace InitArmorModel {
+inline constexpr std::uintptr_t HasArmor = 0x10; // BoolData (+0x18)
+inline constexpr std::uintptr_t Amount   = 0x18; // IntData (+0x18)
+}
+
+namespace StaminaModel {
+inline constexpr std::uintptr_t Amount            = 0x18; // IntData (+0x18)
+inline constexpr std::uintptr_t DecreaseDirection = 0x20; // BoolData (+0x18)
+inline constexpr std::uintptr_t Config            = 0x28; // BattleCharacterStaminaConfig
+inline constexpr std::uintptr_t ConfigWaste       = 0x10; // float
+inline constexpr std::uintptr_t ConfigRecovery    = 0x14; // float
+}
+
+namespace BattleCharacterConfig {
+inline constexpr std::uintptr_t SprintCooldownTime        = 0x70; // float
+inline constexpr std::uintptr_t MaxSprintAngleDot         = 0x78; // float
+inline constexpr std::uintptr_t EmptyHandsCharacterSpeed  = 0x90;
+inline constexpr std::uintptr_t CargoCharacterSpeed       = 0x98;
+}
+
+namespace SprintModel {
+inline constexpr std::uintptr_t TransitionTime = 0x28; // float
+inline constexpr std::uintptr_t CooldownTime   = 0x30; // float
+}
+
+namespace CrouchModel {
+inline constexpr std::uintptr_t TransitionTime = 0x20; // float
+}
+
+namespace InventoryProgressItemModel {
+inline constexpr std::uintptr_t Progress    = 0x10; // float
+inline constexpr std::uintptr_t ReloadEndTs = 0x18; // i64
+}
+
+namespace InventoryIntentionModel {
+inline constexpr std::uintptr_t Now    = 0xA0; // SetNow -> +0x10 i64 _time (ms)
+inline constexpr std::uintptr_t TimeMs = 0x10;
+}
+
+namespace ProlongedInteractionDialogModel {
+inline constexpr std::uintptr_t Progress = 0x18; // float
+}
+
+namespace ProlongedInteractionModel {
+inline constexpr std::uintptr_t EndTs = 0x18; // TimestampData (+0x18 i64)
+}
+
+namespace DelayedUseActionModel {
+inline constexpr std::uintptr_t StartTs = 0x18; // float
+inline constexpr std::uintptr_t EndTs   = 0x28; // float
+}
+
+namespace AutoLootAfterBreakModel {
+inline constexpr std::uintptr_t AutoLootEndTs = 0x28; // float
+}
+
+namespace RadiusInteractEntityModel {
+inline constexpr std::uintptr_t PositionModel = 0x10; // XYZ at +0x10..+0x18
+}
+
+namespace SecurityAlarmModel {
+inline constexpr std::uintptr_t AlarmTs      = 0x10; // TimestampData (+0x18 i64)
+inline constexpr std::uintptr_t IsAlarm      = 0x18; // BoolData (+0x18 u8)
+inline constexpr std::uintptr_t IsHacked     = 0x20; // BoolData (+0x18 u8)
+inline constexpr std::uintptr_t Description  = 0x28;
+inline constexpr std::uintptr_t DescEntityId = 0x20; // LocationSecurityAlarmDescription
+}
+
+namespace SecurityPanelModel {
+inline constexpr std::uintptr_t IsHacked    = 0x10; // BoolData (+0x18 u8)
+inline constexpr std::uintptr_t Description = 0x18; // LocationPanelDescription
+inline constexpr std::uintptr_t DescPos     = 0x30; // Vector3
+}
+
+namespace WorkbenchWorldModels {
+inline constexpr std::uintptr_t CryptoIsActive          = 0x20; // Primitive<bool>
+inline constexpr std::uintptr_t CryptoDescription       = 0x30;
+inline constexpr std::uintptr_t CargoOpenDescription    = 0x18; // InteractPoint at +0x38
+inline constexpr std::uintptr_t CargoOpenInteractPoint  = 0x38;
+inline constexpr std::uintptr_t ArchitectDescription    = 0x10; // Position at +0x14
+inline constexpr std::uintptr_t ArchitectDescPos        = 0x14;
+}
+
+namespace TraderDescriptions {
+inline constexpr std::uintptr_t CargoSellerPos       = 0x28; // LocationCargoSellerDescription
+inline constexpr std::uintptr_t BarterTraderPos      = 0x30; // LocationBarterTraderDescription
+inline constexpr std::uintptr_t BuyerDescription     = 0x18; // BuyerModel -> Desc -> +0x2C
+inline constexpr std::uintptr_t BuyerDescPos         = 0x2C;
+inline constexpr std::uintptr_t LaundererInteract    = 0x24; // LocationCharacterLaunderingDescription
+inline constexpr std::uintptr_t CashWithdrawalPoint  = 0x1C; // LocationCashWithdrawalDescription
+inline constexpr std::uintptr_t BankManagerPoint     = 0x18; // LocationBankManagerDescription
+}
+
+namespace AccessEntityModel {
+inline constexpr std::uintptr_t InteractPositionModel = 0x20; // XYZ at +0x10
+inline constexpr std::uintptr_t PositionModel         = 0x28; // XYZ at +0x10
+inline constexpr std::uintptr_t AccessStateModel      = 0x30;
+inline constexpr std::uintptr_t AccessGranted         = 0x18; // BoolData (+0x18 u8)
+}
+
+namespace DoorModel {
+inline constexpr std::uintptr_t State               = 0x30; // DoorStateModel -> 0x10 RefData -> 0x18 Desc -> 0x10 Id
+inline constexpr std::uintptr_t Position            = 0x38; // PositionModel (XYZ +0x10)
+inline constexpr std::uintptr_t OpenCloseRequest    = 0x48;
+inline constexpr std::uintptr_t StateChangeCooldown = 0x58; // +0x10 TimestampData (+0x18 i64)
+}
+
+namespace LocationDoorModel {
+inline constexpr std::uintptr_t UnlockState     = 0x28; // ReferenceData -> +0x18 -> +0x10 Id ("locked"/"unlocked")
+inline constexpr std::uintptr_t Description     = 0x30; // LocationDoorDescription
+inline constexpr std::uintptr_t DescWorldPos    = 0x30; // Vector3
+inline constexpr std::uintptr_t InnerDoorModel  = 0x38;
+}
+
+namespace TimedEntityModels {
+inline constexpr std::uintptr_t UnlockTime = 0x18; // UnlockEntityModel (i64 ms)
+inline constexpr std::uintptr_t CastTime   = 0x18; // BreachEntityModel (i64 ms)
+}
+
 // Spawn message declarations (metadata only; no live invocation path)
 // ------------------------------------------------------------------
 namespace SetInventoryItemCheatMessage {

@@ -51,6 +51,7 @@ public:
 	int MonitorIndex = 0;            // display the overlay is pinned to
 	bool FPSEnabled = false;         // small FPS readout in the top-left
 	int FrameCap = 0;                // 0 = uncapped, otherwise 1..1000
+	std::string FontName = "Maven Pro";
 	bool Transparent = true;         // per-pixel alpha over the game
 	bool HighContrastMenu = false;   // solid menu fills for bright scenes
 	bool ClickThroughWhenClosed = true;
@@ -91,6 +92,7 @@ public:
 		j[ConfigName][LIT("HighContrastMenu")] = HighContrastMenu;
 		j[ConfigName][LIT("ClickThroughWhenClosed")] = ClickThroughWhenClosed;
 		j[ConfigName][LIT("AlwaysOnTop")] = AlwaysOnTop;
+		j[ConfigName][LIT("FontName")] = FontName;
 		j[ConfigName][LIT("MenuWindow")] = MenuWindow.ToJson();
 		j[ConfigName][LIT("RadarWindow")] = RadarWindow.ToJson();
 		j[ConfigName][LIT("AlertWindow")] = AlertWindow.ToJson();
@@ -115,6 +117,8 @@ public:
 			ClickThroughWhenClosed = j[ConfigName][LIT("ClickThroughWhenClosed")];
 		if (j[ConfigName].contains(LIT("AlwaysOnTop")))
 			AlwaysOnTop = j[ConfigName][LIT("AlwaysOnTop")];
+		if (j[ConfigName].contains(LIT("FontName")))
+			FontName = j[ConfigName][LIT("FontName")].get<std::string>();
 		if (j[ConfigName].contains(LIT("MenuWindow")))
 			MenuWindow.FromJson(j[ConfigName][LIT("MenuWindow")]);
 		if (j[ConfigName].contains(LIT("RadarWindow")))

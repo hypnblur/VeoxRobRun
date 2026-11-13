@@ -261,6 +261,7 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     }
     if (world <= 0x10000) return false;
 
+    out.worldPtr = world;
     out.valid = true;
 
     const std::size_t containerStart = out.entities.size();
@@ -439,6 +440,50 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }, out, out.pointsOfInterest);
 
     return out.valid;
+}
+
+std::vector<ProbeResult> ProbeMoneyModels(std::uintptr_t worldPtr)
+{
+    std::vector<ProbeResult> results;
+    if (worldPtr <= 0x10000) return results;
+
+    struct { std::uintptr_t offset; const char* name; } dicts[] = {
+        { rr::WorldEntitiesModel::CashLootNodes,    "CashLootNode" },
+        { rr::WorldEntitiesModel::SettlementCash,   "SettlementCash" },
+        { rr::WorldEntitiesModel::MoneyWorkbenches, "MoneyWorkbench" },
+        { rr::WorldEntitiesModel::CollectionTables, "CollectionTable" },
+    };
+
+    for (auto& d : dicts) {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (!ReadCollection(worldPtr, d.offset, entries) || entries.empty())
+            continue;
+
+        const std::uintptr_t model = entries[0].value;
+        if (model <= 0x10000) continue;
+
+        ProbeResult r;
+        r.dictName = d.name;
+        r.ptr = model;
+
+        const std::uintptr_t klass = Il2Cpp::ClassOf(model);
+        if (klass > 0x10000) {
+            auto info = Il2Cpp::GetClassInfo(klass);
+            r.className = info.ns.empty() ? info.name : info.ns + "::" + info.name;
+
+            for (const auto& field : Il2Cpp::Fields(klass)) {
+                ProbeField pf;
+                pf.name = field.name;
+                pf.offset = field.offset;
+                pf.typeCode = field.typeCode;
+                pf.rawValue = 0;
+                RobRunMemory::ReadBytes(model + field.offset, &pf.rawValue, 8);
+                r.fields.push_back(std::move(pf));
+            }
+        }
+        results.push_back(std::move(r));
+    }
+    return results;
 }
 
 } // namespace RobRunWorld

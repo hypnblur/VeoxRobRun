@@ -142,6 +142,20 @@ std::uint64_t ReadUInt64(std::uintptr_t address)
     return value;
 }
 
+std::int64_t ReadInt64(std::uintptr_t address)
+{
+    std::int64_t value = 0;
+    ReadBytes(address, &value, sizeof(value));
+    return value;
+}
+
+std::uint8_t ReadUInt8(std::uintptr_t address)
+{
+    std::uint8_t value = 0;
+    ReadBytes(address, &value, sizeof(value));
+    return value;
+}
+
 float ReadFloat(std::uintptr_t address)
 {
     float value = 0.f;

@@ -36,6 +36,10 @@ public:
 	bool LookingAtYou = true;
 	bool LookingAlert = true;
 	bool ShowRole = true;
+	bool ShowFiring = true;
+	bool ShowReloading = true;
+	bool ShowArmor = true;
+	bool WeaponSprite = true;
 
 	D2D1::ColorF NameColour = Colour(255, 255, 255);
 	D2D1::ColorF DistanceColour = Colour(200, 200, 200);
@@ -45,11 +49,14 @@ public:
 	D2D1::ColorF LookingColour = Colour(255, 50, 50);
 	D2D1::ColorF StateColour = Colour(255, 180, 0);
 	D2D1::ColorF BoxColour = Colour(255, 255, 255);
+	D2D1::ColorF FiringColour = Colour(255, 80, 80);
+	D2D1::ColorF ReloadColour = Colour(255, 200, 50);
+	D2D1::ColorF ArmorColour = Colour(100, 180, 255);
 
-	// Render-thread pose interpolation. The reader publishes raw 30 Hz samples;
-	// the overlay advances each bone between the two newest snapshots using a
-	// steady_clock timestamp. PoseSmoothAlpha is the lead: 0 draws the newest
-	// sample, 1 extrapolates up to one extra sample interval.
+	// Worker-side pose smoothing. The reader blends every new pose sample into
+	// the previous one before publishing, so the overlay draws the smoothed
+	// points directly. PoseSmoothAlpha is the weight of the new sample: 1 keeps
+	// the pose raw, lower values damp jitter from partial or stale reads.
 	bool PoseSmoothing = true;
 	float PoseSmoothAlpha = 0.5f;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
@@ -92,6 +99,10 @@ public:
         j[ConfigName][LIT("LookingAtYou")] = LookingAtYou;
         j[ConfigName][LIT("LookingAlert")] = LookingAlert;
         j[ConfigName][LIT("ShowRole")] = ShowRole;
+        j[ConfigName][LIT("ShowFiring")] = ShowFiring;
+        j[ConfigName][LIT("ShowReloading")] = ShowReloading;
+        j[ConfigName][LIT("ShowArmor")] = ShowArmor;
+        j[ConfigName][LIT("WeaponSprite")] = WeaponSprite;
         ToJsonColour(&j, LIT("NameColour"), &NameColour);
         ToJsonColour(&j, LIT("DistanceColour"), &DistanceColour);
         ToJsonColour(&j, LIT("HealthTextColour"), &HealthTextColour);
@@ -100,6 +111,9 @@ public:
         ToJsonColour(&j, LIT("LookingColour"), &LookingColour);
         ToJsonColour(&j, LIT("StateColour"), &StateColour);
         ToJsonColour(&j, LIT("BoxColour"), &BoxColour);
+        ToJsonColour(&j, LIT("FiringColour"), &FiringColour);
+        ToJsonColour(&j, LIT("ReloadColour"), &ReloadColour);
+        ToJsonColour(&j, LIT("ArmorColour"), &ArmorColour);
         j[ConfigName][LIT("PoseSmoothing")] = PoseSmoothing;
         j[ConfigName][LIT("PoseSmoothAlpha")] = PoseSmoothAlpha;
 
@@ -142,6 +156,14 @@ public:
             LookingAlert = j[ConfigName][LIT("LookingAlert")];
         if (j[ConfigName].contains(LIT("ShowRole")))
             ShowRole = j[ConfigName][LIT("ShowRole")];
+        if (j[ConfigName].contains(LIT("ShowFiring")))
+            ShowFiring = j[ConfigName][LIT("ShowFiring")];
+        if (j[ConfigName].contains(LIT("ShowReloading")))
+            ShowReloading = j[ConfigName][LIT("ShowReloading")];
+        if (j[ConfigName].contains(LIT("ShowArmor")))
+            ShowArmor = j[ConfigName][LIT("ShowArmor")];
+        if (j[ConfigName].contains(LIT("WeaponSprite")))
+            WeaponSprite = j[ConfigName][LIT("WeaponSprite")];
         FromJsonColour(j, LIT("NameColour"), &NameColour);
         FromJsonColour(j, LIT("DistanceColour"), &DistanceColour);
         FromJsonColour(j, LIT("HealthTextColour"), &HealthTextColour);
@@ -150,6 +172,9 @@ public:
         FromJsonColour(j, LIT("LookingColour"), &LookingColour);
         FromJsonColour(j, LIT("StateColour"), &StateColour);
         FromJsonColour(j, LIT("BoxColour"), &BoxColour);
+        FromJsonColour(j, LIT("FiringColour"), &FiringColour);
+        FromJsonColour(j, LIT("ReloadColour"), &ReloadColour);
+        FromJsonColour(j, LIT("ArmorColour"), &ArmorColour);
         if (j[ConfigName].contains(LIT("PoseSmoothing")))
             PoseSmoothing = j[ConfigName][LIT("PoseSmoothing")];
         if (j[ConfigName].contains(LIT("PoseSmoothAlpha")))

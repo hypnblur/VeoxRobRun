@@ -172,6 +172,7 @@
     <ClCompile Include="SDK\Inventory.cpp" />
     <ClCompile Include="SDK\WorldEntities.cpp" />
     <ClCompile Include="Esp\Radar.cpp" />
+    <ClCompile Include="Esp\WeaponSprites.cpp" />
     <ClCompile Include="Esp\WorldEsp.cpp" />
     <ClCompile Include="Misc\Colour.cpp" />
     <ClCompile Include="UI\VeoxMenu.cpp" />
@@ -216,6 +217,7 @@
     <ClInclude Include="Config\RadarConfig.h" />
     <ClInclude Include="Esp\PlayerEsp.h" />
     <ClInclude Include="Esp\Radar.h" />
+    <ClInclude Include="Esp\WeaponSprites.h" />
     <ClInclude Include="Esp\WorldEsp.h" />
     <ClInclude Include="Esp\EspDraw.h" />
     <ClInclude Include="Overlay\Backdrop.h" />

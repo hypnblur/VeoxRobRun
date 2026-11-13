@@ -4,6 +4,7 @@
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
 #include "EspDraw.h"
+#include "WeaponSprites.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
 #include <chrono>
@@ -87,54 +88,12 @@ void DrawPlayers()
 	const float fontSize = (float)pcfg.FontSize;
 	ImFont* font = ImGui::GetFont();
 
-	// --- render-thread pose interpolation ------------------------------
-	// The reader publishes raw poses at ~30 Hz while the camera is re-read
-	// every rendered frame. Drawing the newest pose unchanged makes the
-	// skeleton trail the camera, and smoothing it again in the worker only
-	// added a whole sample of lag. Instead keep the two newest snapshots and
-	// advance the pose by how far the render clock is past the newest sample.
-	// PoseSmoothAlpha is the "lead" (0 = draw the newest sample, 1 = allow up
-	// to one extra sample interval of extrapolation).
-	static RobRunReader::SnapshotPtr sPrev, sCur;
-	static std::uint64_t sPrevUs = 0, sCurUs = 0;
-	static std::unordered_map<int32_t, const RobRunReader::EntityData*> sPrevById;
-
-	if (snapshot != sCur)
-	{
-		sPrev = sCur;
-		sPrevUs = sCurUs;
-		sCur = snapshot;
-		sCurUs = snapshot->stampUs;
-		sPrevById.clear();
-		if (sPrev)
-		{
-			sPrevById.reserve(sPrev->entities.size() * 2 + 1);
-			for (const auto& e : sPrev->entities)
-				sPrevById[e.entityId] = &e;
-		}
-	}
-
-	const std::uint64_t frameUs = static_cast<std::uint64_t>(
-		std::chrono::duration_cast<std::chrono::microseconds>(
-			std::chrono::steady_clock::now().time_since_epoch()).count());
-
-	float alpha = 1.f;
-	const bool blend = pcfg.PoseSmoothing && sPrev && sCurUs > sPrevUs;
-	if (blend)
-	{
-		const double dtUs = static_cast<double>(sCurUs - sPrevUs);
-		const double elapsedUs = static_cast<double>(frameUs) - static_cast<double>(sCurUs);
-		const float lead = std::clamp(pcfg.PoseSmoothAlpha, 0.f, 1.f);
-		const double ratio = std::clamp(elapsedUs / dtUs, 0.0, 1.0);
-		alpha = static_cast<float>(1.0 + static_cast<double>(lead) * ratio);
-	}
-
-	auto LerpPos = [](const Vector3& a, const Vector3& b, float t) {
-		return Vector3(a.x + (b.x - a.x) * t,
-			a.y + (b.y - a.y) * t,
-			a.z + (b.z - a.z) * t);
-	};
-
+	// --- pose ---------------------------------------------------------
+	// The reader smooths the pose on the worker (EMA over consecutive valid
+	// samples) and publishes one immutable snapshot per pass, so the overlay
+	// projects exactly the points it is given. There is no render-thread
+	// interpolation or extrapolation: extrapolating past the newest sample was
+	// what made bones overshoot and spring back every frame.
 	std::vector<std::string> lookingNames;
 
 	for (const auto& ent : snapshot->entities)
@@ -144,21 +103,10 @@ void DrawPlayers()
 		if (ent.isDead)
 			continue;
 
-		// Interpolated root position so the box and text track the same pose
-		// the bones are drawn with.
-		const RobRunReader::EntityData* prevEnt = nullptr;
-		if (blend)
-		{
-			const auto it = sPrevById.find(ent.entityId);
-			if (it != sPrevById.end())
-				prevEnt = it->second;
-		}
-		const Vector3 entPos = prevEnt
-			? LerpPos(prevEnt->position, ent.position, alpha)
-			: ent.position;
+		const Vector3 entPos = ent.position;
 
-		const int distance = (int)DistanceTo(entPos, localPos);
-		if (haveLocalPosition && distance > pcfg.MaxDistance)
+		const float distF = DistanceTo(entPos, localPos);
+		if (haveLocalPosition && (int)distF > pcfg.MaxDistance)
 			continue;
 
 		ImVec2 screenPos{};
@@ -169,31 +117,12 @@ void DrawPlayers()
 		bool boxValid = false;
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
 
-		const bool blendBones = prevEnt &&
-			prevEnt->bones.size() == ent.bones.size();
-		for (std::size_t si = 0; si < ent.bones.size(); ++si)
+		for (const auto& seg : ent.bones)
 		{
-			const auto& seg = ent.bones[si];
-			float ax = seg.a.x, ay = seg.a.y, az = seg.a.z;
-			float bx = seg.b.x, by = seg.b.y, bz = seg.b.z;
-			if (blendBones)
-			{
-				// Both endpoints, so limbs keep their length and joints meet.
-				// The visible flag always comes from the newest sample: pose
-				// motion is interpolated, occlusion is not.
-				const auto& ps = prevEnt->bones[si];
-				ax += (ax - ps.a.x) * (alpha - 1.f);
-				ay += (ay - ps.a.y) * (alpha - 1.f);
-				az += (az - ps.a.z) * (alpha - 1.f);
-				bx += (bx - ps.b.x) * (alpha - 1.f);
-				by += (by - ps.b.y) * (alpha - 1.f);
-				bz += (bz - ps.b.z) * (alpha - 1.f);
-			}
-
 			ImVec2 a{}, b{};
-			if (!Project(viewProjection, Vector3(ax, ay, az),
+			if (!Project(viewProjection, Vector3(seg.a.x, seg.a.y, seg.a.z),
 					screenW, screenH, a)) continue;
-			if (!Project(viewProjection, Vector3(bx, by, bz),
+			if (!Project(viewProjection, Vector3(seg.b.x, seg.b.y, seg.b.z),
 					screenW, screenH, b)) continue;
 
 			ImU32 segCol = espCol;
@@ -252,58 +181,18 @@ void DrawPlayers()
 		// --- colored text segments ---
 		struct TextSeg { std::string text; ImU32 col; };
 
-		// Top line: name, clan, distance, health, weapon
-		std::vector<TextSeg> topSegs;
-		if (!ent.nickname.empty())
-			topSegs.push_back({ RobRunMemory::WideToUtf8(ent.nickname), nameCol });
-		if (!ent.clanTag.empty())
-			topSegs.push_back({ " <" + RobRunMemory::WideToUtf8(ent.clanTag) + ">", nameCol });
-		if (pcfg.Distance)
-			topSegs.push_back({ "[" + std::to_string(distance) + "m]", distCol });
-		if (pcfg.Health && ent.healthKnown)
-			topSegs.push_back({ "[" + std::to_string((int)ent.health) + "hp]", hpTxtCol });
-		if (pcfg.WeaponEsp && !ent.weaponName.empty())
-			topSegs.push_back({ "[" + RobRunMemory::WideToUtf8(ent.weaponName) + "]", weapCol });
-
-		// Bottom line: role, looking, state
-		std::vector<TextSeg> botSegs;
-		if (pcfg.ShowRole && ent.role != 0)
-		{
-			if (ent.role == 1257638368)
-				botSegs.push_back({ "[ROB]", roleCol });
-			else
-				botSegs.push_back({ "[Role:" + std::to_string(ent.role) + "]", roleCol });
-		}
-		if ((pcfg.LookingAtYou || pcfg.LookingAlert) && haveLocalPosition)
-		{
-			const float dx = localPos.x - entPos.x;
-			const float dy = localPos.y - entPos.y;
-			const float dz = localPos.z - entPos.z;
-			const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
-			if (len > 0.01f)
-			{
-				const float invLen = 1.f / len;
-				const float dot = ent.lookDirection.x * dx * invLen
-					+ ent.lookDirection.y * dy * invLen
-					+ ent.lookDirection.z * dz * invLen;
-				if (dot > 0.90f)
-				{
-					if (pcfg.LookingAtYou)
-						botSegs.push_back({ "[LOOKING]", lookCol });
-					if (pcfg.LookingAlert) {
-						std::string name = ent.nickname.empty()
-							? ("Entity " + std::to_string(ent.entityId))
-							: RobRunMemory::WideToUtf8(ent.nickname);
-						lookingNames.push_back(std::move(name));
-					}
-				}
-			}
-		}
-		if (ent.inVehicle) botSegs.push_back({ "[V]", stateCol });
-		else if (ent.isCrouching) botSegs.push_back({ "[C]", stateCol });
-		else if (ent.isSprinting) botSegs.push_back({ "[S]", stateCol });
-		if (ent.healthKnown && ent.criticalHealth > 0.f && ent.health <= ent.criticalHealth)
-			botSegs.push_back({ "[!]", stateCol });
+		// Pulse multiplier for active state indicators (0.5..1.0 alpha cycle)
+		const float pulse = 0.6f + 0.4f * std::sin((float)ImGui::GetTime() * 8.f);
+		auto PulseCol = [&](const D2D1::ColorF& c) -> ImU32 {
+			return IM_COL32(
+				(int)(c.r * 255.f),
+				(int)(c.g * 255.f),
+				(int)(c.b * 255.f),
+				(int)(c.a * 255.f * pulse));
+		};
+		const ImU32 fireCol = PulseCol(pcfg.FiringColour);
+		const ImU32 reloadCol = PulseCol(pcfg.ReloadColour);
+		const ImU32 armorCol = PulseCol(pcfg.ArmorColour);
 
 		const float textX = boxValid
 			? (minX + maxX) * 0.5f
@@ -323,6 +212,13 @@ void DrawPlayers()
 			return y + fullSize.y;
 		};
 
+		// Top: name + clan tag
+		std::vector<TextSeg> topSegs;
+		if (!ent.nickname.empty())
+			topSegs.push_back({ RobRunMemory::WideToUtf8(ent.nickname), nameCol });
+		if (!ent.clanTag.empty())
+			topSegs.push_back({ " <" + RobRunMemory::WideToUtf8(ent.clanTag) + ">", nameCol });
+
 		float topY = boxValid ? (minY - 6.f) : screenPos.y;
 		if (!topSegs.empty()) {
 			std::string full;
@@ -332,9 +228,118 @@ void DrawPlayers()
 			drawSegLine(topSegs, topY);
 		}
 
-		if (!botSegs.empty()) {
-			float botY = boxValid ? (maxY + 8.f) : (screenPos.y + 14.f);
-			drawSegLine(botSegs, botY);
+		// Bottom: weapon sprite + weapon name + distance
+		float botY = boxValid ? (maxY + 8.f) : (screenPos.y + 14.f);
+		{
+			const std::string weapStr = ent.weaponName.empty()
+				? std::string()
+				: RobRunMemory::WideToUtf8(ent.weaponName);
+			char distBuf[32]{};
+			if (pcfg.Distance)
+				snprintf(distBuf, sizeof(distBuf), "%.1f m", distF);
+
+			float spriteW = 0.f, spriteH = 0.f;
+			WeaponSprites::SpriteInfo sprite{};
+			if (pcfg.WeaponEsp && pcfg.WeaponSprite && !weapStr.empty()) {
+				sprite = WeaponSprites::Get(weapStr);
+				if (sprite.srv) {
+					spriteH = fontSize + 2.f;
+					spriteW = spriteH * ((float)sprite.width / (float)sprite.height);
+				}
+			}
+
+			// Measure the full bottom line to center it
+			float totalW = 0.f;
+			if (sprite.srv) totalW += spriteW + 3.f;
+			ImVec2 weapSz{};
+			if (pcfg.WeaponEsp && !weapStr.empty()) {
+				weapSz = MeasureText(weapStr.c_str(), fontSize);
+				totalW += weapSz.x;
+			}
+			ImVec2 distSz{};
+			if (distBuf[0]) {
+				distSz = MeasureText(distBuf, fontSize);
+				if (totalW > 0.f) totalW += 6.f;
+				totalW += distSz.x;
+			}
+
+			if (totalW > 0.f) {
+				float cx = textX - totalW * 0.5f;
+				if (sprite.srv) {
+					dl->AddImage((ImTextureID)sprite.srv,
+						ImVec2(cx, botY), ImVec2(cx + spriteW, botY + spriteH));
+					cx += spriteW + 3.f;
+				}
+				if (pcfg.WeaponEsp && !weapStr.empty()) {
+					Esp::DrawOutlinedText(dl, ImVec2(cx, botY), weapCol,
+						font, fontSize, weapStr.c_str());
+					cx += weapSz.x;
+				}
+				if (distBuf[0]) {
+					if (pcfg.WeaponEsp && !weapStr.empty()) cx += 6.f;
+					Esp::DrawOutlinedText(dl, ImVec2(cx, botY), distCol,
+						font, fontSize, distBuf);
+				}
+				botY += std::max(spriteH, (float)fontSize) + 2.f;
+			}
+		}
+
+		// State indicators line
+		std::vector<TextSeg> stateSegs;
+		if (pcfg.Health && ent.healthKnown)
+			stateSegs.push_back({ "[" + std::to_string((int)ent.health) + "hp]", hpTxtCol });
+		if (pcfg.ShowFiring && ent.isFiring)
+			stateSegs.push_back({ "[FIRE]", fireCol });
+		if (pcfg.ShowReloading && ent.isReloading)
+			stateSegs.push_back({ "[RLD]", reloadCol });
+		if (pcfg.ShowArmor && ent.hasArmor)
+			stateSegs.push_back({ "[ARM]", armorCol });
+		if (ent.isKnockedDown) stateSegs.push_back({ "[KD]", stateCol });
+		if (ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
+		if (ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });
+		if (ent.isHandcuffed) stateSegs.push_back({ "[HC]", stateCol });
+		if (pcfg.ShowRole && ent.role != 0)
+		{
+			if (ent.role == 1257638368)
+				stateSegs.push_back({ "[ROB]", roleCol });
+			else
+				stateSegs.push_back({ "[Role:" + std::to_string(ent.role) + "]", roleCol });
+		}
+		if (ent.inVehicle) stateSegs.push_back({ "[V]", stateCol });
+		else if (ent.isCrouching) stateSegs.push_back({ "[C]", stateCol });
+		else if (ent.isSprinting) stateSegs.push_back({ "[S]", stateCol });
+		if (ent.healthKnown && ent.criticalHealth > 0.f && ent.health <= ent.criticalHealth)
+			stateSegs.push_back({ "[!]", stateCol });
+		if (!stateSegs.empty())
+			botY = drawSegLine(stateSegs, botY);
+
+		// Looking-at-you detection
+		if ((pcfg.LookingAtYou || pcfg.LookingAlert) && haveLocalPosition)
+		{
+			const float dx = localPos.x - entPos.x;
+			const float dy = localPos.y - entPos.y;
+			const float dz = localPos.z - entPos.z;
+			const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+			if (len > 0.01f)
+			{
+				const float invLen = 1.f / len;
+				const float dot = ent.lookDirection.x * dx * invLen
+					+ ent.lookDirection.y * dy * invLen
+					+ ent.lookDirection.z * dz * invLen;
+				if (dot > 0.90f)
+				{
+					if (pcfg.LookingAtYou) {
+						std::vector<TextSeg> lookSeg = { { "[LOOKING]", lookCol } };
+						botY = drawSegLine(lookSeg, botY);
+					}
+					if (pcfg.LookingAlert) {
+						std::string name = ent.nickname.empty()
+							? ("Entity " + std::to_string(ent.entityId))
+							: RobRunMemory::WideToUtf8(ent.nickname);
+						lookingNames.push_back(std::move(name));
+					}
+				}
+			}
 		}
 	}
 

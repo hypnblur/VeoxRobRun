@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <map>
 #include <string>
+#include <filesystem>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -84,23 +85,41 @@ ImVec4 kTextFaint = ImVec4(92 / 255.f, 88 / 255.f, 114 / 255.f, 1.f);
 
 bool g_highContrast = false;
 
+// ---- selectable fonts ----------------------------------------------------
+struct FontEntry { const char* name; ImFont* ptr; };
+constexpr int kFontCount = 7;
+FontEntry g_fonts[kFontCount] = {
+	{ "Maven Pro",  nullptr },
+	{ "Atkinson",   nullptr },
+	{ "Arial",      nullptr },
+	{ "Segoe UI",   nullptr },
+	{ "Consolas",   nullptr },
+	{ "Tahoma",     nullptr },
+	{ "Verdana",    nullptr },
+};
+int g_fontIndex = 0;
+
+static void ApplySelectedFont()
+{
+	if (g_fonts[g_fontIndex].ptr)
+		ImGui::GetIO().FontDefault = g_fonts[g_fontIndex].ptr;
+	ConfigInstance.Overlay.FontName = g_fonts[g_fontIndex].name;
+}
+
 void ApplyPalette()
 {
 	if (g_highContrast)
 	{
-		// Flat, fully opaque surfaces: no gradient, no translucent panels.
-		// The whole shell uses the card fill so every surface reads exactly
-		// like an OVERLAY card, even over a bright game scene.
-		kCard = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
-		kCardTop = ImVec4(38 / 255.f, 34 / 255.f, 53 / 255.f, 1.f);
-		kBgTop = kCard;
-		kBgBottom = kCard;
-		kPopup = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
-		kStroke = ImVec4(1.f, 1.f, 1.f, 0.20f);
-		kTrack = ImVec4(1.f, 1.f, 1.f, 0.24f);
+		kBgTop = ImVec4(55 / 255.f, 50 / 255.f, 72 / 255.f, 1.f);
+		kBgBottom = kBgTop;
+		kCard = ImVec4(62 / 255.f, 56 / 255.f, 80 / 255.f, 1.f);
+		kCardTop = ImVec4(72 / 255.f, 65 / 255.f, 92 / 255.f, 1.f);
+		kPopup = kCard;
+		kStroke = ImVec4(1.f, 1.f, 1.f, 0.25f);
+		kTrack = ImVec4(1.f, 1.f, 1.f, 0.30f);
 		kText = ImVec4(1.f, 1.f, 1.f, 1.f);
-		kTextDim = ImVec4(0.82f, 0.80f, 0.90f, 1.f);
-		kTextFaint = ImVec4(0.64f, 0.62f, 0.74f, 1.f);
+		kTextDim = ImVec4(0.86f, 0.84f, 0.92f, 1.f);
+		kTextFaint = ImVec4(0.69f, 0.67f, 0.76f, 1.f);
 	}
 	else
 	{
@@ -981,13 +1000,13 @@ void DrawVisuals()
 						"to animator state");
 			}
 
-			ToggleRow("Interpolate Poses", &ConfigInstance.Player.PoseSmoothing);
+			ToggleRow("Pose Smoothing", &ConfigInstance.Player.PoseSmoothing);
 			if (ConfigInstance.Player.PoseSmoothing)
 			{
-				SliderFloatRow("Lead", &ConfigInstance.Player.PoseSmoothAlpha, 0.f, 1.f);
-				Note("Bones are advanced on the render thread between the two "
-					"newest 30 Hz samples. Lead 0 draws the newest sample; 1 "
-					"extrapolates up to one extra interval to hide sample lag.");
+				SliderFloatRow("Blend", &ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.f);
+				Note("The reader blends each new pose sample into the previous one "
+					"before publishing. 1 keeps the pose raw; lower values damp "
+					"jitter from partial or stale DMA reads.");
 			}
 
 			ToggleRow("Native Camera", &ConfigInstance.Player.NativeEspCamera);
@@ -1430,6 +1449,53 @@ void DrawMisc()
 		EndCard();
 	}
 	ImGui::EndGroup();
+
+	// --- Memory probe card (full width) ---
+	{
+		static std::vector<RobRunWorld::ProbeResult> probeResults;
+		static bool probed = false;
+
+		BeginCard("MEMORY PROBE", kCardW * 2.f + kGap);
+
+		const auto snapshot = RobRunReader::GetSnapshot();
+		const std::uintptr_t worldPtr = (snapshot && snapshot->world)
+			? snapshot->world->worldPtr : 0;
+
+		if (worldPtr) {
+			if (ButtonRow("", "Probe Money Models", 180.f, true))
+			{
+				probeResults = RobRunWorld::ProbeMoneyModels(worldPtr);
+				probed = true;
+			}
+			ImGui::SameLine();
+			Note("world=0x%llX", (unsigned long long)worldPtr);
+		} else {
+			Note("No world pointer. Attach to the game first.");
+		}
+
+		if (probed && !probeResults.empty())
+		{
+			for (const auto& r : probeResults)
+			{
+				SectionLabel(r.dictName.c_str());
+				Note("class: %s  ptr: 0x%llX", r.className.c_str(), (unsigned long long)r.ptr);
+				for (const auto& f : r.fields)
+				{
+					char hex[32];
+					snprintf(hex, sizeof(hex), "%llX", (unsigned long long)(std::uint64_t)f.rawValue);
+					Note("  +0x%X  t=%d  %s  = 0x%s (%lld)",
+						f.offset, f.typeCode, f.name.c_str(),
+						hex, (long long)f.rawValue);
+				}
+			}
+		}
+		else if (probed)
+		{
+			Note("No money model entries found in the current scene.");
+		}
+
+		EndCard();
+	}
 }
 
 void DrawSettings(bool attached, const std::string& statusText)
@@ -1470,6 +1536,13 @@ void DrawSettings(bool attached, const std::string& statusText)
 
 		BeginCard("DISPLAY", kCardW);
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
+
+		{
+			static const char* fontNames[kFontCount];
+			for (int i = 0; i < kFontCount; i++) fontNames[i] = g_fonts[i].name;
+			if (ComboRow("Font", &g_fontIndex, fontNames, kFontCount))
+				ApplySelectedFont();
+		}
 
 		int cap = Overlay::FrameCap();
 		if (SliderIntRow("Frame Cap", &cap, 0, 480, " fps", "Uncapped"))
@@ -1784,6 +1857,38 @@ void Init()
 
 	if (font::inter_medium_widget)
 		io.FontDefault = font::inter_medium_widget;
+
+	// Load selectable fonts from files
+	{
+		wchar_t exePath[MAX_PATH]{};
+		GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+		auto exeDir = std::filesystem::path(exePath).parent_path();
+		struct { int idx; std::string path; } fontFiles[] = {
+			{ 0, (exeDir / "fonts" / "MavenPro-Regular.ttf").string() },
+			{ 1, (exeDir / "fonts" / "AtkinsonHyperlegible-Regular.ttf").string() },
+			{ 2, "C:\\Windows\\Fonts\\arial.ttf" },
+			{ 3, "C:\\Windows\\Fonts\\segoeui.ttf" },
+			{ 4, "C:\\Windows\\Fonts\\consola.ttf" },
+			{ 5, "C:\\Windows\\Fonts\\tahoma.ttf" },
+			{ 6, "C:\\Windows\\Fonts\\verdana.ttf" },
+		};
+		for (auto& f : fontFiles)
+		{
+			if (std::filesystem::exists(f.path))
+				g_fonts[f.idx].ptr = io.Fonts->AddFontFromFileTTF(f.path.c_str(), 15.f, nullptr, glyphRanges);
+		}
+
+		g_fontIndex = 0;
+		for (int i = 0; i < kFontCount; i++)
+		{
+			if (ConfigInstance.Overlay.FontName == g_fonts[i].name && g_fonts[i].ptr)
+			{
+				g_fontIndex = i;
+				break;
+			}
+		}
+		ApplySelectedFont();
+	}
 
 	ImGuiStyle& style = ImGui::GetStyle();
 	style.WindowRounding = 12.f;

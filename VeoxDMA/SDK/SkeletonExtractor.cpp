@@ -89,94 +89,141 @@ struct Snapshot {
     }
 };
 
-bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
-{
-    out = RigTarget{};
-    if (!read || view <= 0x10000) return false;
-    Snapshot m{read,{}};
-
-    // Documented chain: the entity view exposes the movement view, and the
-    // CharacterMovementView exposes the managed root Transform through
-    // _transform(). The native Unity object is what owns the transform
-    // hierarchy, so both hops are needed.
-    U movement = m.ptr(view, 0x20);
-    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
-    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
-
-    // Some rigs expose the same native transform straight off the view; keep
-    // that as a fallback rather than rejecting the character.
-    if (native <= 0x10000) native = m.ptr(view, 0x10);
-    if (native <= 0x10000) return false;
-
-    U hierarchy = m.ptr(native, 0x28);
-    U matrices = m.ptr(hierarchy, 0x18);
+struct ResolvedHierarchy {
+    U native = 0;
+    U hierarchy = 0;
+    U matrices = 0;
+    U parents = 0;
+    U pointers = 0;
     std::int32_t count = 0;
-    if (hierarchy <= 0x10000 || matrices <= 0x10000 ||
-        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
+    int root = -1;
+    std::vector<TRS> local;
+    std::vector<std::int32_t> parent;
+    std::vector<U> transforms;
+    std::vector<unsigned char> reachable;
+
+    bool isAncestor(int a, int b) const {
+        for (int steps = 0; b != -1 && b >= 0 && b < count && steps < count; b = parent[b], ++steps)
+            if (a == b) return true;
+        return false;
+    }
+
+    int indexOf(U n) const {
+        if (n <= 0x10000) return -1;
+        int index = -1;
+        for (int b = 0; b < count; ++b) {
+            if (transforms[b] == n && reachable[b]) {
+                if (index != -1) return -1;
+                index = b;
+            }
+        }
+        return index;
+    }
+
+    int resolveTransform(Snapshot& m, U managedTransform) const {
+        if (!m.is(managedTransform, "Transform")) return -1;
+        U n = m.ptr(managedTransform, 0x10);
+        if (n <= 0x10000 || m.ptr(n, 0x28) != hierarchy) return -1;
+        const int idx = indexOf(n);
+        return (idx >= 0 && reachable[idx] && isAncestor(root, idx)) ? idx : -1;
+    }
+};
+
+// BattleCharacterEntityView is a MonoBehaviour whose native struct +0x28 holds
+// unrelated non-Transform fields on most characters. Resolve the skeleton
+// TransformHierarchy via the character's verified Transform references first,
+// and confirm native appears uniquely inside the hierarchy's Transform table.
+static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool walkToTopRoot, ResolvedHierarchy& out)
+{
+    if (nativeTransform <= 0x10000) return false;
+    const U hierarchy = m.ptr(nativeTransform, 0x28);
+    if (hierarchy <= 0x10000) return false;
+    const U matrices = m.ptr(hierarchy, 0x18);
+    const U parents = m.ptr(hierarchy, 0x20);
+    const U pointers = m.ptr(hierarchy, 0x30);
+    std::int32_t count = 0;
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) return false;
+
+    std::vector<TRS> local(static_cast<std::size_t>(count));
+    std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
+    std::vector<U> transforms(static_cast<std::size_t>(count));
+    if (!m.array(matrices, local, false) ||
+        !m.array(parents, parent, true) ||
+        !m.array(pointers, transforms, true))
         return false;
 
-    out.view = view;
-    out.movementView = movement;
-    out.managedTransform = managed;
-    out.nativeTransform = native;
+    std::vector<unsigned char> reachable(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        bool ok = true;
+        int p = b, steps = 0;
+        while (p != -1 && steps < count) {
+            if (p < -1 || p >= count) { ok = false; break; }
+            p = parent[p];
+            ++steps;
+        }
+        if (p != -1) ok = false;
+        if (ok) reachable[b] = 1;
+    }
+
+    int idx = -1;
+    for (int b = 0; b < count; ++b) {
+        if (transforms[b] == nativeTransform && reachable[b]) {
+            if (idx != -1) { idx = -1; break; }
+            idx = b;
+        }
+    }
+    if (idx < 0) return false;
+
+    int rootIdx = idx;
+    if (walkToTopRoot) {
+        while (parent[rootIdx] != -1)
+            rootIdx = parent[rootIdx];
+        if (transforms[rootIdx] <= 0x10000) return false;
+        nativeTransform = transforms[rootIdx];
+    }
+
+    out.native = nativeTransform;
     out.hierarchy = hierarchy;
     out.matrices = matrices;
+    out.parents = parents;
+    out.pointers = pointers;
     out.count = count;
+    out.root = rootIdx;
+    out.local = std::move(local);
+    out.parent = std::move(parent);
+    out.transforms = std::move(transforms);
+    out.reachable = std::move(reachable);
     return true;
 }
 
-bool RootWorldPosition(U view, const Read& read, Vec& out)
+static bool ResolveViewHierarchy(Snapshot& m, U view, ResolvedHierarchy& out)
 {
-    out = {};
-    if (!read || view <= 0x10000) return false;
-    Snapshot m{read,{}};
+    auto tryManagedTransform = [&](U managed, bool walkToRoot) -> bool {
+        if (!m.is(managed, "Transform")) return false;
+        return TryLoadHierarchyFromTransform(m, m.ptr(managed, 0x10), walkToRoot, out);
+    };
 
-    // Same chain as BuildLayoutFromView: the view exposes the movement view,
-    // which exposes the managed root Transform, which owns the native object
-    // and its transform hierarchy. The native object straight off the view is
-    // the fallback used by some characters.
-    U movement = m.ptr(view, 0x20);
-    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
-    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
-    if (native <= 0x10000) native = m.ptr(view, 0x10);
-    if (native <= 0x10000) return false;
+    const U movement = m.ptr(view, 0x20);
+    if (m.isOneOf(movement, {"CharacterMovementView", "MovementView"}) &&
+        tryManagedTransform(m.ptr(movement, 0x20), true))
+        return true;
 
-    U hierarchy = m.ptr(native, 0x28);
-    if (hierarchy <= 0x10000) return false;
-    U matrices = m.ptr(hierarchy, 0x18);
-    U parents = m.ptr(hierarchy, 0x20);
-    std::int32_t count = 0;
-    if (matrices <= 0x10000 || parents <= 0x10000 ||
-        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
-        return false;
+    if (tryManagedTransform(m.ptr(view, 0xE8), true))
+        return true;
 
-    // The root is the only node without a parent, so its local TRS is already
-    // the world transform. Everything below it is composed by SampleLayout.
-    std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
-    if (!m.array(parents, parent, false)) return false;
-    int root = -1;
-    for (int i = 0; i < count; ++i) {
-        if (parent[static_cast<std::size_t>(i)] == -1) { root = i; break; }
+    const U animation = m.ptr(view, 0x28);
+    if (m.isOneOf(animation, {"CharacterAnimationView", "AnimationView"})) {
+        const U torso = m.ptr(animation, 0x30);
+        if (m.isOneOf(torso, {"CharacterTorsoDeformationView", "TorsoView"}) &&
+            tryManagedTransform(m.ptr(torso, 0x20), true))
+            return true;
+        const U head = m.ptr(animation, 0x28);
+        if (m.isOneOf(head, {"CharacterHeadManualControlView", "HeadView"}) &&
+            tryManagedTransform(m.ptr(head, 0x20), true))
+            return true;
     }
-    if (root < 0) return false;
 
-    TRS trs{};
-    if (!m.bytes(matrices + static_cast<U>(root) * sizeof(TRS), &trs, sizeof(TRS)))
-        return false;
-    if (!Finite(trs.p)) return false;
-    out = trs.p;
-    return true;
-}
-
-bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target)
-{
-    // The parent table and the matrix array belong to one hierarchy instance.
-    // A new native object, hierarchy, array pointer or bone count means the
-    // cached indices describe something that no longer exists.
-    return target.nativeTransform == layout.nativeTransform &&
-        target.hierarchy == layout.hierarchy &&
-        target.matrices == layout.matrices &&
-        target.count == layout.count;
+    return TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out);
 }
 
 bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
@@ -185,96 +232,18 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     if (!read || view <= 0x10000) return false;
     Snapshot m{read,{}};
     if (!m.is(view,"BattleCharacterEntityView")) return false;
-    // The view is the live registry entry for this entity, so the transform
-    // chain is walked from it: movement view -> managed _transform() -> native
-    // Transform -> hierarchy. The native object at view+0x10 is tried second,
-    // because on most characters it is the same transform, but a rig whose
-    // root is only reachable through the movement view used to fail here and
-    // never get a skeleton at all.
-    U movement = m.ptr(view,0x20);
-    U managed = (movement > 0x10000) ? m.ptr(movement,0x20) : 0;
-    U native = 0, hierarchy = 0;
-    U matrices = 0, parents = 0, pointers = 0;
-    std::int32_t count = 0;
-    std::vector<TRS> local;
-    std::vector<std::int32_t> parent;
-    std::vector<U> transforms;
-    for (U candidate : {
-            (managed > 0x10000) ? m.ptr(managed,0x10) : U(0),
-            m.ptr(view,0x10) })
-    {
-        if (candidate <= 0x10000) continue;
-        U candidateHierarchy = m.ptr(candidate,0x28);
-        if (candidateHierarchy <= 0x10000) continue;
-        U candidateMatrices = m.ptr(candidateHierarchy,0x18);
-        U candidateParents = m.ptr(candidateHierarchy,0x20);
-        U candidatePointers = m.ptr(candidateHierarchy,0x30);
-        std::int32_t candidateCount = 0;
-        if (candidateMatrices <= 0x10000 || candidateParents <= 0x10000 ||
-            candidatePointers <= 0x10000 ||
-            !m.get(candidateHierarchy+0x38,candidateCount) ||
-            candidateCount < 2 || candidateCount > 512) continue;
-        std::vector<TRS> candidateLocal(candidateCount);
-        std::vector<std::int32_t> candidateParent(candidateCount);
-        std::vector<U> candidateTransforms(candidateCount);
-        if (!m.array(candidateMatrices,candidateLocal,false) ||
-            !m.array(candidateParents,candidateParent,true) ||
-            !m.array(candidatePointers,candidateTransforms,true)) continue;
-        // The candidate is only the root when the hierarchy actually holds it.
-        bool inHierarchy = false;
-        for (U transform : candidateTransforms)
-            if (transform == candidate) { inHierarchy = true; break; }
-        if (!inHierarchy) continue;
-        native = candidate;
-        hierarchy = candidateHierarchy;
-        matrices = candidateMatrices;
-        parent = std::move(candidateParent);
-        transforms = std::move(candidateTransforms);
-        local = std::move(candidateLocal);
-        count = candidateCount;
-        break;
-    }
-    if (native <= 0x10000 || hierarchy <= 0x10000) return false;
-    // The parent/pointer arrays must not have changed while they were read;
-    // a layout built from a half-written table indexes the wrong bones.
-    if (!m.stable()) return false;
+    ResolvedHierarchy rh;
+    if (!ResolveViewHierarchy(m, view, rh)) return false;
 
-    // Validate each bone's parent chain individually. A bone whose parent
-    // index is out of range or forms a cycle is marked unreachable rather
-    // than rejecting the entire layout.
-    std::vector<unsigned char> reachable(count, 0);
-    for (int b = 0; b < count; ++b) {
-        bool ok = true;
-        int p = b, steps = 0;
-        while (p != -1 && steps < count) {
-            if (p < -1 || p >= count) { ok = false; break; }
-            p = parent[p]; ++steps;
-        }
-        if (p != -1) ok = false;
-        if (ok) reachable[b] = 1;
-    }
-    auto ancestor = [&](int a, int b) {
-        for (; b != -1 && b >= 0 && b < count; b = parent[b])
-            if (a == b) return true;
-        return false;
-    };
-    auto indexOf = [&](U n) {
-        int index = -1;
-        for (int b = 0; b < count; ++b) if (transforms[b] == n && reachable[b]) {
-            if (index != -1) return -1;
-            index = b;
-        }
-        return index;
-    };
-    int root = indexOf(native);
-    if (root < 0) return false;
-    auto resolve = [&](U transform) {
-        if (!m.is(transform,"Transform")) return -1;
-        U n = m.ptr(transform,0x10);
-        if (n <= 0x10000 || m.ptr(n,0x28) != hierarchy) return -1;
-        int index = indexOf(n);
-        return index >= 0 && reachable[index] && ancestor(root,index) ? index : -1;
-    };
+    const U native = rh.native;
+    const U hierarchy = rh.hierarchy;
+    const U matrices = rh.matrices;
+    const std::int32_t count = rh.count;
+    const int root = rh.root;
+    std::vector<TRS>& local = rh.local;
+    std::vector<std::int32_t>& parent = rh.parent;
+    auto ancestor = [&](int a, int b) { return rh.isAncestor(a, b); };
+    auto resolve = [&](U transform) { return rh.resolveTransform(m, transform); };
     U animation = m.ptr(view,0x28), weapon = m.ptr(view,0x30);
     const bool animationOk = m.isOneOf(animation,{"CharacterAnimationView","AnimationView"});
     const bool weaponOk = m.isOneOf(weapon,{"CharacterWithWeaponAnimationView","WithWeaponView"});
@@ -391,6 +360,26 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         }
     }
 
+    // Include crown/HeadPosition (+0xE8) when directly parented to skull so the
+    // full head height is represented on the spine without shifting out.head.
+    const int headTop = resolve(m.ptr(view, 0xE8));
+    if (headTop >= 0 && out.head >= 0 && headTop != out.head && parent[headTop] == out.head) {
+        const float dx = local[headTop].p.x, dy = local[headTop].p.y, dz = local[headTop].p.z;
+        if (dx*dx + dy*dy + dz*dz < 0.25f)
+            pushAnchor(headTop);
+    }
+
+    // TorsoView._spine2 is waist-level; prefer the shared thigh parent (true hips)
+    // as out.pelvis whenever both leg roots attach to an ancestor of the chest.
+    if (out.leftHip >= 0 && out.rightHip >= 0) {
+        const int trueHips = parent[out.leftHip];
+        if (trueHips >= 0 && trueHips == parent[out.rightHip] &&
+            out.chest >= 0 && ancestor(trueHips, out.chest)) {
+            out.pelvis = trueHips;
+            pushAnchor(trueHips);
+        }
+    }
+
     // Parent-tree limb fallback: when the weapon view is unbound (holster,
     // reload, vehicle) we get no limb anchors from the IK views. Walk the
     // parent array — already in memory, no extra DMA — to find branches
@@ -404,6 +393,15 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
             onSpine[b] = true;
             if (b == root) break;
         }
+
+        auto chainLength = [&](const std::vector<int>& chain) {
+            float total = 0.f;
+            for (std::size_t i = 1; i < chain.size(); ++i) {
+                const Vec& p = local[chain[i]].p;
+                total += std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+            }
+            return total;
+        };
 
         auto walkChain = [&](int start, int depth) -> std::vector<int> {
             std::vector<int> chain;
@@ -426,54 +424,70 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         };
 
         if (missingLegs) {
-            std::vector<int> legRoots;
-            for (int b = 0; b < count; ++b)
-                if (parent[b] == out.pelvis && !onSpine[b]) legRoots.push_back(b);
-            if (legRoots.empty()) {
-                int hips = parent[out.pelvis];
-                if (hips >= 0)
-                    for (int b = 0; b < count; ++b)
-                        if (parent[b] == hips && !onSpine[b]) legRoots.push_back(b);
-            }
             std::vector<std::vector<int>> legs;
-            for (int lr : legRoots) {
-                auto chain = walkChain(lr, 2);
-                if (chain.size() >= 2) legs.push_back(std::move(chain));
-            }
+            auto collectLegsFrom = [&](int hipNode) {
+                for (int b = 0; b < count; ++b) {
+                    if (parent[b] != hipNode || onSpine[b]) continue;
+                    auto chain = walkChain(b, 3);
+                    if (chain.size() >= 2 && chainLength(chain) > 0.20f)
+                        legs.push_back(std::move(chain));
+                }
+            };
+            const int hipsCandidate = (parent[out.pelvis] >= 0) ? parent[out.pelvis] : out.pelvis;
+            collectLegsFrom(hipsCandidate);
+            if (legs.size() < 2 && hipsCandidate != out.pelvis)
+                collectLegsFrom(out.pelvis);
+
+            std::sort(legs.begin(), legs.end(), [&](const auto& a, const auto& b) {
+                return chainLength(a) > chainLength(b);
+            });
             if (legs.size() >= 2) {
                 auto& lA = legs[0]; auto& lB = legs[1];
                 bool aIsLeft = local[lA[0]].p.x < local[lB[0]].p.x;
                 auto& left  = aIsLeft ? lA : lB;
                 auto& right = aIsLeft ? lB : lA;
-                if (left.size() > 0) { out.leftHip   = left[0]; pushAnchor(left[0]); }
-                if (left.size() > 1) { out.leftKnee  = left[1]; pushAnchor(left[1]); }
-                if (left.size() > 2) { out.leftFoot  = left[2]; pushAnchor(left[2]); }
-                if (right.size() > 0) { out.rightHip  = right[0]; pushAnchor(right[0]); }
-                if (right.size() > 1) { out.rightKnee = right[1]; pushAnchor(right[1]); }
-                if (right.size() > 2) { out.rightFoot = right[2]; pushAnchor(right[2]); }
+                const int hipNode = parent[left[0]];
+                if (hipNode >= 0 && hipNode == parent[right[0]] && ancestor(hipNode, out.chest)) {
+                    out.pelvis = hipNode;
+                    pushAnchor(hipNode);
+                }
+                for (int idx : left) pushAnchor(idx);
+                for (int idx : right) pushAnchor(idx);
+                if (left.size() > 0) out.leftHip   = left[0];
+                if (left.size() > 1) out.leftKnee  = left[1];
+                if (left.size() > 2) out.leftFoot  = left[2];
+                if (right.size() > 0) out.rightHip  = right[0];
+                if (right.size() > 1) out.rightKnee = right[1];
+                if (right.size() > 2) out.rightFoot = right[2];
             }
         }
 
         if (missingArms) {
-            std::vector<int> armRoots;
-            for (int b = 0; b < count; ++b)
-                if (parent[b] == out.chest && !onSpine[b]) armRoots.push_back(b);
             std::vector<std::vector<int>> arms;
-            for (int ar : armRoots) {
-                auto chain = walkChain(ar, 2);
-                if (chain.size() >= 2) arms.push_back(std::move(chain));
+            for (int b = 0; b < count; ++b) {
+                if (parent[b] != out.chest || onSpine[b]) continue;
+                auto chain = walkChain(b, 3);
+                if (chain.size() >= 3 && chainLength(chain) > 0.25f)
+                    arms.push_back(std::move(chain));
             }
+            std::sort(arms.begin(), arms.end(), [&](const auto& a, const auto& b) {
+                return chainLength(a) > chainLength(b);
+            });
             if (arms.size() >= 2) {
                 auto& aA = arms[0]; auto& aB = arms[1];
                 bool aIsLeft = local[aA[0]].p.x < local[aB[0]].p.x;
                 auto& left  = aIsLeft ? aA : aB;
                 auto& right = aIsLeft ? aB : aA;
-                if (left.size() > 0) { out.leftShoulder  = left[0]; pushAnchor(left[0]); }
-                if (left.size() > 1) { out.leftElbow     = left[1]; pushAnchor(left[1]); }
-                if (left.size() > 2) { out.leftHand      = left[2]; pushAnchor(left[2]); }
-                if (right.size() > 0) { out.rightShoulder = right[0]; pushAnchor(right[0]); }
-                if (right.size() > 1) { out.rightElbow    = right[1]; pushAnchor(right[1]); }
-                if (right.size() > 2) { out.rightHand     = right[2]; pushAnchor(right[2]); }
+                for (int idx : left) pushAnchor(idx);
+                for (int idx : right) pushAnchor(idx);
+                const std::size_t ls = left.size() >= 4 ? 1 : 0;
+                const std::size_t rs = right.size() >= 4 ? 1 : 0;
+                if (left.size() > ls)     out.leftShoulder  = left[ls];
+                if (left.size() > ls + 1) out.leftElbow     = left[ls + 1];
+                if (left.size() > ls + 2) out.leftHand      = left[ls + 2];
+                if (right.size() > rs)     out.rightShoulder = right[rs];
+                if (right.size() > rs + 1) out.rightElbow    = right[rs + 1];
+                if (right.size() > rs + 2) out.rightHand     = right[rs + 2];
             }
         }
     }
@@ -497,7 +511,11 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
             if (p == lca) break;
         }
     }
-    if (!m.stable()) return false;
+    // The parent/pointer arrays must not have changed while they were read;
+    // a layout built from a half-written table indexes the wrong bones.
+    if (!m.stable() ||
+        m.ptr(native, 0x28) != hierarchy || m.ptr(hierarchy, 0x18) != matrices)
+        return false;
 
     out.matrices = matrices;
     out.nativeTransform = native;
@@ -514,6 +532,102 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     return !out.segments.empty();
 }
 
+static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
+    std::vector<BoneSegment>& out, BonePoints* points, BoneLocal* localOut)
+{
+    const int count = layout.count;
+    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        auto& t = local[b];
+        const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
+        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
+            n < 0.5f || n > 1.5f)
+            continue;
+        const float inv = 1.0f/std::sqrt(n);
+        t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
+        boneValid[b] = 1;
+    }
+
+    std::vector<Vec> world(static_cast<std::size_t>(count));
+    std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        if (!boneValid[b]) continue;
+        Vec v = local[b].p;
+        bool ok = true;
+        int steps = 0;
+        for (int p = layout.parent[b]; p != -1; ++steps) {
+            if (steps >= count || p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
+            v = Add(local[p].p, Rotate(local[p].q, Mul(local[p].s, v)));
+            p = layout.parent[p];
+        }
+        if (!ok || !Finite(v)) continue;
+        world[b] = v;
+        worldValid[b] = 1;
+    }
+
+    std::vector<BoneSegment> result;
+    result.reserve(layout.segments.size());
+    for (const auto& seg : layout.segments) {
+        if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
+        result.push_back({world[seg.first], world[seg.second]});
+    }
+    out = std::move(result);
+
+    if (localOut) {
+        for (int b = 0; b < count; ++b) {
+            if (!boneValid[b]) {
+                localOut[b].position = {};
+                localOut[b].rotation[0] = 0.f;
+                localOut[b].rotation[1] = 0.f;
+                localOut[b].rotation[2] = 0.f;
+                localOut[b].rotation[3] = 1.f;
+                localOut[b].scale = {1.f, 1.f, 1.f};
+                continue;
+            }
+            localOut[b].position = local[b].p;
+            localOut[b].rotation[0] = local[b].q.x;
+            localOut[b].rotation[1] = local[b].q.y;
+            localOut[b].rotation[2] = local[b].q.z;
+            localOut[b].rotation[3] = local[b].q.w;
+            localOut[b].scale = local[b].s;
+        }
+    }
+
+    if (points) {
+        *points = BonePoints{};
+        auto anchorOk = [&](int idx) {
+            return idx >= 0 && idx < count && worldValid[idx] != 0;
+        };
+        points->hasHead = anchorOk(layout.head);
+        points->hasNeck = anchorOk(layout.neck);
+        points->hasChest = anchorOk(layout.chest);
+        points->hasPelvis = anchorOk(layout.pelvis);
+        points->valid = points->hasHead || points->hasNeck || points->hasChest || points->hasPelvis;
+        if (points->valid) {
+            auto fill = [&](int idx, Vec& dst) {
+                if (anchorOk(idx)) dst = world[idx];
+            };
+            fill(layout.head, points->head);
+            fill(layout.neck, points->neck);
+            fill(layout.chest, points->chest);
+            fill(layout.pelvis, points->pelvis);
+            fill(layout.leftShoulder, points->leftShoulder);
+            fill(layout.leftElbow, points->leftElbow);
+            fill(layout.leftHand, points->leftHand);
+            fill(layout.rightShoulder, points->rightShoulder);
+            fill(layout.rightElbow, points->rightElbow);
+            fill(layout.rightHand, points->rightHand);
+            fill(layout.leftHip, points->leftHip);
+            fill(layout.leftKnee, points->leftKnee);
+            fill(layout.leftFoot, points->leftFoot);
+            fill(layout.rightHip, points->rightHip);
+            fill(layout.rightKnee, points->rightKnee);
+            fill(layout.rightFoot, points->rightFoot);
+        }
+    }
+    return !out.empty() || (points && points->valid);
+}
+
 bool SampleLayout(const RigLayout& layout, const Read& read,
     std::vector<BoneSegment>& out, BonePoints* points,
     BoneLocal* localOut)
@@ -524,13 +638,6 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         layout.selected.size() != static_cast<std::size_t>(count))
         return false;
 
-    // One read of the animation pose. This is the only DMA access needed to
-    // refresh the skeleton, and it is issued uncached by the caller.
-    //
-    // Read in page-sized chunks. A single NOCACHE read of a large rig can
-    // exceed the transport's per-transaction limit and fail; the caller used to
-    // fall back to a cached pose, which trails a fresh position by the VMM
-    // cache window (~200 ms) and makes the skeleton visibly lag the body.
     std::vector<TRS> local(static_cast<std::size_t>(count));
     constexpr std::size_t kPoseChunk = 0x1000;
     auto* poseBytes = reinterpret_cast<unsigned char*>(local.data());
@@ -540,96 +647,7 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         if (!read(layout.matrices + offset, poseBytes + offset, chunk))
             return false;
     }
-
-    // A pose read can contain a handful of bad bones during spawn, ragdoll
-    // transitions or a partially paged-out matrix array. Rejecting the whole
-    // sample made the entire character lose its skeleton; instead, mark bad
-    // bones and drop only the segments that touch them.
-    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
-    for (int b = 0; b < count; ++b) {
-        auto& t = local[b];
-        const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
-        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
-            n < 0.5f || n > 1.5f)
-            continue;
-        const float inv = 1.0f/std::sqrt(n);
-        t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
-        boneValid[b] = 1;
-    }
-
-    std::vector<Vec> world(static_cast<std::size_t>(count));
-    std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
-    for (int b = 0; b < count; ++b) {
-        if (!boneValid[b]) continue;
-        Vec v = local[b].p;
-        bool ok = true;
-        for (int p = layout.parent[b]; p != -1; ) {
-            if (p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
-            v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
-            p = layout.parent[p];
-        }
-        if (!ok || !Finite(v)) continue;
-        world[b] = v;
-        worldValid[b] = 1;
-    }
-
-    std::vector<BoneSegment> result;
-    result.reserve(layout.segments.size());
-    for (const auto& seg : layout.segments) {
-        if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
-        result.push_back({world[seg.first], world[seg.second]});
-    }
-    out = std::move(result);
-
-    if (localOut) {
-        for (int b = 0; b < count; ++b) {
-            if (!boneValid[b]) {
-                localOut[b].position = {};
-                localOut[b].rotation[0] = 0.f;
-                localOut[b].rotation[1] = 0.f;
-                localOut[b].rotation[2] = 0.f;
-                localOut[b].rotation[3] = 1.f;
-                localOut[b].scale = {1.f, 1.f, 1.f};
-                continue;
-            }
-            localOut[b].position = local[b].p;
-            localOut[b].rotation[0] = local[b].q.x;
-            localOut[b].rotation[1] = local[b].q.y;
-            localOut[b].rotation[2] = local[b].q.z;
-            localOut[b].rotation[3] = local[b].q.w;
-            localOut[b].scale = local[b].s;
-        }
-    }
-
-    if (points) {
-        auto anchorOk = [&](int idx) {
-            return idx >= 0 && idx < count && worldValid[idx] != 0;
-        };
-        points->valid = anchorOk(layout.head) || anchorOk(layout.neck) ||
-            anchorOk(layout.chest) || anchorOk(layout.pelvis);
-        if (points->valid) {
-            auto fill = [&](int idx, Vec& dst) {
-                if (anchorOk(idx)) dst = world[idx];
-            };
-            fill(layout.head, points->head);
-            fill(layout.neck, points->neck);
-            fill(layout.chest, points->chest);
-            fill(layout.pelvis, points->pelvis);
-            fill(layout.leftShoulder, points->leftShoulder);
-            fill(layout.leftElbow, points->leftElbow);
-            fill(layout.leftHand, points->leftHand);
-            fill(layout.rightShoulder, points->rightShoulder);
-            fill(layout.rightElbow, points->rightElbow);
-            fill(layout.rightHand, points->rightHand);
-            fill(layout.leftHip, points->leftHip);
-            fill(layout.leftKnee, points->leftKnee);
-            fill(layout.leftFoot, points->leftFoot);
-            fill(layout.rightHip, points->rightHip);
-            fill(layout.rightKnee, points->rightKnee);
-            fill(layout.rightFoot, points->rightFoot);
-        }
-    }
-    return true;
+    return BuildPoseOutput(layout, local, out, points, localOut);
 }
 
 bool ProcessPoseData(const RigLayout& layout, const void* poseData,
@@ -637,7 +655,7 @@ bool ProcessPoseData(const RigLayout& layout, const void* poseData,
     BonePoints* points, BoneLocal* localOut)
 {
     const int count = layout.count;
-    if (count < 2 ||
+    if (!poseData || count < 2 ||
         layout.parent.size() != static_cast<std::size_t>(count) ||
         layout.selected.size() != static_cast<std::size_t>(count))
         return false;
@@ -646,92 +664,7 @@ bool ProcessPoseData(const RigLayout& layout, const void* poseData,
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::memcpy(local.data(), poseData, static_cast<std::size_t>(count) * sizeof(TRS));
-
-    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
-    for (int b = 0; b < count; ++b) {
-        auto& t = local[b];
-        const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
-        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
-            n < 0.5f || n > 1.5f)
-            continue;
-        const float inv = 1.0f/std::sqrt(n);
-        t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
-        boneValid[b] = 1;
-    }
-
-    std::vector<Vec> world(static_cast<std::size_t>(count));
-    std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
-    for (int b = 0; b < count; ++b) {
-        if (!boneValid[b]) continue;
-        Vec v = local[b].p;
-        bool ok = true;
-        for (int p = layout.parent[b]; p != -1; ) {
-            if (p < 0 || p >= count || !boneValid[p]) { ok = false; break; }
-            v = Add(local[p].p,Rotate(local[p].q,Mul(local[p].s,v)));
-            p = layout.parent[p];
-        }
-        if (!ok || !Finite(v)) continue;
-        world[b] = v;
-        worldValid[b] = 1;
-    }
-
-    std::vector<BoneSegment> result;
-    result.reserve(layout.segments.size());
-    for (const auto& seg : layout.segments) {
-        if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
-        result.push_back({world[seg.first], world[seg.second]});
-    }
-    out = std::move(result);
-
-    if (localOut) {
-        for (int b = 0; b < count; ++b) {
-            if (!boneValid[b]) {
-                localOut[b].position = {};
-                localOut[b].rotation[0] = 0.f;
-                localOut[b].rotation[1] = 0.f;
-                localOut[b].rotation[2] = 0.f;
-                localOut[b].rotation[3] = 1.f;
-                localOut[b].scale = {1.f, 1.f, 1.f};
-                continue;
-            }
-            localOut[b].position = local[b].p;
-            localOut[b].rotation[0] = local[b].q.x;
-            localOut[b].rotation[1] = local[b].q.y;
-            localOut[b].rotation[2] = local[b].q.z;
-            localOut[b].rotation[3] = local[b].q.w;
-            localOut[b].scale = local[b].s;
-        }
-    }
-
-    if (points) {
-        auto anchorOk = [&](int idx) {
-            return idx >= 0 && idx < count && worldValid[idx] != 0;
-        };
-        points->valid = anchorOk(layout.head) || anchorOk(layout.neck) ||
-            anchorOk(layout.chest) || anchorOk(layout.pelvis);
-        if (points->valid) {
-            auto fill = [&](int idx, Vec& dst) {
-                if (anchorOk(idx)) dst = world[idx];
-            };
-            fill(layout.head, points->head);
-            fill(layout.neck, points->neck);
-            fill(layout.chest, points->chest);
-            fill(layout.pelvis, points->pelvis);
-            fill(layout.leftShoulder, points->leftShoulder);
-            fill(layout.leftElbow, points->leftElbow);
-            fill(layout.leftHand, points->leftHand);
-            fill(layout.rightShoulder, points->rightShoulder);
-            fill(layout.rightElbow, points->rightElbow);
-            fill(layout.rightHand, points->rightHand);
-            fill(layout.leftHip, points->leftHip);
-            fill(layout.leftKnee, points->leftKnee);
-            fill(layout.leftFoot, points->leftFoot);
-            fill(layout.rightHip, points->rightHip);
-            fill(layout.rightKnee, points->rightKnee);
-            fill(layout.rightFoot, points->rightFoot);
-        }
-    }
-    return true;
+    return BuildPoseOutput(layout, local, out, points, localOut);
 }
 
 std::vector<BoneSegment> BuildFromView(U view, const Read& read)
@@ -841,50 +774,18 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     Snapshot m{read,{}};
     if (!m.is(view, "BattleCharacterEntityView")) return false;
 
-    U native = m.ptr(view, 0x10), hierarchy = m.ptr(native, 0x28);
-    if (native <= 0x10000 || hierarchy <= 0x10000) {
-        U movement = m.ptr(view, 0x20);
-        if (!m.isOneOf(movement, {"CharacterMovementView", "MovementView"})) return false;
-        U managed = m.ptr(movement, 0x20);
-        if (!m.is(managed, "Transform")) return false;
-        native = m.ptr(managed, 0x10);
-        hierarchy = m.ptr(native, 0x28);
-    }
-    if (native <= 0x10000 || hierarchy <= 0x10000) return false;
+    ResolvedHierarchy rh;
+    if (!ResolveViewHierarchy(m, view, rh)) return false;
 
-    U matrices = m.ptr(hierarchy, 0x18), parents = m.ptr(hierarchy, 0x20);
-    U pointers = m.ptr(hierarchy, 0x30);
-    std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) return false;
-
-    std::vector<TRS> local(count);
-    std::vector<std::int32_t> parent(count);
-    std::vector<U> transforms(count);
-    if (!m.array(matrices, local, false) || !m.array(parents, parent, true) ||
-        !m.array(pointers, transforms, true))
-        return false;
-    std::vector<unsigned char> reachable(count, 0);
-    for (int b = 0; b < count; ++b) {
-        bool ok = true;
-        int p = b, steps = 0;
-        while (p != -1 && steps < count) {
-            if (p < -1 || p >= count) { ok = false; break; }
-            p = parent[p]; ++steps;
-        }
-        if (p != -1) ok = false;
-        if (ok) reachable[b] = 1;
-    }
-
-    int root = -1;
-    for (int b = 0; b < count; ++b)
-        if (reachable[b] && transforms[b] == native) { root = b; break; }
-    if (root < 0) return false;
-
-    auto ancestor = [&](int a, int b) {
-        for (int steps = 0; b != -1 && b >= 0 && b < count && steps < count; b = parent[b], ++steps)
-            if (a == b) return true;
-        return false;
-    };
+    const U native = rh.native;
+    const U hierarchy = rh.hierarchy;
+    const U matrices = rh.matrices;
+    const std::int32_t count = rh.count;
+    const int root = rh.root;
+    std::vector<std::int32_t>& parent = rh.parent;
+    const std::vector<U>& transforms = rh.transforms;
+    const std::vector<unsigned char>& reachable = rh.reachable;
+    auto ancestor = [&](int a, int b) { return rh.isAncestor(a, b); };
 
     // Read each transform's GameObject name via native Transform -> GameObject(0x30) -> name(0x48)
     // Unity native name is a char* at GameObject+0x48, length at +0x40 (or just read until null).
@@ -895,13 +796,24 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
         U gameObject = 0;
         if (!read(transforms[b] + 0x30, &gameObject, sizeof(gameObject)) || gameObject <= 0x10000)
             continue;
-        U namePtr = 0;
-        if (!read(gameObject + 0x48, &namePtr, sizeof(namePtr)) || namePtr <= 0x10000)
-            continue;
         char buf[64]{};
-        if (!read(namePtr, buf, sizeof(buf) - 1)) continue;
-        buf[63] = '\0';
-        if (buf[0] == '\0') continue;
+        auto tryNameOffset = [&](U off) -> bool {
+            U namePtr = 0;
+            if (!read(gameObject + off, &namePtr, sizeof(namePtr)) || namePtr <= 0x10000)
+                return false;
+            std::memset(buf, 0, sizeof(buf));
+            if (!read(namePtr, buf, sizeof(buf) - 1))
+                return false;
+            buf[63] = '\0';
+            int len = 0;
+            for (; len < 63 && buf[len]; ++len) {
+                const unsigned char ch = static_cast<unsigned char>(buf[len]);
+                if (ch < 0x20 || ch > 0x7E) return false;
+            }
+            return len >= 2;
+        };
+        if (!tryNameOffset(0x60) && !tryNameOffset(0x48))
+            continue;
         namedBones.push_back({b, std::string(buf)});
     }
 
@@ -996,6 +908,96 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
             out.segments.push_back({p, b});
     }
     return !out.segments.empty();
+}
+
+bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
+{
+    out = RigTarget{};
+    if (!read || view <= 0x10000) return false;
+    Snapshot m{read,{}};
+
+    // Documented chain: the entity view exposes the movement view, and the
+    // CharacterMovementView exposes the managed root Transform through
+    // _transform(). The native Unity object is what owns the transform
+    // hierarchy, so both hops are needed.
+    U movement = m.ptr(view, 0x20);
+    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+
+    // Some rigs expose the same native transform straight off the view; keep
+    // that as a fallback rather than rejecting the character.
+    if (native <= 0x10000) native = m.ptr(view, 0x10);
+    if (native <= 0x10000) return false;
+
+    U hierarchy = m.ptr(native, 0x28);
+    U matrices = m.ptr(hierarchy, 0x18);
+    std::int32_t count = 0;
+    if (hierarchy <= 0x10000 || matrices <= 0x10000 ||
+        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
+        return false;
+
+    out.view = view;
+    out.movementView = movement;
+    out.managedTransform = managed;
+    out.nativeTransform = native;
+    out.hierarchy = hierarchy;
+    out.matrices = matrices;
+    out.count = count;
+    return true;
+}
+
+bool RootWorldPosition(U view, const Read& read, Vec& out)
+{
+    out = {};
+    if (!read || view <= 0x10000) return false;
+    Snapshot m{read,{}};
+
+    // Same chain as BuildLayoutFromView: the view exposes the movement view,
+    // which exposes the managed root Transform, which owns the native object
+    // and its transform hierarchy. The native object straight off the view is
+    // the fallback used by some characters.
+    U movement = m.ptr(view, 0x20);
+    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    if (native <= 0x10000) native = m.ptr(view, 0x10);
+    if (native <= 0x10000) return false;
+
+    U hierarchy = m.ptr(native, 0x28);
+    if (hierarchy <= 0x10000) return false;
+    U matrices = m.ptr(hierarchy, 0x18);
+    U parents = m.ptr(hierarchy, 0x20);
+    std::int32_t count = 0;
+    if (matrices <= 0x10000 || parents <= 0x10000 ||
+        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
+        return false;
+
+    // The root is the only node without a parent, so its local TRS is already
+    // the world transform. Everything below it is composed by SampleLayout.
+    std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
+    if (!m.array(parents, parent, false)) return false;
+    int root = -1;
+    for (int i = 0; i < count; ++i) {
+        if (parent[static_cast<std::size_t>(i)] == -1) { root = i; break; }
+    }
+    if (root < 0) return false;
+
+    TRS trs{};
+    if (!m.bytes(matrices + static_cast<U>(root) * sizeof(TRS), &trs, sizeof(TRS)))
+        return false;
+    if (!Finite(trs.p)) return false;
+    out = trs.p;
+    return true;
+}
+
+bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target)
+{
+    // The parent table and the matrix array belong to one hierarchy instance.
+    // A new native object, hierarchy, array pointer or bone count means the
+    // cached indices describe something that no longer exists.
+    return target.nativeTransform == layout.nativeTransform &&
+        target.hierarchy == layout.hierarchy &&
+        target.matrices == layout.matrices &&
+        target.count == layout.count;
 }
 
 } // namespace Skeleton

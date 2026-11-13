@@ -31,6 +31,15 @@ struct EntityData {
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
+    int weaponIndex = -1;
+    bool isFiring = false;
+    bool isReloading = false;
+    bool hasArmor = false;
+    bool isKnockedDown = false;
+    bool isKnockedOut = false;
+    bool isSurrendered = false;
+    bool isHandcuffed = false;
+    std::string reloadPhase;
     // Aggregated animator/cull state for this character. All skeleton segments
     // share it, so it doubles as the "visible bones only" aim gate. This is an
     // animator check, not wall occlusion.

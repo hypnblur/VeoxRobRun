@@ -51,7 +51,24 @@ struct State {
     int grenades = 0;
     int valuables = 0;
     int pointsOfInterest = 0;
+    std::uintptr_t worldPtr = 0;
 };
+
+struct ProbeField {
+    std::string name;
+    std::int32_t offset = 0;
+    std::uint8_t typeCode = 0;
+    std::int64_t rawValue = 0;
+};
+
+struct ProbeResult {
+    std::string dictName;
+    std::string className;
+    std::uintptr_t ptr = 0;
+    std::vector<ProbeField> fields;
+};
+
+std::vector<ProbeResult> ProbeMoneyModels(std::uintptr_t worldPtr);
 
 void Init(std::uintptr_t gameAssemblyBase);
 

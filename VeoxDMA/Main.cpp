@@ -7,6 +7,7 @@
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Esp/Radar.h"
+#include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
 #include "Input/InputManager.h"
 #include "UI/VeoxMenu.h"
@@ -125,6 +126,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	callbacks.init = [] {
 		VeoxMenu::Init();
 		Radar::Init();
+		WeaponSprites::Init();
 	};
 	callbacks.tick = [] {
 		TickOverlay();
@@ -148,6 +150,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	};
 	callbacks.shutdown = [] {
 		ConfigFile::Save();
+		WeaponSprites::Shutdown();
 		Radar::Shutdown();
 		Backdrop::Destroy();
 		StopAttachLoop();
