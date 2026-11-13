@@ -69,10 +69,13 @@ const ImVec4 kTransparent = ImVec4(0.f, 0.f, 0.f, 0.f);
 // runtime. ApplyPalette() resets them every frame.
 ImVec4 kBgTop = ImVec4(11 / 255.f, 9 / 255.f, 18 / 255.f, 1.f);
 ImVec4 kBgBottom = ImVec4(4 / 255.f, 4 / 255.f, 7 / 255.f, 1.f);
-ImVec4 kPanel = ImVec4(255 / 255.f, 255 / 255.f, 255 / 255.f, 0.028f);
 ImVec4 kCard = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
 ImVec4 kCardTop = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
 ImVec4 kPopup = ImVec4(12 / 255.f, 11 / 255.f, 18 / 255.f, 1.f);
+// The sidebar and its page buttons reuse the card surface, so the nav and the
+// page cards read as one continuous sheet (most visible in High Contrast).
+ImVec4 kNav = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
+ImVec4 kNavActive = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
 ImVec4 kStroke = ImVec4(1.f, 1.f, 1.f, 0.055f);
 ImVec4 kTrack = ImVec4(1.f, 1.f, 1.f, 0.075f);
 ImVec4 kText = ImVec4(236 / 255.f, 233 / 255.f, 247 / 255.f, 1.f);
@@ -88,7 +91,6 @@ void ApplyPalette()
 		// Flat, fully opaque surfaces: no gradient, no translucent panels.
 		kBgTop = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
 		kBgBottom = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
-		kPanel = ImVec4(21 / 255.f, 19 / 255.f, 31 / 255.f, 1.f);
 		kCard = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
 		kCardTop = ImVec4(38 / 255.f, 34 / 255.f, 53 / 255.f, 1.f);
 		kPopup = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
@@ -102,7 +104,6 @@ void ApplyPalette()
 	{
 		kBgTop = ImVec4(11 / 255.f, 9 / 255.f, 18 / 255.f, 1.f);
 		kBgBottom = ImVec4(4 / 255.f, 4 / 255.f, 7 / 255.f, 1.f);
-		kPanel = ImVec4(255 / 255.f, 255 / 255.f, 255 / 255.f, 0.028f);
 		kCard = ImVec4(13 / 255.f, 12 / 255.f, 19 / 255.f, 0.94f);
 		kCardTop = ImVec4(18 / 255.f, 16 / 255.f, 26 / 255.f, 1.f);
 		kPopup = ImVec4(12 / 255.f, 11 / 255.f, 18 / 255.f, 1.f);
@@ -112,6 +113,11 @@ void ApplyPalette()
 		kTextDim = ImVec4(140 / 255.f, 135 / 255.f, 166 / 255.f, 1.f);
 		kTextFaint = ImVec4(92 / 255.f, 88 / 255.f, 114 / 255.f, 1.f);
 	}
+
+	// Sidebar always shares the card surface; the active page button takes the
+	// card header tone so it looks like the top of the page it opens.
+	kNav = kCard;
+	kNavActive = kCardTop;
 }
 
 // ---- state ----------------------------------------------------------------
@@ -369,6 +375,95 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false)
 	return pressed;
 }
 
+// Quick-pick colours shown above the picker. The picker below still allows
+// any colour; these just save a trip around the wheel for the usual choices.
+const ImVec4 kColourPresets[] = {
+	ImVec4(1.00f, 1.00f, 1.00f, 1.f), ImVec4(1.00f, 0.18f, 0.18f, 1.f),
+	ImVec4(0.20f, 0.95f, 0.35f, 1.f), ImVec4(0.20f, 0.80f, 1.00f, 1.f),
+	ImVec4(1.00f, 0.82f, 0.15f, 1.f), ImVec4(0.70f, 0.35f, 1.00f, 1.f),
+	ImVec4(1.00f, 0.50f, 0.15f, 1.f), ImVec4(1.00f, 0.30f, 0.70f, 1.f),
+	ImVec4(0.35f, 1.00f, 0.85f, 1.f), ImVec4(0.45f, 0.55f, 1.00f, 1.f),
+	ImVec4(0.60f, 0.60f, 0.65f, 1.f), ImVec4(0.08f, 0.07f, 0.11f, 1.f),
+};
+
+// Colour panel opened by a swatch: preset row on top, full picker below.
+// The panel is anchored beside the row instead of spawning at the mouse, so
+// it stays on screen when the menu sits against a monitor edge.
+void DrawColourPopup(const char* popupId, const char* title,
+	D2D1::ColorF& colour, const ImRect& anchor)
+{
+	const ImGuiIO& io = ImGui::GetIO();
+	constexpr float panelW = 236.f;
+	constexpr float panelH = 340.f; // estimate, only used to clamp on screen
+
+	ImVec2 pos(anchor.Max.x + 10.f, anchor.Min.y - 8.f);
+	if (pos.x + panelW + 8.f > io.DisplaySize.x)
+		pos.x = anchor.Min.x - panelW - 10.f;
+	pos.x = ImClamp(pos.x, 8.f, ImMax(io.DisplaySize.x - panelW - 8.f, 8.f));
+	pos.y = ImClamp(pos.y, 8.f, ImMax(io.DisplaySize.y - panelH - 8.f, 8.f));
+
+	ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(panelW, 0.f), ImGuiCond_Always);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f, 12.f));
+	ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.f, 8.f));
+	if (ImGui::BeginPopup(popupId))
+	{
+		ImGui::PushFont(font::inter_bold);
+		ImGui::PushStyleColor(ImGuiCol_Text, kText);
+		ImGui::TextUnformatted(title);
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+
+		const ImVec2 linePos = ImGui::GetCursorScreenPos();
+		ImGui::Dummy(ImVec2(0.f, 1.f));
+		ImGui::GetWindowDrawList()->AddRectFilled(linePos,
+			ImVec2(linePos.x + ImGui::GetContentRegionAvail().x, linePos.y + 1.f),
+			C(kAccent, 0.40f));
+
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		constexpr int kCols = 6;
+		constexpr float kGap = 6.f;
+		const float avail = ImGui::GetContentRegionAvail().x;
+		const float sw = (avail - kGap * (kCols - 1)) / kCols;
+		constexpr float sh = 16.f;
+		const int count = (int)(sizeof(kColourPresets) / sizeof(kColourPresets[0]));
+
+		for (int i = 0; i < count; ++i)
+		{
+			if (i % kCols) ImGui::SameLine(0.f, kGap);
+			ImGui::PushID(i);
+			const ImVec2 q = ImGui::GetCursorScreenPos();
+			const bool hit = ImGui::InvisibleButton("##preset", ImVec2(sw, sh));
+			const bool hov = ImGui::IsItemHovered();
+			const ImVec4& pc = kColourPresets[i];
+			const bool selected =
+				std::fabs(colour.r - pc.x) < 0.02f &&
+				std::fabs(colour.g - pc.y) < 0.02f &&
+				std::fabs(colour.b - pc.z) < 0.02f;
+
+			dl->AddRectFilled(q, q + ImVec2(sw, sh),
+				ImGui::GetColorU32(ImVec4(pc.x, pc.y, pc.z, 1.f)), 4.f);
+			dl->AddRect(q, q + ImVec2(sw, sh),
+				selected ? C(kAccentBright) : C(kStroke, hov ? 1.f : 0.7f),
+				4.f, 0, selected ? 2.f : 1.f);
+
+			if (hit)
+				colour = D2D1::ColorF(pc.x, pc.y, pc.z, colour.a);
+			ImGui::PopID();
+		}
+
+		float col[4] = { colour.r, colour.g, colour.b, colour.a };
+		ImGui::PushItemWidth(avail);
+		if (ImGui::ColorPicker4("##picker", col,
+			ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoSidePreview |
+			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueBar))
+			colour = D2D1::ColorF(col[0], col[1], col[2], col[3]);
+		ImGui::PopItemWidth();
+		ImGui::EndPopup();
+	}
+	ImGui::PopStyleVar(2);
+}
+
 bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
 {
 	if (!Match(label)) return false;
@@ -422,17 +517,7 @@ bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
 		C(ImVec4(colour.r, colour.g, colour.b, 1.f)), 4.f);
 	dl->AddRect(swatch.Min, swatch.Max, C(kStroke, shov ? 2.2f : 1.f), 4.f);
 
-	if (ImGui::BeginPopup(popup))
-	{
-		float col[4] = { colour.r, colour.g, colour.b, colour.a };
-		ImGui::PushItemWidth(220.f);
-		if (ImGui::ColorPicker4("##picker", col,
-			ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoSidePreview |
-			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel))
-			colour = D2D1::ColorF(col[0], col[1], col[2], col[3]);
-		ImGui::PopItemWidth();
-		ImGui::EndPopup();
-	}
+	DrawColourPopup(popup, label, colour, swatch);
 
 	return tpressed;
 }
@@ -465,17 +550,7 @@ bool ColorRow(const char* label, D2D1::ColorF& colour)
 		C(ImVec4(colour.r, colour.g, colour.b, 1.f)), 4.f);
 	dl->AddRect(swatch.Min, swatch.Max, C(kStroke, hov ? 2.2f : 1.f), 4.f);
 
-	if (ImGui::BeginPopup(popup))
-	{
-		float col[4] = { colour.r, colour.g, colour.b, colour.a };
-		ImGui::PushItemWidth(220.f);
-		if (ImGui::ColorPicker4("##picker", col,
-			ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoSidePreview |
-			ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel))
-			colour = D2D1::ColorF(col[0], col[1], col[2], col[3]);
-		ImGui::PopItemWidth();
-		ImGui::EndPopup();
-	}
+	DrawColourPopup(popup, label, colour, swatch);
 
 	return pressed;
 }
@@ -723,12 +798,15 @@ bool PageButton(int index, const char* label, ImTextureID icon, float width)
 	ImDrawList* dl = window->DrawList;
 	if (sel[index] > 0.01f)
 	{
-		dl->AddRectFilled(bb.Min, bb.Max, C(kAccent, 0.13f * sel[index]), 8.f);
+		// Fill with the card surface instead of an accent wash, so the selected
+		// page fuses with the cards it opens. The accent border and left bar
+		// still mark it as active.
+		dl->AddRectFilled(bb.Min, bb.Max, C(Mix(kNav, kNavActive, sel[index])), 8.f);
 		dl->AddRect(bb.Min, bb.Max, C(kAccent, 0.32f * sel[index]), 8.f);
 	}
 	else if (hover[index] > 0.01f)
 	{
-		dl->AddRectFilled(bb.Min, bb.Max, C(ImVec4(1, 1, 1, 1), 0.035f * hover[index]), 8.f);
+		dl->AddRectFilled(bb.Min, bb.Max, C(kNavActive, 0.55f * hover[index]), 8.f);
 	}
 
 	const float cy = (bb.Min.y + bb.Max.y) * 0.5f;
@@ -1855,7 +1933,7 @@ void Draw(bool attached, const std::string& statusText)
 		dl->AddLine(pos + ImVec2(kSide, kTop), pos + ImVec2(kW, kTop), C(kStroke), 1.f);
 
 		// sidebar panel (drawn before the top bar so the logo stays on top)
-		dl->AddRectFilled(pos, pos + ImVec2(kSide, kH), C(kPanel), 12.f, ImDrawFlags_RoundCornersLeft);
+		dl->AddRectFilled(pos, pos + ImVec2(kSide, kH), C(kNav), 12.f, ImDrawFlags_RoundCornersLeft);
 		dl->AddLine(pos + ImVec2(kSide, 0), pos + ImVec2(kSide, kH), C(kStroke), 1.f);
 
 		DrawTopBar(pos);
