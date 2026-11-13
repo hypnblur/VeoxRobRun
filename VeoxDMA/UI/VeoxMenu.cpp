@@ -89,10 +89,12 @@ void ApplyPalette()
 	if (g_highContrast)
 	{
 		// Flat, fully opaque surfaces: no gradient, no translucent panels.
-		kBgTop = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
-		kBgBottom = ImVec4(16 / 255.f, 14 / 255.f, 24 / 255.f, 1.f);
+		// The whole shell uses the card fill so every surface reads exactly
+		// like an OVERLAY card, even over a bright game scene.
 		kCard = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
 		kCardTop = ImVec4(38 / 255.f, 34 / 255.f, 53 / 255.f, 1.f);
+		kBgTop = kCard;
+		kBgBottom = kCard;
 		kPopup = ImVec4(27 / 255.f, 24 / 255.f, 37 / 255.f, 1.f);
 		kStroke = ImVec4(1.f, 1.f, 1.f, 0.20f);
 		kTrack = ImVec4(1.f, 1.f, 1.f, 0.24f);
@@ -1015,6 +1017,16 @@ void DrawVisuals()
 			ToggleRow("Primary Weapon", &ConfigInstance.Player.PrimaryWeapon);
 			ToggleRow("Secondary Weapon", &ConfigInstance.Player.SecondaryWeapon);
 			ColorToggleRow("Weapon Name", &ConfigInstance.Player.WeaponEsp, ConfigInstance.Player.WeaponColour);
+			ToggleRow("Weapon Sprite", &ConfigInstance.Player.WeaponSprite);
+			EndCard();
+		}
+
+		if (MatchAny({ "Firing", "Reloading", "Armor" }))
+		{
+			BeginCard("STATE INDICATORS", kCardW);
+			ColorToggleRow("Firing", &ConfigInstance.Player.ShowFiring, ConfigInstance.Player.FiringColour);
+			ColorToggleRow("Reloading", &ConfigInstance.Player.ShowReloading, ConfigInstance.Player.ReloadColour);
+			ColorToggleRow("Armor", &ConfigInstance.Player.ShowArmor, ConfigInstance.Player.ArmorColour);
 			EndCard();
 		}
 
