@@ -59,6 +59,13 @@ public:
 	bool NoRecoil = false;
 	bool NoSpread = false;
 
+	// --- Role filters ---------------------------------------------------
+	// Entity roles are resolved by name through reflection, so these match the
+	// ESP's labels exactly. Tick a box to ignore that role when picking a target.
+	bool ExpIgnorePolice = false;
+	bool ExpIgnoreCriminal = false;
+	bool ExpIgnoreCivilian = false;
+
 	json ToJson()
 	{
 		json j;
@@ -81,6 +88,9 @@ public:
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
 		j[ConfigName][LIT("NoSpread")] = NoSpread;
+		j[ConfigName][LIT("ExpIgnorePolice")] = ExpIgnorePolice;
+		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
+		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		return j;
 	}
 
@@ -126,5 +136,11 @@ public:
 			NoRecoil = j[ConfigName][LIT("NoRecoil")];
 		if (j[ConfigName].contains(LIT("NoSpread")))
 			NoSpread = j[ConfigName][LIT("NoSpread")];
+		if (j[ConfigName].contains(LIT("ExpIgnorePolice")))
+			ExpIgnorePolice = j[ConfigName][LIT("ExpIgnorePolice")];
+		if (j[ConfigName].contains(LIT("ExpIgnoreCriminal")))
+			ExpIgnoreCriminal = j[ConfigName][LIT("ExpIgnoreCriminal")];
+		if (j[ConfigName].contains(LIT("ExpIgnoreCivilian")))
+			ExpIgnoreCivilian = j[ConfigName][LIT("ExpIgnoreCivilian")];
 	}
 };

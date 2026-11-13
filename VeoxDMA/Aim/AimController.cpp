@@ -121,6 +121,19 @@ float Distance(const Vector3& a, const Vector3& b)
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// Role labels come from the reader's reflection pass. Mirror the ESP's id
+// fallbacks so the aim filter and the overlay never disagree about a target.
+bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+{
+    std::string role = ent.roleName;
+    if (role.empty() && ent.role == 1257638368) role = "Criminal";
+    if (role.empty() && ent.role == 6) role = "Hubber";
+    if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
+    if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
+    if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
+    return false;
+}
+
 Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
 {
     static const float heights[] = { 1.62f, 1.45f, 1.25f, 0.95f };
@@ -740,6 +753,7 @@ void Tick()
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
+        if (ShouldSkipByRole(ent, cfg)) continue;
         // Animator/cull gate: skip characters whose pose has frozen, which is
         // the closest read-only equivalent of "not visible". This is not wall
         // occlusion.

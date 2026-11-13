@@ -7,6 +7,17 @@
 #include <cfloat>
 #include <cmath>
 
+static std::string FormatCash(int amount)
+{
+	std::string s = std::to_string(amount);
+	int n = (int)s.length() - 3;
+	while (n > 0) {
+		s.insert(n, ",");
+		n -= 3;
+	}
+	return s;
+}
+
 static ImU32 D2DColorToImU32(const D2D1::ColorF& c)
 {
 	return IM_COL32(
@@ -175,7 +186,9 @@ void DrawWorldEntities()
 		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
 
 		std::string label = entity.label;
-		if (entity.kind == RobRunWorld::Kind::Container &&
+		if (entity.hasCashAmount) {
+			label += " | $" + FormatCash(entity.cashAmount);
+		} else if (entity.kind == RobRunWorld::Kind::Container &&
 			ConfigInstance.World.ShowEmpty && entity.hasEmptyFlag) {
 			label += entity.empty ? " [empty]" : " [loot]";
 		}

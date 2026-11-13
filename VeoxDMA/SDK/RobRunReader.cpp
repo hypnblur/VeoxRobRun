@@ -8,6 +8,7 @@
 #include "ConfigInstance.h"
 #include <atomic>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -146,6 +147,7 @@ struct DetailCacheEntry {
     bool inVehicle = false;
     int vehicleId = 0;
     int role = 0;
+    std::string roleName;
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
@@ -763,15 +765,182 @@ static void ReadHealth(std::uintptr_t characterModel, EntityData& entity)
         entity.criticalHealth = static_cast<float>(critical);
 }
 
+static std::string NormalizeRoleName(const std::string& raw)
+{
+    if (raw.empty()) return {};
+    std::string lower;
+    lower.reserve(raw.size());
+    for (unsigned char ch : raw) {
+        if (ch < 0x20 || ch > 0x7E) continue;
+        lower.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    if (lower.empty()) return {};
+
+    if (lower.find("crim") != std::string::npos ||
+        lower.find("rob") != std::string::npos ||
+        lower.find("thief") != std::string::npos ||
+        lower.find("bandit") != std::string::npos ||
+        lower.find("gang") != std::string::npos)
+        return "Criminal";
+    if (lower.find("polic") != std::string::npos ||
+        lower.find("cop") != std::string::npos ||
+        lower.find("officer") != std::string::npos ||
+        lower.find("swat") != std::string::npos ||
+        lower.find("guard") != std::string::npos ||
+        lower.find("sheriff") != std::string::npos)
+        return "Police Officer";
+    if (lower.find("civil") != std::string::npos ||
+        lower.find("citizen") != std::string::npos ||
+        lower.find("bystander") != std::string::npos ||
+        lower.find("npc") != std::string::npos)
+        return "Civilian";
+    if (lower.find("hub") != std::string::npos)
+        return "Hubber";
+
+    std::string clean;
+    for (unsigned char ch : raw) {
+        if (ch >= 0x20 && ch <= 0x7E) clean.push_back(static_cast<char>(ch));
+    }
+    return clean;
+}
+
+static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
+    std::string& outRoleName, int depth = 0)
+{
+    if (depth >= 4 || obj <= 0x10000 || obj >= 0x00007FFFFFFFFFFFull)
+        return false;
+
+    const std::uintptr_t klass = Il2Cpp::ClassOf(obj);
+    if (!klass) return false;
+    const std::string clsName = Il2Cpp::ClassNameOfClass(klass);
+    if (clsName.empty()) return false;
+
+    if (clsName == "String") {
+        std::wstring ws;
+        if (RobRunMemory::ReadString(obj, ws, 128) && !ws.empty()) {
+            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws));
+            if (!norm.empty()) {
+                outRoleName = norm;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    auto readIl2CppStringField = [&](std::uintptr_t offset, std::string& dst) -> bool {
+        const std::uintptr_t strObj = ReadPtr(obj + offset);
+        if (strObj <= 0x10000 || strObj >= 0x00007FFFFFFFFFFFull) return false;
+        if (!Il2Cpp::IsClass(strObj, "String")) return false;
+        std::wstring ws;
+        if (!RobRunMemory::ReadString(strObj, ws, 128) || ws.empty()) return false;
+        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws));
+        if (norm.empty()) return false;
+        dst = norm;
+        return true;
+    };
+
+    const auto fields = Il2Cpp::Fields(klass);
+    if (!fields.empty()) {
+        auto fieldMatches = [](const std::string& name, std::initializer_list<const char*> keys) {
+            std::string low;
+            low.reserve(name.size());
+            for (unsigned char ch : name) low.push_back(static_cast<char>(std::tolower(ch)));
+            for (const char* k : keys) {
+                if (low.find(k) != std::string::npos) return true;
+            }
+            return false;
+        };
+
+        for (const auto& f : fields) {
+            if (f.offset <= 0 || f.offset >= 0x400) continue;
+            if (f.typeCode == 0x0E ||
+                ((f.typeCode == 0x12 || f.typeCode == 0x1C) &&
+                 fieldMatches(f.name, {"name", "id", "title", "role"}))) {
+                if (readIl2CppStringField(static_cast<std::uintptr_t>(f.offset), outRoleName))
+                    return true;
+            }
+        }
+
+        for (const auto& f : fields) {
+            if (f.offset <= 0 || f.offset >= 0x400) continue;
+            if (f.typeCode == 0x12 || f.typeCode == 0x15 || f.typeCode == 0x1C) {
+                if (fieldMatches(f.name, {"value", "data", "desc", "role"})) {
+                    const std::uintptr_t child = ReadPtr(obj + static_cast<std::uintptr_t>(f.offset));
+                    if (ResolveRoleFromObject(child, outRoleId, outRoleName, depth + 1))
+                        return true;
+                }
+            }
+        }
+
+        for (const auto& f : fields) {
+            if (f.offset <= 0 || f.offset >= 0x400) continue;
+            if (readIl2CppStringField(static_cast<std::uintptr_t>(f.offset), outRoleName))
+                return true;
+        }
+
+        for (const auto& f : fields) {
+            if (f.offset <= 0 || f.offset >= 0x400) continue;
+            if (f.typeCode == 0x08 || f.typeCode == 0x09 || f.typeCode == 0x11) {
+                if (fieldMatches(f.name, {"value", "role", "type", "team", "index", "id"})) {
+                    const std::uintptr_t rawPtr = ReadPtr(obj + static_cast<std::uintptr_t>(f.offset));
+                    if (rawPtr > 0x10000 && rawPtr < 0x00007FFFFFFFFFFFull &&
+                        Il2Cpp::ClassOf(rawPtr) != 0)
+                        continue;
+                    const std::int32_t v = RobRunMemory::ReadInt32(obj + static_cast<std::uintptr_t>(f.offset));
+                    if (v >= 0 && v < 100000) {
+                        outRoleId = v;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    const std::uintptr_t inner = ReadPtr(obj + rr::ReferenceData::Value);
+    if (inner > 0x10000 && inner < 0x00007FFFFFFFFFFFull && Il2Cpp::ClassOf(inner) != 0) {
+        if (ResolveRoleFromObject(inner, outRoleId, outRoleName, depth + 1))
+            return true;
+    }
+    if (readIl2CppStringField(rr::Description::Name, outRoleName))
+        return true;
+
+    return false;
+}
+
+static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
+{
+    if (roleWrapper <= 0x10000) return;
+
+    int roleId = 0;
+    std::string roleName;
+    if (ResolveRoleFromObject(roleWrapper, roleId, roleName)) {
+        if (!roleName.empty()) entity.roleName = std::move(roleName);
+        if (roleId != 0) entity.role = roleId;
+        if (!entity.roleName.empty()) return;
+    }
+
+    const std::uintptr_t innerPtr = ReadPtr(roleWrapper + rr::ReferenceData::Value);
+    if (innerPtr > 0x10000 && Il2Cpp::ClassOf(innerPtr) != 0)
+        return;
+
+    std::int32_t role = 0;
+    if (Il2Cpp::ReadPrimitiveInt(roleWrapper, role)) {
+        if (role == 1257638368) {
+            entity.role = role;
+            entity.roleName = "Criminal";
+        } else if (role > 0 && role < 100000) {
+            entity.role = role;
+        }
+    }
+}
+
 static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity)
 {
     if (characterModel <= 0x10000) return;
 
     const std::uintptr_t roleWrapper = ReadPtr(
         characterModel + rr::BattleCharacterModel::PlayerRole);
-    std::int32_t role = 0;
-    if (Il2Cpp::ReadPrimitiveInt(roleWrapper, role))
-        entity.role = role;
+    ApplyRoleFromWrapper(roleWrapper, entity);
 
     const std::uintptr_t inVehicle = ReadPtr(
         characterModel + rr::BattleCharacterModel::InVehicle);
@@ -797,9 +966,7 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     const std::uintptr_t common = ReadPtr(data + rr::BattleData::Common);
     if (common <= 0x10000) return;
 
-    std::int32_t role = 0;
-    if (Il2Cpp::ReadPrimitiveInt(ReadPtr(common + rr::CommonModel::Role), role))
-        entity.role = role;
+    ApplyRoleFromWrapper(ReadPtr(common + rr::CommonModel::Role), entity);
 
     bool flag = false;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsFiring), flag))
@@ -1675,6 +1842,7 @@ static void UpdateInternal()
                 detail.hasArmor = scratch.hasArmor;
                 detail.isFiring = scratch.isFiring;
                 detail.role = scratch.role;
+                detail.roleName = std::move(scratch.roleName);
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
 
@@ -1696,6 +1864,7 @@ static void UpdateInternal()
             entity.isSprinting = detail.isSprinting;
             entity.isCrouching = detail.isCrouching;
             entity.role = detail.role;
+            entity.roleName = detail.roleName;
             entity.inVehicle = detail.inVehicle;
             entity.vehicleId = detail.vehicleId;
             entity.nickname = detail.nickname;
@@ -1940,7 +2109,7 @@ static void UpdateInternal()
     if (cachedLocalCharacter > 0x10000 &&
         (inventoryRefreshStamp == 0 || passNow - inventoryRefreshStamp >= 1000)) {
         auto state = std::make_shared<RobRunInventory::State>();
-        if (RobRunInventory::Read(cachedLocalCharacter, *state, readCatalog.load())) {
+        if (RobRunInventory::Read(cachedBattleModel, cachedLocalCharacter, *state, readCatalog.load())) {
             std::lock_guard<std::mutex> lock(g_worldMutex);
             g_inventoryState = std::move(state);
         }

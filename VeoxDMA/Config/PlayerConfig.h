@@ -36,6 +36,11 @@ public:
 	bool LookingAtYou = true;
 	bool LookingAlert = true;
 	bool ShowRole = true;
+	// Colour the role tag per role instead of using RoleColour.
+	bool ExpRoleColors = false;
+	// Compact overlay with coin/crypto balances and bag value, fed by the
+	// inventory worker.
+	bool ExpMoneyHud = true;
 	bool ShowFiring = true;
 	bool ShowReloading = true;
 	bool ShowArmor = true;
@@ -99,6 +104,8 @@ public:
         j[ConfigName][LIT("LookingAtYou")] = LookingAtYou;
         j[ConfigName][LIT("LookingAlert")] = LookingAlert;
         j[ConfigName][LIT("ShowRole")] = ShowRole;
+        j[ConfigName][LIT("ExpRoleColors")] = ExpRoleColors;
+        j[ConfigName][LIT("ExpMoneyHud")] = ExpMoneyHud;
         j[ConfigName][LIT("ShowFiring")] = ShowFiring;
         j[ConfigName][LIT("ShowReloading")] = ShowReloading;
         j[ConfigName][LIT("ShowArmor")] = ShowArmor;
@@ -156,6 +163,10 @@ public:
             LookingAlert = j[ConfigName][LIT("LookingAlert")];
         if (j[ConfigName].contains(LIT("ShowRole")))
             ShowRole = j[ConfigName][LIT("ShowRole")];
+        if (j[ConfigName].contains(LIT("ExpRoleColors")))
+            ExpRoleColors = j[ConfigName][LIT("ExpRoleColors")];
+        if (j[ConfigName].contains(LIT("ExpMoneyHud")))
+            ExpMoneyHud = j[ConfigName][LIT("ExpMoneyHud")];
         if (j[ConfigName].contains(LIT("ShowFiring")))
             ShowFiring = j[ConfigName][LIT("ShowFiring")];
         if (j[ConfigName].contains(LIT("ShowReloading")))

@@ -52,6 +52,33 @@ static float DistanceTo(const Vector3& a, const Vector3& b)
 	return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// Role ids are hashed enums, so the reader resolves a name through reflection.
+// These two ids are the ones seen in every dump and act as the fallback when
+// reflection could not walk the wrapper.
+static std::string ResolveRoleLabel(const RobRunReader::EntityData& ent,
+	ImU32 defaultCol, bool useRoleColors, ImU32& outCol)
+{
+	outCol = defaultCol;
+	std::string label = ent.roleName;
+	if (label.empty() && ent.role == 1257638368)
+		label = "Criminal";
+	if (label.empty() && ent.role == 6)
+		label = "Hubber";
+	if (label.empty() && ent.role > 0 && ent.role < 100000)
+		label = "Role:" + std::to_string(ent.role);
+	if (useRoleColors && !label.empty()) {
+		if (label == "Criminal")
+			outCol = IM_COL32(255, 85, 85, 255);
+		else if (label == "Police Officer")
+			outCol = IM_COL32(80, 175, 255, 255);
+		else if (label == "Civilian")
+			outCol = IM_COL32(100, 235, 130, 255);
+		else if (label == "Hubber")
+			outCol = IM_COL32(150, 175, 225, 255);
+	}
+	return label;
+}
+
 void DrawPlayers()
 {
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -298,12 +325,13 @@ void DrawPlayers()
 		if (ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
 		if (ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });
 		if (ent.isHandcuffed) stateSegs.push_back({ "[HC]", stateCol });
-		if (pcfg.ShowRole && ent.role != 0)
+		if (pcfg.ShowRole)
 		{
-			if (ent.role == 1257638368)
-				stateSegs.push_back({ "[ROB]", roleCol });
-			else
-				stateSegs.push_back({ "[Role:" + std::to_string(ent.role) + "]", roleCol });
+			ImU32 roleTextCol = roleCol;
+			const std::string roleLabel =
+				ResolveRoleLabel(ent, roleCol, pcfg.ExpRoleColors, roleTextCol);
+			if (!roleLabel.empty())
+				stateSegs.push_back({ "[" + roleLabel + "]", roleTextCol });
 		}
 		if (ent.inVehicle) stateSegs.push_back({ "[V]", stateCol });
 		else if (ent.isCrouching) stateSegs.push_back({ "[C]", stateCol });
@@ -379,5 +407,37 @@ void DrawPlayers()
 		ImGui::End();
 		ImGui::PopStyleVar(2);
 		ImGui::PopStyleColor(4);
+	}
+
+	// Wallet / bag value HUD. Values are read by the inventory worker once a
+	// second, so this window only formats the published state.
+	if (pcfg.ExpMoneyHud && snapshot->inventory && snapshot->inventory->valid)
+	{
+		const auto& inv = *snapshot->inventory;
+		ImGui::SetNextWindowPos(ImVec2(20.f, 106.f), ImGuiCond_FirstUseEver);
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 16, 26, 225));
+		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 200, 75, 190));
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.f, 8.f));
+
+		ImGui::Begin("##MoneyCountHud", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing |
+			ImGuiWindowFlags_NoNav);
+
+		ImGui::TextColored(ImVec4(1.0f, 0.84f, 0.30f, 1.0f), "COINS : $%d", inv.coins);
+		if (inv.cryptoCoins > 0)
+			ImGui::TextColored(ImVec4(0.45f, 0.88f, 1.0f, 1.0f), "CRYPTO : %d", inv.cryptoCoins);
+		ImGui::TextColored(ImVec4(0.60f, 0.96f, 0.65f, 0.95f),
+			"BAG VALUE : $%d (Cash $%d / Items $%d)",
+			inv.inventoryTotalValue, inv.inventoryCashValue, inv.inventoryItemsValue);
+		if (inv.equipValue > 0 || inv.vehicleTotalValue > 0)
+			ImGui::TextColored(ImVec4(0.75f, 0.82f, 0.92f, 0.90f),
+				"EQUIP : $%d  |  VEH : $%d", inv.equipValue, inv.vehicleTotalValue);
+
+		ImGui::End();
+		ImGui::PopStyleVar(3);
+		ImGui::PopStyleColor(2);
 	}
 }

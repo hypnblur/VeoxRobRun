@@ -69,6 +69,31 @@ bool ReadDefinition(std::uintptr_t definition, ItemDefinition& out)
     return out.index >= 0 || !out.id.empty();
 }
 
+std::int32_t ReadCoinsData(std::uintptr_t coinsByDataModel)
+{
+    if (coinsByDataModel <= 0x10000) return 0;
+    const std::uintptr_t dataObj = RobRunMemory::ReadPtr(
+        coinsByDataModel + rr::CoinsByDataModel::Data);
+    if (dataObj <= 0x10000) return 0;
+    return RobRunMemory::ReadInt32(dataObj + rr::CoinsByDataModel::Value);
+}
+
+std::wstring ReadItemIdFromModel(std::uintptr_t itemModel)
+{
+    std::wstring out;
+    if (itemModel <= 0x10000) return out;
+    const std::uintptr_t data = ReadFieldPtr(itemModel, "_data", rr::InventoryItemModel::Data);
+    if (data <= 0x10000) return out;
+    std::uintptr_t def = ReadFieldPtr(data, "_value", rr::ReferenceData::Value);
+    if (def <= 0x10000)
+        def = RobRunMemory::ReadPtr(data + rr::ReferenceData::Value);
+    if (def > 0x10000) {
+        RobRunMemory::ReadString(
+            RobRunMemory::ReadPtr(def + rr::InventoryItemDescription::Id), out);
+    }
+    return out;
+}
+
 std::uintptr_t ReadBackpackDefinition(std::uintptr_t inventory)
 {
     const std::uintptr_t equip = RobRunMemory::ReadPtr(inventory + rr::CharacterInventoryModel::Backpack);
@@ -103,7 +128,8 @@ std::uintptr_t ReadBackpackDefinition(std::uintptr_t inventory)
 
 } // namespace
 
-bool Read(std::uintptr_t localCharacterModel, State& out, bool readCatalog)
+bool Read(std::uintptr_t battleModel, std::uintptr_t localCharacterModel,
+    State& out, bool readCatalog)
 {
     out = State{};
     if (localCharacterModel <= 0x10000) return false;
@@ -174,6 +200,101 @@ bool Read(std::uintptr_t localCharacterModel, State& out, bool readCatalog)
             }
         }
     }
+
+    static std::vector<ItemDefinition> s_cachedCatalog;
+    if (readCatalog && s_cachedCatalog.empty())
+        ReadCatalog(s_cachedCatalog);
+
+    if (battleModel > 0x10000) {
+        out.coins = ReadCoinsData(RobRunMemory::ReadPtr(battleModel + rr::BattleModel::CoinsModel));
+        out.cryptoCoins = ReadCoinsData(RobRunMemory::ReadPtr(battleModel + rr::BattleModel::CryptoCoinsModel));
+    }
+
+    const std::uintptr_t costModel = RobRunMemory::ReadPtr(
+        localCharacterModel + rr::BattleCharacterModel::RobberInventoryCost);
+    if (costModel > 0x10000) {
+        out.inventoryTotalValue = RobRunMemory::ReadInt32(costModel + rr::RobberInventoryCostModel::CharacterInventory);
+        out.vehicleTotalValue   = RobRunMemory::ReadInt32(costModel + rr::RobberInventoryCostModel::VehicleInventory);
+        out.equipValue          = RobRunMemory::ReadInt32(costModel + rr::RobberInventoryCostModel::CharacterEquip);
+        out.inventoryCashValue  = RobRunMemory::ReadInt32(costModel + rr::RobberInventoryCostModel::CharacterInventoryCash);
+        out.inventoryItemsValue = RobRunMemory::ReadInt32(costModel + rr::RobberInventoryCostModel::CharacterInventoryItems);
+    }
+
+    const std::uintptr_t armorModel = RobRunMemory::ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::InitArmorModel);
+    if (armorModel > 0x10000) {
+        bool hasArmor = false;
+        Il2Cpp::ReadPrimitiveBool(RobRunMemory::ReadPtr(armorModel + rr::InitArmorModel::HasArmor), hasArmor);
+        out.hasArmor = hasArmor;
+        const std::uintptr_t amtObj = RobRunMemory::ReadPtr(armorModel + rr::InitArmorModel::Amount);
+        if (amtObj > 0x10000)
+            out.armorAmount = RobRunMemory::ReadInt32(amtObj + 0x18);
+    }
+    const std::uintptr_t staminaModel = RobRunMemory::ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::Stamina);
+    if (staminaModel > 0x10000) {
+        const std::uintptr_t amtObj = RobRunMemory::ReadPtr(staminaModel + rr::StaminaModel::Amount);
+        if (amtObj > 0x10000)
+            out.staminaAmount = RobRunMemory::ReadInt32(amtObj + 0x18);
+    }
+
+    const std::uintptr_t equipModel = RobRunMemory::ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::EquipSlots);
+    if (equipModel > 0x10000) {
+        const std::uintptr_t dict = RobRunMemory::ReadPtr(equipModel + rr::EquipSlotsModel::Models);
+        std::vector<RobRunMemory::RefDictEntry> entries;
+        if (RobRunMemory::ReadDictRef(dict, entries, false)) {
+            for (const auto& entry : entries) {
+                if (entry.key <= 0x10000 || entry.value <= 0x10000) continue;
+                EquipEntry eq{};
+                std::wstring slotW;
+                RobRunMemory::ReadString(
+                    RobRunMemory::ReadPtr(entry.key + rr::EquipSlotsModel::SlotDescriptionId), slotW);
+                eq.slot = RobRunMemory::WideToUtf8(slotW);
+                eq.itemId = ReadItemIdFromModel(RobRunMemory::ReadPtr(entry.value + rr::EquipSlotsModel::ItemModel));
+                const std::uintptr_t durModel = RobRunMemory::ReadPtr(entry.value + rr::EquipSlotsModel::DurabilityModel);
+                if (durModel > 0x10000) {
+                    const std::uintptr_t durData = RobRunMemory::ReadPtr(durModel + 0x10);
+                    if (durData > 0x10000)
+                        eq.durability = RobRunMemory::ReadInt32(durData + 0x18);
+                }
+                if (!eq.slot.empty() || !eq.itemId.empty())
+                    out.equipSlots.push_back(std::move(eq));
+            }
+        }
+    }
+
+    const std::uintptr_t pocketsModel = RobRunMemory::ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::Pockets);
+    if (pocketsModel > 0x10000) {
+        const std::uintptr_t slotsWrapper = RobRunMemory::ReadPtr(pocketsModel + rr::PocketsModel::Slots);
+        const std::uintptr_t dict = slotsWrapper > 0x10000
+            ? RobRunMemory::ReadPtr(slotsWrapper + rr::PocketsModel::Models)
+            : 0;
+        std::vector<RobRunMemory::RefDictEntry> entries;
+        if (RobRunMemory::ReadDictRef(dict, entries, false)) {
+            for (const auto& entry : entries) {
+                if (entry.key <= 0x10000 || entry.value <= 0x10000) continue;
+                PocketEntry pk{};
+                std::wstring slotW;
+                RobRunMemory::ReadString(
+                    RobRunMemory::ReadPtr(entry.key + rr::EquipSlotsModel::SlotDescriptionId), slotW);
+                pk.slot = RobRunMemory::WideToUtf8(slotW);
+                pk.itemId = ReadItemIdFromModel(RobRunMemory::ReadPtr(entry.value + rr::PocketsModel::ItemModel));
+                const std::uintptr_t stModel = RobRunMemory::ReadPtr(entry.value + rr::PocketsModel::StackModel);
+                if (stModel > 0x10000) {
+                    const std::uintptr_t stData = RobRunMemory::ReadPtr(stModel + 0x10);
+                    if (stData > 0x10000)
+                        pk.stack = RobRunMemory::ReadInt32(stData + 0x18);
+                }
+                if (!pk.itemId.empty() || pk.stack > 0)
+                    out.pockets.push_back(std::move(pk));
+            }
+        }
+    }
+
+    if (!s_cachedCatalog.empty())
+        out.catalog = s_cachedCatalog;
 
     if (readCatalog)
         ReadCatalog(out.catalog);

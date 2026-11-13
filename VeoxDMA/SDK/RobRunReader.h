@@ -27,6 +27,10 @@ struct EntityData {
     bool inVehicle = false;
     int vehicleId = 0;
     int role = 0;
+    // Role name resolved through reflection ("Criminal", "Police Officer",
+    // "Civilian", "Hubber"). Stored as text because the game's role ids are
+    // hashed enums, not small indices.
+    std::string roleName;
     float criticalHealth = -1.f;
     std::wstring nickname;
     std::wstring clanTag;

@@ -959,12 +959,16 @@ void DrawVisuals()
 			EndCard();
 		}
 
-		if (MatchAny({ "Looking At You", "Looking Alert", "Show Role" }))
+		if (MatchAny({ "Looking At You", "Looking Alert", "Show Role", "Color-code by role",
+			"Money & Value HUD" }))
 		{
 			BeginCard("PLAYER FLAGS", kCardW);
 			ColorToggleRow("Looking At You", &ConfigInstance.Player.LookingAtYou, ConfigInstance.Player.LookingColour);
 			ToggleRow("Looking Alert", &ConfigInstance.Player.LookingAlert);
 			ColorToggleRow("Show Role", &ConfigInstance.Player.ShowRole, ConfigInstance.Player.RoleColour);
+			if (ConfigInstance.Player.ShowRole)
+				ToggleRow("Color-code by role", &ConfigInstance.Player.ExpRoleColors);
+			ToggleRow("Money & Value HUD", &ConfigInstance.Player.ExpMoneyHud);
 			EndCard();
 		}
 
@@ -1250,6 +1254,9 @@ void DrawAim()
 
 		BeginCard("AIM VISUALS", kCardW);
 		ToggleRow("Visible Bones Only", &ConfigInstance.Aim.VisibleBonesOnly);
+		ToggleRow("Skip Police Officer targets", &ConfigInstance.Aim.ExpIgnorePolice);
+		ToggleRow("Skip Criminal targets", &ConfigInstance.Aim.ExpIgnoreCriminal);
+		ToggleRow("Skip Civilian targets", &ConfigInstance.Aim.ExpIgnoreCivilian);
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
 		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();

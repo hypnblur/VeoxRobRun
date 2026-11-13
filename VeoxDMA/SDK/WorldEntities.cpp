@@ -364,11 +364,60 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 rr::ShelvingModel::DescriptionPosition, position);
         }, out, out.containers);
 
-    AddDictionary(world, rr::WorldEntitiesModel::CollectionTables, Kind::CollectionTable,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::CollectionTableModel::DescriptionModel,
-                rr::CollectionTableModel::DescriptionPosition, position);
-        }, out, out.containers);
+    // CollectionTables — inline loop to read cash reward
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::CollectionTables, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
+
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(
+                    model + rr::CollectionTableModel::DescriptionModel);
+                if (desc <= 0x10000) continue;
+
+                Vector3 position{};
+                if (!RobRunMemory::ReadVector3(desc + rr::CollectionTableModel::Position, position) ||
+                    !ValidPosition(position))
+                    continue;
+
+                int cashAmount = 0;
+                bool hasCash = false;
+                const std::uintptr_t rewardModel = RobRunMemory::ReadPtr(
+                    model + rr::CollectionTableModel::RewardModel);
+                if (rewardModel > 0x10000) {
+                    const std::uintptr_t data = RobRunMemory::ReadPtr(rewardModel + 0x10);
+                    if (data > 0x10000) {
+                        for (std::uintptr_t off : { (std::uintptr_t)0x18, (std::uintptr_t)0x20,
+                                                     (std::uintptr_t)0x28, (std::uintptr_t)0x10 }) {
+                            const std::uintptr_t child = RobRunMemory::ReadPtr(data + off);
+                            if (child > 0x10000) {
+                                int val = RobRunMemory::ReadInt32(child + rr::CashAmountData::Value);
+                                if (val > 0 && val < 100000000) {
+                                    cashAmount = val; hasCash = true; break;
+                                }
+                            }
+                            int directVal = RobRunMemory::ReadInt32(data + off);
+                            if (directVal > 0 && directVal < 100000000) {
+                                cashAmount = directVal; hasCash = true; break;
+                            }
+                        }
+                    }
+                }
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::CollectionTable;
+                entity.position = position;
+                entity.cashAmount = cashAmount;
+                entity.hasCashAmount = hasCash;
+                entity.label = "Collection Table";
+                out.entities.push_back(std::move(entity));
+                ++out.containers;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
 
     AddDictionary(world, rr::WorldEntitiesModel::PlotContainers, Kind::PlotContainer,
         [](std::uintptr_t model, Vector3& position) {
@@ -413,24 +462,156 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadInlineField(model, rr::BuildingLootModel::Position, position);
         }, out, out.loots);
 
-    // --- New dump: valuables ------------------------------------------
-    AddDictionary(world, rr::WorldEntitiesModel::CashLootNodes, Kind::CashLootNode,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::CashLootNodeModel::Description,
-                rr::CashLootNodeModel::DescriptionPosition, position);
-        }, out, out.valuables);
+    // --- Valuables with cash amounts ------------------------------------
+    // CashLootNodes
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::CashLootNodes, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
 
-    AddDictionary(world, rr::WorldEntitiesModel::SettlementCash, Kind::SettlementCash,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::SettlementCashModel::Description,
-                rr::SettlementCashModel::DescriptionPosition, position);
-        }, out, out.valuables);
+                Vector3 position{};
+                if (!ReadDescriptionPosition(model, rr::CashLootNodeModel::Description,
+                    rr::CashLootNodeModel::DescriptionPosition, position))
+                    continue;
 
-    AddDictionary(world, rr::WorldEntitiesModel::MoneyWorkbenches, Kind::MoneyWorkbench,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::MoneyWorkbenchModel::DescriptionModel,
-                rr::MoneyWorkbenchModel::DescriptionPosition, position);
-        }, out, out.valuables);
+                int cashAmount = 0;
+                bool hasCash = false;
+                const std::uintptr_t cashData = RobRunMemory::ReadPtr(
+                    model + rr::CashLootNodeModel::CashAmountData);
+                if (cashData > 0x10000) {
+                    cashAmount = RobRunMemory::ReadInt32(cashData + rr::CashAmountData::Value);
+                    hasCash = true;
+                }
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::CashLootNode;
+                entity.position = position;
+                entity.cashAmount = cashAmount;
+                entity.hasCashAmount = hasCash;
+                entity.label = "Cash Node";
+                out.entities.push_back(std::move(entity));
+                ++out.valuables;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
+
+    // SettlementCash — splits into cash/tax/conquest sub-entities
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::SettlementCash, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
+
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(
+                    model + rr::SettlementCashModel::Description);
+                if (desc <= 0x10000) continue;
+
+                const std::int32_t cashId = RobRunMemory::ReadInt32(desc + rr::SettlementCashModel::EntityId);
+                const std::int32_t taxId = RobRunMemory::ReadInt32(desc + rr::SettlementCashModel::TaxEntityId);
+
+                const std::uintptr_t data = RobRunMemory::ReadPtr(
+                    model + rr::SettlementCashModel::Data);
+
+                Vector3 position{};
+                std::string label;
+                int cashAmount = 0;
+                bool hasCash = false;
+
+                if (entry.key == cashId) {
+                    if (!RobRunMemory::ReadVector3(desc + rr::SettlementCashModel::CashPoint, position) ||
+                        !ValidPosition(position))
+                        continue;
+                    label = "Settlement Cash";
+                    if (data > 0x10000) {
+                        const std::uintptr_t amountObj = RobRunMemory::ReadPtr(
+                            data + rr::SettlementCashPublicData::CashAmount);
+                        if (amountObj > 0x10000) {
+                            cashAmount = RobRunMemory::ReadInt32(amountObj + rr::CashAmountData::Value);
+                            hasCash = true;
+                        }
+                    }
+                } else if (entry.key == taxId) {
+                    if (!RobRunMemory::ReadVector3(desc + rr::SettlementCashModel::TaxPoint, position) ||
+                        !ValidPosition(position))
+                        continue;
+                    label = "Settlement Tax";
+                    if (data > 0x10000) {
+                        const std::uintptr_t amountObj = RobRunMemory::ReadPtr(
+                            data + rr::SettlementCashPublicData::TaxCashAmount);
+                        if (amountObj > 0x10000) {
+                            cashAmount = RobRunMemory::ReadInt32(amountObj + rr::CashAmountData::Value);
+                            hasCash = true;
+                        }
+                    }
+                } else {
+                    if (!ReadDescriptionPosition(model, rr::SettlementCashModel::Description,
+                        rr::SettlementCashModel::DescriptionPosition, position))
+                        continue;
+                    label = "Settlement Cash";
+                }
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::SettlementCash;
+                entity.position = position;
+                entity.cashAmount = cashAmount;
+                entity.hasCashAmount = hasCash;
+                entity.label = std::move(label);
+                out.entities.push_back(std::move(entity));
+                ++out.valuables;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
+
+    // MoneyWorkbenches — clean + dirty amounts
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::MoneyWorkbenches, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
+
+                Vector3 position{};
+                if (!ReadDescriptionPosition(model, rr::MoneyWorkbenchModel::DescriptionModel,
+                    rr::MoneyWorkbenchModel::DescriptionPosition, position))
+                    continue;
+
+                int cashAmount = 0;
+                bool hasCash = false;
+                const std::uintptr_t data = RobRunMemory::ReadPtr(
+                    model + rr::MoneyWorkbenchModel::Data);
+                if (data > 0x10000) {
+                    const std::uintptr_t cleanObj = RobRunMemory::ReadPtr(
+                        data + rr::MoneyWorkbenchData::CleanAmount);
+                    const std::uintptr_t dirtyObj = RobRunMemory::ReadPtr(
+                        data + rr::MoneyWorkbenchData::DirtyAmount);
+                    int cleanVal = (cleanObj > 0x10000)
+                        ? RobRunMemory::ReadInt32(cleanObj + rr::CashAmountData::Value) : 0;
+                    int dirtyVal = (dirtyObj > 0x10000)
+                        ? RobRunMemory::ReadInt32(dirtyObj + rr::CashAmountData::Value) : 0;
+                    cashAmount = cleanVal + dirtyVal;
+                    hasCash = true;
+                }
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::MoneyWorkbench;
+                entity.position = position;
+                entity.cashAmount = cashAmount;
+                entity.hasCashAmount = hasCash;
+                entity.label = "Money Table";
+                out.entities.push_back(std::move(entity));
+                ++out.valuables;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
 
     // --- New dump: points of interest ----------------------------------
     AddDictionary(world, rr::WorldEntitiesModel::PointOfInterest, Kind::PointOfInterest,

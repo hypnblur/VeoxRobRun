@@ -40,6 +40,8 @@ struct Entity {
     bool hasEmptyFlag = false;
     bool empty = false;
     std::string label;
+    int cashAmount = 0;
+    bool hasCashAmount = false;
 };
 
 struct State {
