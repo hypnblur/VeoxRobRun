@@ -125,6 +125,49 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     return true;
 }
 
+bool RootWorldPosition(U view, const Read& read, Vec& out)
+{
+    out = {};
+    if (!read || view <= 0x10000) return false;
+    Snapshot m{read,{}};
+
+    // Same chain as BuildLayoutFromView: the view exposes the movement view,
+    // which exposes the managed root Transform, which owns the native object
+    // and its transform hierarchy. The native object straight off the view is
+    // the fallback used by some characters.
+    U movement = m.ptr(view, 0x20);
+    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+    if (native <= 0x10000) native = m.ptr(view, 0x10);
+    if (native <= 0x10000) return false;
+
+    U hierarchy = m.ptr(native, 0x28);
+    if (hierarchy <= 0x10000) return false;
+    U matrices = m.ptr(hierarchy, 0x18);
+    U parents = m.ptr(hierarchy, 0x20);
+    std::int32_t count = 0;
+    if (matrices <= 0x10000 || parents <= 0x10000 ||
+        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
+        return false;
+
+    // The root is the only node without a parent, so its local TRS is already
+    // the world transform. Everything below it is composed by SampleLayout.
+    std::vector<std::int32_t> parent(static_cast<std::size_t>(count));
+    if (!m.array(parents, parent, false)) return false;
+    int root = -1;
+    for (int i = 0; i < count; ++i) {
+        if (parent[static_cast<std::size_t>(i)] == -1) { root = i; break; }
+    }
+    if (root < 0) return false;
+
+    TRS trs{};
+    if (!m.bytes(matrices + static_cast<U>(root) * sizeof(TRS), &trs, sizeof(TRS)))
+        return false;
+    if (!Finite(trs.p)) return false;
+    out = trs.p;
+    return true;
+}
+
 bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target)
 {
     // The parent table and the matrix array belong to one hierarchy instance.

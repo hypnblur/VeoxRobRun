@@ -7,6 +7,7 @@
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -47,6 +48,7 @@ static bool lastSessionValid = false;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedSlots;
 static std::uint64_t slotRefreshStamp = 0;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViews;
+static std::unordered_map<std::int32_t, std::uintptr_t> cachedViewOwner;
 static std::uint64_t viewRefreshStamp = 0;
 static std::uint64_t cameraResolveStamp = 0;
 static std::uint64_t localChainStamp = 0;
@@ -58,6 +60,7 @@ static void MarkSessionChanged()
     sessionChangedMs = GetTickCount64();
     cachedSlots.clear();
     cachedViews.clear();
+    cachedViewOwner.clear();
     slotRefreshStamp = 0;
     viewRefreshStamp = 0;
     cameraResolveStamp = 0;
@@ -241,6 +244,97 @@ static std::uint64_t SteadyMicros()
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// Views only exist for streamed (nearby) players, and the dictionary key is
+// not a player id: the view has to be matched to the player whose replicated
+// position it reports. Each view's root transform is the character root, so
+// its world position is compared against every player's position and the
+// nearest pairs are claimed one at a time. The key is still used for views
+// whose hierarchy cannot be read this pass (spawning, pooling, rebuild).
+static void MatchViewsToEntities()
+{
+    cachedViewOwner.clear();
+    if (cachedViews.empty()) return;
+
+    struct ViewCandidate {
+        std::uintptr_t view = 0;
+        Vector3 position{};
+        bool hasPosition = false;
+        bool claimed = false;
+    };
+    std::vector<ViewCandidate> views;
+    views.reserve(cachedViews.size());
+    for (const auto& entry : cachedViews)
+    {
+        ViewCandidate candidate;
+        candidate.view = entry.second;
+        Skeleton::Vec root{};
+        if (entry.second > 0x10000 &&
+            Skeleton::RootWorldPosition(entry.second, DmaRead, root))
+        {
+            candidate.position = Vector3{ root.x, root.y, root.z };
+            candidate.hasPosition = RobRunMemory::Finite(candidate.position);
+        }
+        views.push_back(candidate);
+    }
+
+    // Player positions are one pass old here (~30 ms) while every view root was
+    // sampled just now, so a sprinting player is still within a fraction of a
+    // metre. Closest pairs are claimed first so two players standing together
+    // can never end up sharing one rig.
+    struct Pair { float distance = 0.f; std::size_t entity = 0; std::size_t view = 0; };
+    std::vector<Pair> pairs;
+    constexpr float kMatchRadius = 2.5f;
+    for (std::size_t e = 0; e < entities.size(); ++e)
+    {
+        const auto& entity = entities[e];
+        if (!RobRunMemory::Finite(entity.position) ||
+            (entity.position.x == 0.f && entity.position.y == 0.f &&
+             entity.position.z == 0.f))
+            continue;
+        for (std::size_t v = 0; v < views.size(); ++v)
+        {
+            if (!views[v].hasPosition) continue;
+            const float dx = entity.position.x - views[v].position.x;
+            const float dy = entity.position.y - views[v].position.y;
+            const float dz = entity.position.z - views[v].position.z;
+            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (distance <= kMatchRadius)
+                pairs.push_back(Pair{ distance, e, v });
+        }
+    }
+    std::sort(pairs.begin(), pairs.end(),
+        [](const Pair& a, const Pair& b) { return a.distance < b.distance; });
+
+    std::vector<unsigned char> entityMatched(entities.size(), 0);
+    for (const Pair& pair : pairs)
+    {
+        if (entityMatched[pair.entity] || views[pair.view].claimed) continue;
+        entityMatched[pair.entity] = 1;
+        views[pair.view].claimed = 1;
+        cachedViewOwner[entities[pair.entity].entityId] = views[pair.view].view;
+    }
+
+    for (const auto& entry : cachedViews)
+    {
+        if (entry.second <= 0x10000) continue;
+        bool claimed = false;
+        for (const auto& view : views)
+            if (view.view == entry.second && view.claimed) { claimed = true; break; }
+        if (claimed) continue;
+        // A view that reported a position but matched nobody is usually a
+        // stale/streamed-out entity. Keep the key as a last resort so a rig
+        // can never be lost entirely if the root position is unreadable or
+        // offset from the replicated position.
+        for (std::size_t e = 0; e < entities.size(); ++e)
+        {
+            if (entities[e].entityId != entry.first || entityMatched[e]) continue;
+            entityMatched[e] = 1;
+            cachedViewOwner[entry.first] = entry.second;
+            break;
+        }
+    }
+}
+
 static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
@@ -322,6 +416,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     rigCache.clear();
     cachedSlots.clear();
     cachedViews.clear();
+    cachedViewOwner.clear();
     slotRefreshStamp = 0;
     viewRefreshStamp = 0;
     cameraResolveStamp = 0;
@@ -916,9 +1011,10 @@ static void UpdateInternal()
                 for (const auto& entry : viewEntries)
                     cachedViews[entry.key] = entry.value;
             }
+            MatchViewsToEntities();
         }
     }
-    const auto& views = cachedViews;
+    const auto& views = cachedViewOwner;
 
     {
         const std::uint64_t slotNow = GetTickCount64();

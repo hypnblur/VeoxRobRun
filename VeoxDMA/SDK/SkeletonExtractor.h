@@ -73,6 +73,12 @@ struct RigTarget {
 // Resolves and validates the layout from a BattleCharacterEntityView.
 bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out);
 
+// World position of the rig root (the parentless node of the transform
+// hierarchy). Views only exist for streamed players and are not reliably keyed
+// by entity id, so the reader compares this with each player's replicated
+// position to find which player a view belongs to.
+bool RootWorldPosition(std::uint64_t view, const ReadFn& read, Vec& out);
+
 // Walks view -> movement view -> managed Transform -> native Transform ->
 // hierarchy and returns the current array pointers. Cheap enough to run for a
 // few entities per pass; no class-name reads on this path.
