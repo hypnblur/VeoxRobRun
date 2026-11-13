@@ -49,6 +49,8 @@ static std::unordered_map<std::int32_t, std::uintptr_t> cachedSlots;
 static std::uint64_t slotRefreshStamp = 0;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViews;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViewOwner;
+static std::unordered_map<std::int32_t, int> viewOwnerMisses;
+static bool viewsRefreshed = false;
 static std::uint64_t viewRefreshStamp = 0;
 static std::uint64_t cameraResolveStamp = 0;
 static std::uint64_t localChainStamp = 0;
@@ -61,6 +63,8 @@ static void MarkSessionChanged()
     cachedSlots.clear();
     cachedViews.clear();
     cachedViewOwner.clear();
+    viewOwnerMisses.clear();
+    viewsRefreshed = false;
     slotRefreshStamp = 0;
     viewRefreshStamp = 0;
     cameraResolveStamp = 0;
@@ -181,6 +185,10 @@ struct RigCacheEntry {
     // transform, hierarchy, array or bone count means the cached indices
     // describe a rig that no longer exists.
     int targetFailures = 0;
+    // Consecutive failed 2 s layout revalidations. A good rig must survive a
+    // single unreadable rebuild, otherwise the skeleton blinks off every time
+    // the hierarchy check happens to land on a bad read.
+    int layoutFailures = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -245,15 +253,28 @@ static std::uint64_t SteadyMicros()
 }
 
 // Views only exist for streamed (nearby) players, and the dictionary key is
-// not a player id: the view has to be matched to the player whose replicated
+// not a player id: a view has to be matched to the player whose replicated
 // position it reports. Each view's root transform is the character root, so
-// its world position is compared against every player's position and the
-// nearest pairs are claimed one at a time. The key is still used for views
-// whose hierarchy cannot be read this pass (spawning, pooling, rebuild).
+// its world position is compared with every player's position and the nearest
+// pairs are claimed one at a time.
+//
+// The pairing is sticky. Rebuilding it from scratch on every refresh made the
+// bones blink whenever a single root/position read failed or a player drifted
+// past the match radius for one pass, so an existing pair is kept until its
+// view disappears, its player has been absent for several passes, or the two
+// have moved far apart. New pairs are only formed within kMatchRadius; old
+// ones are only dropped beyond kReleaseRadius.
 static void MatchViewsToEntities()
 {
-    cachedViewOwner.clear();
-    if (cachedViews.empty()) return;
+    if (cachedViews.empty() || entities.empty()) return;
+
+    std::unordered_map<std::int32_t, std::size_t> entityIndex;
+    entityIndex.reserve(entities.size());
+    for (std::size_t e = 0; e < entities.size(); ++e)
+    {
+        if (entities[e].entityId >= 0)
+            entityIndex.emplace(entities[e].entityId, e);
+    }
 
     struct ViewCandidate {
         std::uintptr_t view = 0;
@@ -277,62 +298,126 @@ static void MatchViewsToEntities()
         views.push_back(candidate);
     }
 
-    // Player positions are one pass old here (~30 ms) while every view root was
-    // sampled just now, so a sprinting player is still within a fraction of a
-    // metre. Closest pairs are claimed first so two players standing together
-    // can never end up sharing one rig.
+    std::unordered_map<std::uintptr_t, std::size_t> viewIndex;
+    viewIndex.reserve(views.size());
+    for (std::size_t v = 0; v < views.size(); ++v)
+        viewIndex.emplace(views[v].view, v);
+
+    auto distanceTo = [](const Vector3& a, const Vector3& b) {
+        const float dx = a.x - b.x;
+        const float dy = a.y - b.y;
+        const float dz = a.z - b.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+
+    // A player can cover several metres between two 400 ms refreshes, so the
+    // acquire radius is generous. The release radius is far larger so only a
+    // genuinely different player breaks an existing pair.
+    constexpr float kMatchRadius = 3.f;
+    constexpr float kReleaseRadius = 12.f;
+    constexpr int kMaxMisses = 3;
+
+    std::unordered_map<std::int32_t, std::uintptr_t> nextOwner;
+    std::unordered_map<std::int32_t, int> nextMisses;
+    std::unordered_map<std::int32_t, std::uintptr_t> claimedByEntity;
+
+    // 1. Carry over pairs that are still plausible.
+    for (const auto& owner : cachedViewOwner)
+    {
+        const std::int32_t entityId = owner.first;
+        const std::uintptr_t view = owner.second;
+        const auto viewIt = viewIndex.find(view);
+        if (viewIt == viewIndex.end())
+            continue; // view streamed out or was reallocated: pair is over
+
+        const auto entityIt = entityIndex.find(entityId);
+        if (entityIt == entityIndex.end())
+        {
+            // The player vanished from the dictionary for a pass. Keep the rig
+            // reserved for a moment so a dictionary hiccup does not blink the
+            // skeleton off.
+            const auto missIt = viewOwnerMisses.find(entityId);
+            const int misses =
+                (missIt == viewOwnerMisses.end() ? 0 : missIt->second) + 1;
+            if (misses < kMaxMisses)
+            {
+                nextOwner.emplace(entityId, view);
+                nextMisses.emplace(entityId, misses);
+                views[viewIt->second].claimed = true;
+                claimedByEntity.emplace(entityId, view);
+            }
+            continue;
+        }
+
+        auto& candidate = views[viewIt->second];
+        candidate.claimed = true;
+        if (candidate.hasPosition)
+        {
+            const auto& entity = entities[entityIt->second];
+            if (RobRunMemory::Finite(entity.position) &&
+                !entity.position.IsZero() &&
+                distanceTo(entity.position, candidate.position) > kReleaseRadius)
+            {
+                // The positions have clearly diverged, so this rig belongs to
+                // somebody else now. Free it for re-pairing below.
+                candidate.claimed = false;
+                continue;
+            }
+        }
+        nextOwner.emplace(entityId, view);
+        claimedByEntity.emplace(entityId, view);
+    }
+
+    // 2. Pair remaining views with remaining players, closest first, so two
+    //    players standing together can never share one rig.
     struct Pair { float distance = 0.f; std::size_t entity = 0; std::size_t view = 0; };
     std::vector<Pair> pairs;
-    constexpr float kMatchRadius = 2.5f;
     for (std::size_t e = 0; e < entities.size(); ++e)
     {
         const auto& entity = entities[e];
-        if (!RobRunMemory::Finite(entity.position) ||
-            (entity.position.x == 0.f && entity.position.y == 0.f &&
-             entity.position.z == 0.f))
+        if (claimedByEntity.find(entity.entityId) != claimedByEntity.end())
+            continue;
+        if (!RobRunMemory::Finite(entity.position) || entity.position.IsZero())
             continue;
         for (std::size_t v = 0; v < views.size(); ++v)
         {
-            if (!views[v].hasPosition) continue;
-            const float dx = entity.position.x - views[v].position.x;
-            const float dy = entity.position.y - views[v].position.y;
-            const float dz = entity.position.z - views[v].position.z;
-            const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (!views[v].hasPosition || views[v].claimed) continue;
+            const float distance = distanceTo(entity.position, views[v].position);
             if (distance <= kMatchRadius)
                 pairs.push_back(Pair{ distance, e, v });
         }
     }
     std::sort(pairs.begin(), pairs.end(),
         [](const Pair& a, const Pair& b) { return a.distance < b.distance; });
-
-    std::vector<unsigned char> entityMatched(entities.size(), 0);
     for (const Pair& pair : pairs)
     {
-        if (entityMatched[pair.entity] || views[pair.view].claimed) continue;
-        entityMatched[pair.entity] = 1;
-        views[pair.view].claimed = 1;
-        cachedViewOwner[entities[pair.entity].entityId] = views[pair.view].view;
+        const std::int32_t entityId = entities[pair.entity].entityId;
+        if (views[pair.view].claimed ||
+            claimedByEntity.find(entityId) != claimedByEntity.end())
+            continue;
+        views[pair.view].claimed = true;
+        claimedByEntity.emplace(entityId, views[pair.view].view);
+        nextOwner.emplace(entityId, views[pair.view].view);
     }
 
+    // 3. Last resort: keep the dictionary key for any view whose root could
+    //    not be read or matched, so a rig is never lost outright while the
+    //    character spawns, is pooled, or its hierarchy is rebuilt.
     for (const auto& entry : cachedViews)
     {
         if (entry.second <= 0x10000) continue;
-        bool claimed = false;
-        for (const auto& view : views)
-            if (view.view == entry.second && view.claimed) { claimed = true; break; }
-        if (claimed) continue;
-        // A view that reported a position but matched nobody is usually a
-        // stale/streamed-out entity. Keep the key as a last resort so a rig
-        // can never be lost entirely if the root position is unreadable or
-        // offset from the replicated position.
-        for (std::size_t e = 0; e < entities.size(); ++e)
-        {
-            if (entities[e].entityId != entry.first || entityMatched[e]) continue;
-            entityMatched[e] = 1;
-            cachedViewOwner[entry.first] = entry.second;
-            break;
-        }
+        const auto viewIt = viewIndex.find(entry.second);
+        if (viewIt != viewIndex.end() && views[viewIt->second].claimed) continue;
+        if (entityIndex.find(entry.first) == entityIndex.end()) continue;
+        if (claimedByEntity.find(entry.first) != claimedByEntity.end()) continue;
+        if (viewIt != viewIndex.end())
+            views[viewIt->second].claimed = true;
+        claimedByEntity.emplace(entry.first, entry.second);
+        nextOwner.emplace(entry.first, entry.second);
     }
+
+    cachedViewOwner.swap(nextOwner);
+    viewOwnerMisses.swap(nextMisses);
 }
 
 static void PublishSnapshot()
@@ -417,6 +502,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     cachedSlots.clear();
     cachedViews.clear();
     cachedViewOwner.clear();
+    viewOwnerMisses.clear();
+    viewsRefreshed = false;
     slotRefreshStamp = 0;
     viewRefreshStamp = 0;
     cameraResolveStamp = 0;
@@ -1011,7 +1098,10 @@ static void UpdateInternal()
                 for (const auto& entry : viewEntries)
                     cachedViews[entry.key] = entry.value;
             }
-            MatchViewsToEntities();
+            // Match after this pass's player positions exist (end of pass);
+            // matching here would only see the previous list, which is cleared
+            // at the top of every pass.
+            viewsRefreshed = true;
         }
     }
     const auto& views = cachedViewOwner;
@@ -1365,6 +1455,7 @@ static void UpdateInternal()
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
                 rig.targetFailures = 0;
+                rig.layoutFailures = 0;
             }
 
             const bool dueForRebuild = !rig.layoutValid
@@ -1372,11 +1463,23 @@ static void UpdateInternal()
                 : (now - rig.layoutStamp >= 2000);
             if (dueForRebuild) {
                 rig.layoutStamp = now;
-                rig.layoutValid = viewPtr > 0x10000 &&
-                    Skeleton::BuildLayoutFromView(viewPtr, DmaRead, rig.layout);
-                if (!rig.layoutValid) {
+                Skeleton::RigLayout rebuilt;
+                const bool built = viewPtr > 0x10000 &&
+                    Skeleton::BuildLayoutFromView(viewPtr, DmaRead, rebuilt);
+                if (built) {
+                    rig.layout = std::move(rebuilt);
+                    rig.layoutValid = true;
+                    rig.layoutFailures = 0;
+                } else if (!rig.layoutValid) {
                     rig.bones.clear();
                     rig.points = Skeleton::BonePoints{};
+                } else if (++rig.layoutFailures >= 2) {
+                    // Still bad after a retry: the hierarchy really moved.
+                    rig.layoutValid = false;
+                    rig.layoutFailures = 0;
+                    rig.bones.clear();
+                    rig.points = Skeleton::BonePoints{};
+                    rig.prevLocalValid = false;
                 }
             }
 
@@ -1584,9 +1687,15 @@ static void UpdateInternal()
                 }
             } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
-                rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
+                // Never replace good bones with an empty result: this fallback
+                // runs on a timer, so a single failed read used to blank the
+                // skeleton for a full second (a visible strobe).
+                auto fallback = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
-                rig.points = Skeleton::BonePoints{};
+                if (!fallback.empty()) {
+                    rig.bones = std::move(fallback);
+                    rig.points = Skeleton::BonePoints{};
+                }
             }
 
             entity.bones = rig.bones;
@@ -1626,6 +1735,16 @@ static void UpdateInternal()
 
             entities.push_back(std::move(entity));
         }
+    }
+
+    // The view dictionary is refreshed at most every 400 ms. Match it against
+    // this pass's fresh player positions so the pairing is ready for the next
+    // passes; doing it before the entity loop would match against a list that
+    // was just cleared.
+    if (viewsRefreshed)
+    {
+        viewsRefreshed = false;
+        MatchViewsToEntities();
     }
 
     const std::uint64_t passNow = GetTickCount64();
