@@ -14,6 +14,11 @@ namespace RobRunReader {
 
 struct EntityData {
     std::int32_t entityId = -1;
+    // Battle slot public id (Steam/account id). Used by the party filter.
+    std::uint64_t publicId = 0;
+    // True when the reader matched this entity against the local party's
+    // member ids. Unresolved party data leaves every entity false.
+    bool isPartyMember = false;
     Vector3 position{};
     Vector3 lookDirection{};
     float pitch = 0.f;

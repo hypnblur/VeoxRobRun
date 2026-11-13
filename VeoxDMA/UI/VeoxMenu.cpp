@@ -1215,6 +1215,8 @@ void DrawAim()
 		BeginCard("AIM TUNING", kCardW);
 		SliderIntRow("FOV", &ConfigInstance.Aim.Fov, 5, 180, " deg");
 		SliderIntRow("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
+		if (ConfigInstance.Aim.AimType == 1)
+			SliderFloatRow("Hardware Strength", &ConfigInstance.Aim.HardwareGain, 0.25f, 5.f, "x");
 		SliderIntRow("Max Distance", &ConfigInstance.Aim.MaxDistance, 10, 1000, "m");
 		EndCard();
 
@@ -1258,6 +1260,8 @@ void DrawAim()
 		ToggleRow("Skip Criminal targets", &ConfigInstance.Aim.ExpIgnoreCriminal);
 		ToggleRow("Skip Civilian targets", &ConfigInstance.Aim.ExpIgnoreCivilian);
 		ToggleRow("Ignore Teammates", &ConfigInstance.Aim.ExpIgnoreTeammates);
+		if (ConfigInstance.Aim.ExpIgnoreTeammates)
+			Note("Uses party membership, not role: same-role players outside your party stay targetable.");
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
 		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();

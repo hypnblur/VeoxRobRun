@@ -134,16 +134,15 @@ std::string RoleLabel(int role, const std::string& name)
 
 // Role labels come from the reader's reflection pass. Mirror the ESP's id
 // fallbacks so the aim filter and the overlay never disagree about a target.
-// `localRole` is the local player's resolved role: matching it means the
-// entity is on the same side, which the teammate filter drops.
-bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg,
-    const std::string& localRole)
+// The teammate filter is party based: the reader resolves the local party's
+// member ids and marks each entity, so same-role strangers stay targetable.
+bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 {
     const std::string role = RoleLabel(ent.role, ent.roleName);
     if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
-    if (cfg.ExpIgnoreTeammates && !localRole.empty() && role == localRole) return true;
+    if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return true;
     return false;
 }
 
@@ -703,16 +702,6 @@ void Tick()
     }
     g_debug.entities = static_cast<int>(snapshot->entities.size());
 
-    // Local player's role decides which entities count as teammates. The
-    // local character is published in the same list, so no extra read is
-    // needed here; an unresolved role simply disables the teammate filter.
-    std::string localRole;
-    for (const auto& ent : snapshot->entities) {
-        if (ent.entityId != snapshot->localEntityId) continue;
-        localRole = RoleLabel(ent.role, ent.roleName);
-        break;
-    }
-
     // A scene/session change (level transition, new match) invalidates every
     // pointer the aim was holding. Reset smoothing and block memory writes
     // until the reader has published fresh, re-resolved objects.
@@ -776,7 +765,7 @@ void Tick()
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
-        if (ShouldSkipByRole(ent, cfg, localRole)) continue;
+        if (ShouldSkipByRole(ent, cfg)) continue;
         // Animator/cull gate: skip characters whose pose has frozen, which is
         // the closest read-only equivalent of "not visible". This is not wall
         // occlusion.
@@ -1009,12 +998,22 @@ void Tick()
     }
 
     // Hardware Aim: the selected device smooths and quantizes the same pixel
-    // error, then writes counts to the game PC.
+    // error, then writes counts to the game PC. The response uses the same
+    // millisecond curve as the memory write path; the old slider-only curve
+    // was several times slower at high Smoothness, which made the device feel
+    // unresponsive. The gain compensates for in-game sensitivity (one count is
+    // not necessarily one screen pixel) and the higher cap lets flicks reach
+    // the device's 127-count report limit instead of being clamped early.
     if (!Base::Hardware::Ready()) {
         g_debug.reason = "hardware device not ready";
         stopAiming();
         return;
     }
+
+    settings.responseMs = ResponseForSmoothness(cfg.Smoothness);
+    settings.countsPerPixelX = settings.countsPerPixelY =
+        std::clamp(cfg.HardwareGain, 0.25f, 5.f);
+    settings.maxCountsPerSecond = 24000.f;
 
     Base::Hardware::MotionIntent intent;
     intent.value = { dx, dy };
@@ -1022,7 +1021,7 @@ void Tick()
     intent.target = static_cast<std::uint64_t>(bestId);
     intent.observation = ++g_observation;
     intent.error = true;
-    intent.intervalMs = 8;
+    intent.intervalMs = 6;
     intent.expires = Base::Hardware::Clock::now() + std::chrono::milliseconds(50);
     if (Base::Hardware::Session().Submit(Base::Hardware::Source::Aim, intent)) {
         g_wasAiming = true;

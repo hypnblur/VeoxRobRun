@@ -25,6 +25,10 @@ public:
 	int AimType = 0;        // 0 = Memory Aim, 1 = Hardware Aim
 	int TargetBone = 0;     // 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis
 	int Smoothness = 6;     // 1 (instant) .. 100 (very slow)
+	// Hardware Aim only: multiplies the pixel error before it is sent to the
+	// device, so a low in-game sensitivity (where one mouse count travels less
+	// than one screen pixel) can be compensated without changing Smoothness.
+	float HardwareGain = 1.0f; // 0.25 .. 5.0
 	int Fov = 40;           // 5 .. 180 degrees
 	int AimKey = 0;         // index into Aim::KeyNames()
 	int MaxDistance = 400;  // metres
@@ -65,9 +69,10 @@ public:
 	bool ExpIgnorePolice = false;
 	bool ExpIgnoreCriminal = false;
 	bool ExpIgnoreCivilian = false;
-	// Skip entities whose role matches the local player's role. Roles are
-	// resolved by name, so this covers Criminal/Criminal, Police/Police, etc.
-	// It does nothing while the local role is unresolved.
+	// Skip entities that share the local player's party. Party membership is
+	// read from the battle party data and matched by public id/entity id, so
+	// same-role players outside the party are still valid targets. It does
+	// nothing while the party data cannot be resolved.
 	bool ExpIgnoreTeammates = true;
 
 	json ToJson()
@@ -77,6 +82,7 @@ public:
 		j[ConfigName][LIT("AimType")] = AimType;
 		j[ConfigName][LIT("TargetBone")] = TargetBone;
 		j[ConfigName][LIT("Smoothness")] = Smoothness;
+		j[ConfigName][LIT("HardwareGain")] = HardwareGain;
 		j[ConfigName][LIT("Fov")] = Fov;
 		j[ConfigName][LIT("AimKey")] = AimKey;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
@@ -111,6 +117,8 @@ public:
 			TargetBone = j[ConfigName][LIT("TargetBone")];
 		if (j[ConfigName].contains(LIT("Smoothness")))
 			Smoothness = j[ConfigName][LIT("Smoothness")];
+		if (j[ConfigName].contains(LIT("HardwareGain")))
+			HardwareGain = j[ConfigName][LIT("HardwareGain")];
 		if (j[ConfigName].contains(LIT("Fov")))
 			Fov = j[ConfigName][LIT("Fov")];
 		if (j[ConfigName].contains(LIT("AimKey")))

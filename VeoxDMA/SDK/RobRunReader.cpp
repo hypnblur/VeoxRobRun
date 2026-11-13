@@ -46,6 +46,17 @@ static std::uintptr_t lastUpdater = 0;
 static std::int32_t lastLocalEntityId = -1;
 static bool lastSessionValid = false;
 
+// Local party membership, resolved from the battle party models. The aim
+// teammate filter matches these ids instead of comparing roles, so players
+// outside the party stay targetable even when they share the local role.
+struct PartyMemberIds {
+    std::vector<std::int32_t> entityIds;
+    std::vector<std::uint64_t> publicIds;
+    bool valid = false;
+};
+static PartyMemberIds g_party;
+static std::uint64_t g_partyStamp = 0;
+
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedSlots;
 static std::uint64_t slotRefreshStamp = 0;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViews;
@@ -71,6 +82,8 @@ static void MarkSessionChanged()
     cameraResolveStamp = 0;
     localChainStamp = 0;
     fullResolveStamp = 0;
+    g_party = PartyMemberIds{};
+    g_partyStamp = 0;
 }
 
 // Called once per pass after resolution. Any change in the scene roots means
@@ -137,6 +150,7 @@ struct DetailCacheEntry {
     std::uintptr_t characterModel = 0;
     std::uintptr_t transform = 0;
     std::uint64_t stamp = 0;
+    std::uint64_t publicId = 0;
     float health = -1.f;
     float maxHealth = -1.f;
     float criticalHealth = -1.f;
@@ -1159,9 +1173,14 @@ static void ReadSlotIdentity(std::uintptr_t slotValue, EntityData& entity)
     ReadSlotString(slotValue, rr::BattleCharacterSlotData::Nickname, entity.nickname);
     ReadSlotString(slotValue, rr::BattleCharacterSlotData::ClanTag, entity.clanTag);
 
+    // The party filter compares public ids, so read it from the same object.
+    const std::int64_t publicId = RobRunMemory::ReadInt64(
+        slotValue + rr::BattleCharacterSlotData::PublicId);
+    if (publicId > 0) entity.publicId = static_cast<std::uint64_t>(publicId);
+
     // Legacy: the dictionary value is BattleCharacterSlotModel, which points at
     // its data object at +0x10.
-    if (entity.nickname.empty() || entity.clanTag.empty()) {
+    if (entity.nickname.empty() || entity.clanTag.empty() || entity.publicId == 0) {
         const std::uintptr_t slotData = ReadPtr(
             slotValue + rr::BattleCharacterSlotModel::_data);
         if (slotData > 0x10000 && slotData != slotValue) {
@@ -1169,8 +1188,305 @@ static void ReadSlotIdentity(std::uintptr_t slotValue, EntityData& entity)
                 ReadSlotString(slotData, rr::BattleCharacterSlotData::Nickname, entity.nickname);
             if (entity.clanTag.empty())
                 ReadSlotString(slotData, rr::BattleCharacterSlotData::ClanTag, entity.clanTag);
+            if (entity.publicId == 0) {
+                const std::int64_t legacyId = RobRunMemory::ReadInt64(
+                    slotData + rr::BattleCharacterSlotData::PublicId);
+                if (legacyId > 0) entity.publicId = static_cast<std::uint64_t>(legacyId);
+            }
         }
     }
+}
+
+// --- Party membership -----------------------------------------------------
+// The battle party data stores the local party's member list. Two updaters
+// expose it: BattlePartyUpdater (battle party data with a Members list) and
+// BattlePartyMemberModelsUpdater (the party model / member models used for
+// positions). Both are resolved by class name, then their fields are matched
+// by name, so a metadata shift does not require new offsets. A read only
+// counts when the local player appears in it; anything else leaves the filter
+// disabled rather than skipping strangers.
+
+static bool FindFieldNamed(std::uintptr_t klass, const char* const* names,
+    std::size_t count, Il2Cpp::Field& out)
+{
+    if (klass <= 0x10000) return false;
+    const auto fields = Il2Cpp::Fields(klass, true);
+    for (const auto& field : fields) {
+        if (field.offset <= 0 || field.offset > 0x2000) continue;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (field.name == names[i]) { out = field; return true; }
+        }
+    }
+    return false;
+}
+
+static bool FindFieldContaining(std::uintptr_t klass, const char* needle,
+    Il2Cpp::Field& out)
+{
+    if (klass <= 0x10000 || !needle || !*needle) return false;
+    const auto fields = Il2Cpp::Fields(klass, true);
+    for (const auto& field : fields) {
+        if (field.offset <= 0 || field.offset > 0x2000) continue;
+        if (field.name.find(needle) != std::string::npos) { out = field; return true; }
+    }
+    return false;
+}
+
+static bool ReadObjectCollection(std::uintptr_t object,
+    std::vector<std::uintptr_t>& out)
+{
+    out.clear();
+    if (object <= 0x10000) return false;
+    const std::string klass = Il2Cpp::ClassNameOf(object);
+    if (klass.find("List") != std::string::npos) {
+        const std::uintptr_t items = ReadPtr(object + rr::List::items);
+        const std::int32_t count = RobRunMemory::ReadInt32(object + rr::List::count);
+        if (items <= 0x10000 || count <= 0 || count > 64) return false;
+        out.reserve(static_cast<std::size_t>(count));
+        for (std::int32_t i = 0; i < count; ++i) {
+            out.push_back(ReadPtr(items + rr::Array::vector +
+                static_cast<std::uintptr_t>(i) * rr::Array::stride));
+        }
+        return !out.empty();
+    }
+    if (klass.find("[]") != std::string::npos) {
+        const std::int64_t length = RobRunMemory::ReadInt64(object + rr::Array::max_length);
+        if (length <= 0 || length > 64) return false;
+        out.reserve(static_cast<std::size_t>(length));
+        for (std::int64_t i = 0; i < length; ++i) {
+            out.push_back(ReadPtr(object + rr::Array::vector +
+                static_cast<std::uintptr_t>(i) * rr::Array::stride));
+        }
+        return !out.empty();
+    }
+    return false;
+}
+
+static bool ReadLongCollection(std::uintptr_t object,
+    std::vector<std::uint64_t>& out)
+{
+    out.clear();
+    if (object <= 0x10000) return false;
+    const std::string klass = Il2Cpp::ClassNameOf(object);
+    const std::uintptr_t type = Il2Cpp::ClassOf(object);
+
+    if (klass.find("HashSet") != std::string::npos) {
+        Il2Cpp::Field entries{}, count{};
+        if (!FindFieldContaining(type, "entries", entries)) return false;
+        if (!FindFieldContaining(type, "count", count)) return false;
+        const std::uintptr_t array = ReadPtr(object + entries.offset);
+        const std::int32_t size = RobRunMemory::ReadInt32(object + count.offset);
+        if (array <= 0x10000 || size <= 0 || size > 64) return false;
+        // Entry<T> is { int hash; int next; T value; }. Public ids are 64-bit,
+        // so the entry stride is 16 and the value sits at +8.
+        for (std::int32_t i = 0; i < size; ++i) {
+            const std::int64_t value = RobRunMemory::ReadInt64(
+                array + rr::Array::vector + static_cast<std::uintptr_t>(i) * 16 + 8);
+            if (value > 0) out.push_back(static_cast<std::uint64_t>(value));
+        }
+        return !out.empty();
+    }
+
+    if (klass.find("List") != std::string::npos) {
+        const std::uintptr_t items = ReadPtr(object + rr::List::items);
+        const std::int32_t count = RobRunMemory::ReadInt32(object + rr::List::count);
+        if (items <= 0x10000 || count <= 0 || count > 64) return false;
+        for (std::int32_t i = 0; i < count; ++i) {
+            const std::int64_t value = RobRunMemory::ReadInt64(
+                items + rr::Array::vector + static_cast<std::uintptr_t>(i) * 8);
+            if (value > 0) out.push_back(static_cast<std::uint64_t>(value));
+        }
+        return !out.empty();
+    }
+
+    if (klass.find("[]") != std::string::npos) {
+        const std::int64_t length = RobRunMemory::ReadInt64(object + rr::Array::max_length);
+        if (length <= 0 || length > 64) return false;
+        for (std::int64_t i = 0; i < length; ++i) {
+            const std::int64_t value = RobRunMemory::ReadInt64(
+                object + rr::Array::vector + static_cast<std::uintptr_t>(i) * 8);
+            if (value > 0) out.push_back(static_cast<std::uint64_t>(value));
+        }
+        return !out.empty();
+    }
+    return false;
+}
+
+static bool ReadDictionaryMembers(std::uintptr_t dictionary,
+    std::vector<std::uint64_t>& ids, std::vector<std::uintptr_t>& objects)
+{
+    if (dictionary <= 0x10000) return false;
+    const std::uintptr_t entries = ReadPtr(dictionary + rr::Dict::entries);
+    const std::int32_t count = RobRunMemory::ReadInt32(dictionary + rr::Dict::count);
+    if (entries <= 0x10000 || count <= 0 || count > 64) return false;
+    bool any = false;
+    for (std::int32_t i = 0; i < count; ++i) {
+        const std::uintptr_t entry = entries + rr::Array::vector +
+            static_cast<std::uintptr_t>(i) * rr::Dict::entry_stride;
+        const std::int32_t next = RobRunMemory::ReadInt32(entry + rr::Dict::entry_next);
+        if (next < rr::Dict::entry_allocated_min) continue;
+        const std::int64_t key = RobRunMemory::ReadInt64(entry + rr::Dict::entry_key);
+        if (key > 0) { ids.push_back(static_cast<std::uint64_t>(key)); any = true; }
+        const std::uintptr_t value = ReadPtr(entry + rr::Dict::entry_value);
+        if (value > 0x10000) { objects.push_back(value); any = true; }
+    }
+    return any;
+}
+
+static void CollectPartyMember(std::uintptr_t member, PartyMemberIds& ids)
+{
+    if (member <= 0x10000) return;
+    const std::uintptr_t klass = Il2Cpp::ClassOf(member);
+    const char* idNames[] = {
+        "PublicId", "<PublicId>k__BackingField", "publicId", "_publicId" };
+    Il2Cpp::Field field{};
+    if (FindFieldNamed(klass, idNames, 4, field)) {
+        const std::int64_t value = RobRunMemory::ReadInt64(member + field.offset);
+        if (value > 0) ids.publicIds.push_back(static_cast<std::uint64_t>(value));
+    }
+    const char* entityNames[] = {
+        "EntityId", "<EntityId>k__BackingField", "entityId", "_entityId" };
+    if (FindFieldNamed(klass, entityNames, 4, field)) {
+        const std::int32_t value = RobRunMemory::ReadInt32(member + field.offset);
+        if (value > 0) ids.entityIds.push_back(value);
+    }
+}
+
+static bool ReadPartyDataObject(std::uintptr_t data, PartyMemberIds& ids)
+{
+    if (data <= 0x10000) return false;
+    const std::uintptr_t klass = Il2Cpp::ClassOf(data);
+    bool found = false;
+    Il2Cpp::Field field{};
+
+    const char* memberNames[] = {
+        "Members", "<Members>k__BackingField", "_members", "members" };
+    if (FindFieldNamed(klass, memberNames, 4, field)) {
+        const std::uintptr_t collection = ReadPtr(data + field.offset);
+        if (collection > 0x10000) {
+            if (Il2Cpp::ClassNameOf(collection).find("Dictionary") != std::string::npos) {
+                std::vector<std::uintptr_t> objects;
+                found |= ReadDictionaryMembers(collection, ids.publicIds, objects);
+                for (const auto object : objects) CollectPartyMember(object, ids);
+            } else {
+                std::vector<std::uintptr_t> objects;
+                if (ReadObjectCollection(collection, objects)) {
+                    for (const auto object : objects) CollectPartyMember(object, ids);
+                    found = true;
+                }
+            }
+        }
+    }
+
+    const char* idNames[] = {
+        "MemberPublicIds", "<MemberPublicIds>k__BackingField",
+        "_memberPublicIds", "memberPublicIds" };
+    if (FindFieldNamed(klass, idNames, 4, field)) {
+        const std::uintptr_t collection = ReadPtr(data + field.offset);
+        if (ReadLongCollection(collection, ids.publicIds)) found = true;
+    }
+
+    const char* entityNames[] = {
+        "Entities", "<Entities>k__BackingField", "_entities", "entities" };
+    if (FindFieldNamed(klass, entityNames, 4, field)) {
+        const std::uintptr_t collection = ReadPtr(data + field.offset);
+        std::vector<std::uintptr_t> objects;
+        if (ReadObjectCollection(collection, objects)) {
+            for (const auto object : objects) CollectPartyMember(object, ids);
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+static std::uintptr_t FindActiveUpdaterByName(std::uintptr_t game, const char* name)
+{
+    if (game <= 0x10000 || !name || !*name) return 0;
+    const std::uintptr_t list = ReadPtr(game + rr::Game::ActiveUpdaters);
+    const std::uintptr_t array = ReadPtr(list + rr::List::items);
+    const std::int32_t count = RobRunMemory::ReadInt32(list + rr::List::count);
+    if (array <= 0x10000 || count <= 0 || count > 512) return 0;
+    for (std::int32_t i = 0; i < count; ++i) {
+        const std::uintptr_t a = ReadPtr(array + rr::Array::vector +
+            static_cast<std::uintptr_t>(i) * rr::Array::stride);
+        const std::uintptr_t b = ReadPtr(a + rr::UpdaterChain::a_step);
+        const std::uintptr_t c = ReadPtr(b + rr::UpdaterChain::b_step);
+        const std::uintptr_t updater = ReadPtr(c + rr::UpdaterChain::c_step);
+        if (IsClass(updater, name)) return updater;
+        if (IsClass(a, name)) return a;
+    }
+    return 0;
+}
+
+static void RefreshParty(std::uintptr_t game, std::int32_t localId,
+    std::uint64_t localPublicId)
+{
+    PartyMemberIds ids;
+    bool any = false;
+
+    // Battle party data carries the authoritative Members list.
+    std::uintptr_t updater = FindActiveUpdaterByName(game, "BattlePartyUpdater");
+    if (updater) {
+        const char* names[] = {
+            "_battlePartyData", "battlePartyData",
+            "<BattlePartyData>k__BackingField" };
+        Il2Cpp::Field field{};
+        if (FindFieldNamed(Il2Cpp::ClassOf(updater), names, 3, field)) {
+            const std::uintptr_t data = ReadPtr(updater + field.offset);
+            if (ReadPartyDataObject(data, ids)) any = true;
+        }
+    }
+
+    // Fallback: the member-models updater mirrors the local party model.
+    if (!any) {
+        updater = FindActiveUpdaterByName(game, "BattlePartyMemberModelsUpdater");
+        if (updater) {
+            const std::uintptr_t klass = Il2Cpp::ClassOf(updater);
+            Il2Cpp::Field field{};
+            const char* modelNames[] = {
+                "_partyModel", "partyModel", "<PartyModel>k__BackingField" };
+            if (FindFieldNamed(klass, modelNames, 3, field)) {
+                const std::uintptr_t model = ReadPtr(updater + field.offset);
+                if (ReadPartyDataObject(model, ids)) any = true;
+            }
+            if (!any) {
+                const char* dataNames[] = {
+                    "_partyMembersData", "partyMembersData" };
+                if (FindFieldNamed(klass, dataNames, 2, field)) {
+                    const std::uintptr_t data = ReadPtr(updater + field.offset);
+                    if (ReadPartyDataObject(data, ids)) any = true;
+                }
+            }
+        }
+    }
+
+    bool localPresent = false;
+    if (localPublicId > 0) {
+        localPresent = std::find(ids.publicIds.begin(), ids.publicIds.end(),
+            localPublicId) != ids.publicIds.end();
+    }
+    if (!localPresent && localId > 0) {
+        localPresent = std::find(ids.entityIds.begin(), ids.entityIds.end(),
+            localId) != ids.entityIds.end();
+    }
+
+    if (!any || !localPresent)
+        ids = PartyMemberIds{};
+    else
+        ids.valid = true;
+    g_party = std::move(ids);
+}
+
+static bool IsPartyMember(std::int32_t entityId, std::uint64_t publicId)
+{
+    if (!g_party.valid) return false;
+    if (publicId > 0 &&
+        std::find(g_party.publicIds.begin(), g_party.publicIds.end(), publicId) !=
+            g_party.publicIds.end())
+        return true;
+    return std::find(g_party.entityIds.begin(), g_party.entityIds.end(), entityId) !=
+        g_party.entityIds.end();
 }
 
 static int fingerprintFailures = 0;
@@ -1452,6 +1768,29 @@ static void UpdateInternal()
         }
     }
     const auto& slots = cachedSlots;
+
+    // Party membership is refreshed at 1 Hz. The local public id comes from the
+    // player entity model; the slot dictionary is the fallback because slot
+    // data always carries a raw int64 public id.
+    std::uint64_t localPublicId = 0;
+    if (localPlayer > 0x10000) {
+        const std::int64_t value = RobRunMemory::ReadInt64(
+            localPlayer + rr::PlayerEntityModel::PublicId);
+        if (value > 0) localPublicId = static_cast<std::uint64_t>(value);
+    }
+    if (localPublicId == 0 && localEntityId > 0) {
+        const auto localSlot = slots.find(localEntityId);
+        if (localSlot != slots.end()) {
+            const std::int64_t value = RobRunMemory::ReadInt64(
+                localSlot->second + rr::BattleCharacterSlotData::PublicId);
+            if (value > 0) localPublicId = static_cast<std::uint64_t>(value);
+        }
+    }
+    const std::uint64_t partyNow = GetTickCount64();
+    if (g_partyStamp == 0 || partyNow - g_partyStamp >= 1000) {
+        g_partyStamp = partyNow;
+        RefreshParty(cachedGame, localEntityId, localPublicId);
+    }
 
     const std::uintptr_t entityDictionary = ReadPtr(
         cachedBattleEntities + rr::BattleEntitiesModel::EntityDict);
@@ -1853,6 +2192,7 @@ static void UpdateInternal()
                     ReadSlotIdentity(slotIt->second, scratch);
                     detail.nickname = std::move(scratch.nickname);
                     detail.clanTag = std::move(scratch.clanTag);
+                    detail.publicId = scratch.publicId;
                 }
             }
 
@@ -1869,6 +2209,8 @@ static void UpdateInternal()
             entity.vehicleId = detail.vehicleId;
             entity.nickname = detail.nickname;
             entity.clanTag = detail.clanTag;
+            entity.publicId = detail.publicId;
+            entity.isPartyMember = IsPartyMember(entity.entityId, entity.publicId);
             entity.weaponName = detail.weaponName;
             entity.weaponIndex = detail.weaponIndex;
             entity.isFiring = detail.isFiring;

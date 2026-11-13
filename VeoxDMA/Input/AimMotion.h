@@ -15,6 +15,10 @@ struct Settings {
     float countsPerPixelX = 1, countsPerPixelY = 1;
     float deadzonePixels = 0;
     float maxCountsPerSecond = 8000;
+    // When > 0, use a millisecond response time instead of the slider curve.
+    // The hardware path sets this from the same Smoothness mapping the memory
+    // write path uses, so both aim modes converge at the same rate.
+    float responseMs = 0;
 };
 inline float Alpha(int slider, float dt) {
     if (slider <= 1) return 1;
@@ -22,13 +26,19 @@ inline float Alpha(int slider, float dt) {
     return -std::expm1(std::log1p(-fraction) * std::clamp(dt, 0.f, 0.05f) * 125.f);
 }
 inline bool Finite(Vec2 v) { return std::isfinite(v.x) && std::isfinite(v.y); }
+inline float ResponseGain(float responseMs, float dt) {
+    if (!(responseMs > 0.f) || !std::isfinite(responseMs)) return -1.f;
+    const float seconds = (std::max)(0.f, dt);
+    return 1.f - std::exp(-seconds * 1000.f / responseMs);
+}
 inline Vec2 Step(Vec2 error, const Settings& s, float dt) {
     if (!Finite(error) || !std::isfinite(dt) || dt <= 0
         || !std::isfinite(s.countsPerPixelX) || !std::isfinite(s.countsPerPixelY)
         || s.countsPerPixelX <= 0 || s.countsPerPixelY <= 0
         || std::hypot(error.x, error.y) <= s.deadzonePixels) return {};
-    Vec2 out{error.x * Alpha(s.smoothX, dt) * s.countsPerPixelX,
-             error.y * Alpha(s.smoothY, dt) * s.countsPerPixelY};
+    const float response = ResponseGain(s.responseMs, dt);
+    Vec2 out{error.x * (response >= 0.f ? response : Alpha(s.smoothX, dt)) * s.countsPerPixelX,
+             error.y * (response >= 0.f ? response : Alpha(s.smoothY, dt)) * s.countsPerPixelY};
     const float length = std::hypot(out.x, out.y);
     const float limit = (std::max)(0.f, s.maxCountsPerSecond) * (std::min)(dt, 0.05f);
     if (length > limit && length > 0) { out.x *= limit / length; out.y *= limit / length; }
