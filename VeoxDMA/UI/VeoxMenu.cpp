@@ -1257,6 +1257,7 @@ void DrawAim()
 		ToggleRow("Skip Police Officer targets", &ConfigInstance.Aim.ExpIgnorePolice);
 		ToggleRow("Skip Criminal targets", &ConfigInstance.Aim.ExpIgnoreCriminal);
 		ToggleRow("Skip Civilian targets", &ConfigInstance.Aim.ExpIgnoreCivilian);
+		ToggleRow("Ignore Teammates", &ConfigInstance.Aim.ExpIgnoreTeammates);
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
 		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();

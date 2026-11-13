@@ -65,6 +65,10 @@ public:
 	bool ExpIgnorePolice = false;
 	bool ExpIgnoreCriminal = false;
 	bool ExpIgnoreCivilian = false;
+	// Skip entities whose role matches the local player's role. Roles are
+	// resolved by name, so this covers Criminal/Criminal, Police/Police, etc.
+	// It does nothing while the local role is unresolved.
+	bool ExpIgnoreTeammates = true;
 
 	json ToJson()
 	{
@@ -91,6 +95,7 @@ public:
 		j[ConfigName][LIT("ExpIgnorePolice")] = ExpIgnorePolice;
 		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
+		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
 		return j;
 	}
 
@@ -142,5 +147,7 @@ public:
 			ExpIgnoreCriminal = j[ConfigName][LIT("ExpIgnoreCriminal")];
 		if (j[ConfigName].contains(LIT("ExpIgnoreCivilian")))
 			ExpIgnoreCivilian = j[ConfigName][LIT("ExpIgnoreCivilian")];
+		if (j[ConfigName].contains(LIT("ExpIgnoreTeammates")))
+			ExpIgnoreTeammates = j[ConfigName][LIT("ExpIgnoreTeammates")];
 	}
 };

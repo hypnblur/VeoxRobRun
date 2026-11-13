@@ -121,16 +121,29 @@ float Distance(const Vector3& a, const Vector3& b)
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// Role ids are hashed enums, so the reader resolves a name through reflection.
+// These two ids are the ones seen in every dump and act as the fallback when
+// reflection could not walk the wrapper.
+std::string RoleLabel(int role, const std::string& name)
+{
+    if (!name.empty()) return name;
+    if (role == 1257638368) return "Criminal";
+    if (role == 6) return "Hubber";
+    return {};
+}
+
 // Role labels come from the reader's reflection pass. Mirror the ESP's id
 // fallbacks so the aim filter and the overlay never disagree about a target.
-bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+// `localRole` is the local player's resolved role: matching it means the
+// entity is on the same side, which the teammate filter drops.
+bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg,
+    const std::string& localRole)
 {
-    std::string role = ent.roleName;
-    if (role.empty() && ent.role == 1257638368) role = "Criminal";
-    if (role.empty() && ent.role == 6) role = "Hubber";
+    const std::string role = RoleLabel(ent.role, ent.roleName);
     if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
+    if (cfg.ExpIgnoreTeammates && !localRole.empty() && role == localRole) return true;
     return false;
 }
 
@@ -690,6 +703,16 @@ void Tick()
     }
     g_debug.entities = static_cast<int>(snapshot->entities.size());
 
+    // Local player's role decides which entities count as teammates. The
+    // local character is published in the same list, so no extra read is
+    // needed here; an unresolved role simply disables the teammate filter.
+    std::string localRole;
+    for (const auto& ent : snapshot->entities) {
+        if (ent.entityId != snapshot->localEntityId) continue;
+        localRole = RoleLabel(ent.role, ent.roleName);
+        break;
+    }
+
     // A scene/session change (level transition, new match) invalidates every
     // pointer the aim was holding. Reset smoothing and block memory writes
     // until the reader has published fresh, re-resolved objects.
@@ -753,7 +776,7 @@ void Tick()
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
-        if (ShouldSkipByRole(ent, cfg)) continue;
+        if (ShouldSkipByRole(ent, cfg, localRole)) continue;
         // Animator/cull gate: skip characters whose pose has frozen, which is
         // the closest read-only equivalent of "not visible". This is not wall
         // occlusion.
