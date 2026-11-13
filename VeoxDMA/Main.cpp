@@ -19,7 +19,6 @@
 static std::atomic<bool> g_attached{ false };
 static std::atomic<bool> g_stopAttach{ false };
 static std::atomic<bool> g_pendingAttachToast{ false };
-static std::atomic<bool> g_pendingBackdrop{ false };
 static std::thread g_attachThread;
 static HINSTANCE g_hInstance = nullptr;
 
@@ -66,7 +65,6 @@ static bool AttachGame()
 	SetAttachStatus("Attached.");
 	g_attached.store(true, std::memory_order_release);
 	g_pendingAttachToast.store(true);
-	g_pendingBackdrop.store(true);
 	return true;
 }
 
@@ -92,11 +90,6 @@ static void TickOverlay()
 {
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
-
-	if (g_pendingBackdrop.exchange(false)) {
-		Backdrop::Create(g_hInstance);
-		Backdrop::Show();
-	}
 
 	// Persist settings whenever the menu closes, so a user does not have to
 	// remember a separate save step. Shutdown saves again as a backstop.
