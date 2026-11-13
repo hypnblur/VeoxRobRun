@@ -18,12 +18,12 @@ public:
 	bool SecondaryWeapon = false;
 	D2D1::ColorF TextColour = Colour(255, 255, 255);
 	int FontSize = 11;
-	// Animator/cull check, not wall occlusion. Unity animates local rotations,
-	// so the reader compares full local TRS across the whole skeleton and
-	// colours every segment from one per-character result.
+	// Camera occlusion pass over the city colliders: each bone is ray-cast
+	// from the camera, so only geometry blocks it. Without the BVH the reader
+	// falls back to the animator/cull state (see the menu note).
 	bool VisCheck = false;
-	D2D1::ColorF VisibleColour = Colour(255, 50, 50);  // animator active
-	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // pose frozen / culled
+	D2D1::ColorF VisibleColour = Colour(255, 50, 50);  // unoccluded from camera
+	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // occluded / culled
 	bool WallCheck = false;
 	std::string BvhPath = "city_colliders.bvh";
 	// Project the ESP with the Unity render camera instead of the managed
@@ -46,6 +46,10 @@ public:
 	D2D1::ColorF StateColour = Colour(255, 180, 0);
 	D2D1::ColorF BoxColour = Colour(255, 255, 255);
 
+	// Render-thread pose interpolation. The reader publishes raw 30 Hz samples;
+	// the overlay advances each bone between the two newest snapshots using a
+	// steady_clock timestamp. PoseSmoothAlpha is the lead: 0 draws the newest
+	// sample, 1 extrapolates up to one extra sample interval.
 	bool PoseSmoothing = true;
 	float PoseSmoothAlpha = 0.5f;
     void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)

@@ -89,34 +89,113 @@ struct Snapshot {
     }
 };
 
+bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
+{
+    out = RigTarget{};
+    if (!read || view <= 0x10000) return false;
+    Snapshot m{read,{}};
+
+    // Documented chain: the entity view exposes the movement view, and the
+    // CharacterMovementView exposes the managed root Transform through
+    // _transform(). The native Unity object is what owns the transform
+    // hierarchy, so both hops are needed.
+    U movement = m.ptr(view, 0x20);
+    U managed = (movement > 0x10000) ? m.ptr(movement, 0x20) : 0;
+    U native = (managed > 0x10000) ? m.ptr(managed, 0x10) : 0;
+
+    // Some rigs expose the same native transform straight off the view; keep
+    // that as a fallback rather than rejecting the character.
+    if (native <= 0x10000) native = m.ptr(view, 0x10);
+    if (native <= 0x10000) return false;
+
+    U hierarchy = m.ptr(native, 0x28);
+    U matrices = m.ptr(hierarchy, 0x18);
+    std::int32_t count = 0;
+    if (hierarchy <= 0x10000 || matrices <= 0x10000 ||
+        !m.get(hierarchy + 0x38, count) || count < 2 || count > 512)
+        return false;
+
+    out.view = view;
+    out.movementView = movement;
+    out.managedTransform = managed;
+    out.nativeTransform = native;
+    out.hierarchy = hierarchy;
+    out.matrices = matrices;
+    out.count = count;
+    return true;
+}
+
+bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target)
+{
+    // The parent table and the matrix array belong to one hierarchy instance.
+    // A new native object, hierarchy, array pointer or bone count means the
+    // cached indices describe something that no longer exists.
+    return target.nativeTransform == layout.nativeTransform &&
+        target.hierarchy == layout.hierarchy &&
+        target.matrices == layout.matrices &&
+        target.count == layout.count;
+}
+
 bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 {
     out = RigLayout{};
     if (!read || view <= 0x10000) return false;
     Snapshot m{read,{}};
     if (!m.is(view,"BattleCharacterEntityView")) return false;
-    // Verified path: the entity view exposes the native Unity object at +0x10.
-    // Fall back to the movement view -> managed Transform path when that
-    // pointer is not a hierarchy-bearing Transform.
-    U native = m.ptr(view,0x10), hierarchy = m.ptr(native,0x28);
-    if (native <= 0x10000 || hierarchy <= 0x10000) {
-        U movement = m.ptr(view,0x20);
-        if (!m.isOneOf(movement,{"CharacterMovementView","MovementView"})) return false;
-        U managed = m.ptr(movement,0x20);
-        if (!m.is(managed,"Transform")) return false;
-        native = m.ptr(managed,0x10);
-        hierarchy = m.ptr(native,0x28);
+    // The view is the live registry entry for this entity, so the transform
+    // chain is walked from it: movement view -> managed _transform() -> native
+    // Transform -> hierarchy. The native object at view+0x10 is tried second,
+    // because on most characters it is the same transform, but a rig whose
+    // root is only reachable through the movement view used to fail here and
+    // never get a skeleton at all.
+    U movement = m.ptr(view,0x20);
+    U managed = (movement > 0x10000) ? m.ptr(movement,0x20) : 0;
+    U native = 0, hierarchy = 0;
+    U matrices = 0, parents = 0, pointers = 0;
+    std::int32_t count = 0;
+    std::vector<TRS> local;
+    std::vector<std::int32_t> parent;
+    std::vector<U> transforms;
+    for (U candidate : {
+            (managed > 0x10000) ? m.ptr(managed,0x10) : U(0),
+            m.ptr(view,0x10) })
+    {
+        if (candidate <= 0x10000) continue;
+        U candidateHierarchy = m.ptr(candidate,0x28);
+        if (candidateHierarchy <= 0x10000) continue;
+        U candidateMatrices = m.ptr(candidateHierarchy,0x18);
+        U candidateParents = m.ptr(candidateHierarchy,0x20);
+        U candidatePointers = m.ptr(candidateHierarchy,0x30);
+        std::int32_t candidateCount = 0;
+        if (candidateMatrices <= 0x10000 || candidateParents <= 0x10000 ||
+            candidatePointers <= 0x10000 ||
+            !m.get(candidateHierarchy+0x38,candidateCount) ||
+            candidateCount < 2 || candidateCount > 512) continue;
+        std::vector<TRS> candidateLocal(candidateCount);
+        std::vector<std::int32_t> candidateParent(candidateCount);
+        std::vector<U> candidateTransforms(candidateCount);
+        if (!m.array(candidateMatrices,candidateLocal,false) ||
+            !m.array(candidateParents,candidateParent,true) ||
+            !m.array(candidatePointers,candidateTransforms,true)) continue;
+        // The candidate is only the root when the hierarchy actually holds it.
+        bool inHierarchy = false;
+        for (U transform : candidateTransforms)
+            if (transform == candidate) { inHierarchy = true; break; }
+        if (!inHierarchy) continue;
+        native = candidate;
+        hierarchy = candidateHierarchy;
+        matrices = candidateMatrices;
+        parent = std::move(candidateParent);
+        transforms = std::move(candidateTransforms);
+        local = std::move(candidateLocal);
+        count = candidateCount;
+        break;
     }
     if (native <= 0x10000 || hierarchy <= 0x10000) return false;
-    U matrices = m.ptr(hierarchy,0x18), parents = m.ptr(hierarchy,0x20);
-    U pointers = m.ptr(hierarchy,0x30);
-    std::int32_t count = 0;
-    if (!m.get(hierarchy+0x38,count) || count < 2 || count > 512) return false;
-    std::vector<TRS> local(count);
-    std::vector<std::int32_t> parent(count);
-    std::vector<U> transforms(count);
-    if (!m.array(matrices,local,false) || !m.array(parents,parent,true) ||
-        !m.array(pointers,transforms,true) || !m.stable()) return false;
+    // The parent/pointer arrays must not have changed while they were read;
+    // a layout built from a half-written table indexes the wrong bones.
+    if (!m.stable()) return false;
+
     // Validate each bone's parent chain individually. A bone whose parent
     // index is out of range or forms a cycle is marked unreachable rather
     // than rejecting the entire layout.
@@ -188,6 +267,20 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                     if (other == index) { duplicate = true; break; }
                 if (duplicate) continue;
                 limbIndices.push_back(index);
+            }
+            // The IK view lists the limb top-down, but the array can also carry
+            // prop/weapon bones. Keep only the leading bones that form a real
+            // parent -> child chain: an extra entry used to be pushed as an
+            // anchor, which drew "arms" out to a weapon or a finger.
+            {
+                std::vector<int> chain;
+                for (int index : limbIndices) {
+                    if (chain.size() >= 3) break;
+                    if (chain.empty()) { chain.push_back(index); continue; }
+                    if (!ancestor(chain.back(), index)) break;
+                    chain.push_back(index);
+                }
+                if (chain.size() >= 2) limbIndices = std::move(chain);
             }
             for (int index : limbIndices) pushAnchor(index);
             auto assign = [&](std::int32_t& a, std::int32_t& b, std::int32_t& c) {

@@ -38,4 +38,8 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
 
 float ReadNativeFov();
 
+// Fast path: scatter-reads view+projection in one device transaction,
+// no managed validation. Use when native camera was valid last frame.
+CameraData GetCameraMatricesFast();
+
 } // namespace CameraFinder

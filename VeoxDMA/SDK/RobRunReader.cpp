@@ -7,6 +7,7 @@
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -43,10 +44,25 @@ static std::uintptr_t lastUpdater = 0;
 static std::int32_t lastLocalEntityId = -1;
 static bool lastSessionValid = false;
 
+static std::unordered_map<std::int32_t, std::uintptr_t> cachedSlots;
+static std::uint64_t slotRefreshStamp = 0;
+static std::unordered_map<std::int32_t, std::uintptr_t> cachedViews;
+static std::uint64_t viewRefreshStamp = 0;
+static std::uint64_t cameraResolveStamp = 0;
+static std::uint64_t localChainStamp = 0;
+static std::uint64_t fullResolveStamp = 0;
+
 static void MarkSessionChanged()
 {
     ++sessionGeneration;
     sessionChangedMs = GetTickCount64();
+    cachedSlots.clear();
+    cachedViews.clear();
+    slotRefreshStamp = 0;
+    viewRefreshStamp = 0;
+    cameraResolveStamp = 0;
+    localChainStamp = 0;
+    fullResolveStamp = 0;
 }
 
 // Called once per pass after resolution. Any change in the scene roots means
@@ -157,9 +173,11 @@ struct RigCacheEntry {
     // and the layout needs rebuilding.
     int poseFailures = 0;
     std::uint64_t poseFailureSince = 0;
-    std::vector<Skeleton::BoneSegment> smoothedBones;
-    Skeleton::BonePoints smoothedPoints;
-    bool smoothedValid = false;
+    // Live-hierarchy check (view -> movement view -> _transform() -> hierarchy).
+    // A cached matrix array belongs to one hierarchy instance; a new native
+    // transform, hierarchy, array or bone count means the cached indices
+    // describe a rig that no longer exists.
+    int targetFailures = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -214,6 +232,15 @@ static bool DmaReadFresh(std::uint64_t address, void* buffer, std::size_t size)
     return TargetProcess.ReadFresh(static_cast<std::uintptr_t>(address), buffer, size);
 }
 
+// High-resolution monotonic clock for pose timestamps. GetTickCount64 is far
+// too coarse (~15.6 ms) to interpolate a 30 Hz pose stream.
+static std::uint64_t SteadyMicros()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
@@ -236,6 +263,7 @@ static void PublishSnapshot()
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
     snapshot->stampMs = GetTickCount64();
+    snapshot->stampUs = SteadyMicros();
     snapshot->sessionGeneration = sessionGeneration;
     snapshot->sessionChangedMs = sessionChangedMs;
     for (const auto& entity : entities) {
@@ -292,6 +320,13 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     entities.clear();
     detailCache.clear();
     rigCache.clear();
+    cachedSlots.clear();
+    cachedViews.clear();
+    slotRefreshStamp = 0;
+    viewRefreshStamp = 0;
+    cameraResolveStamp = 0;
+    localChainStamp = 0;
+    fullResolveStamp = 0;
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
         g_worldState = std::make_shared<RobRunWorld::State>();
@@ -774,16 +809,17 @@ static void UpdateInternal()
         return;
     }
 
-    // Re-resolve every pass instead of only when zero. A level change destroys
-    // and recreates the camera object; keeping the first pointer made memory
-    // aim keep writing into freed/reused memory, which crashed the game.
     {
-        const std::uintptr_t cameraCandidate = ReadPtr(
-            cachedBattleModel + rr::BattleModel::BattleCameraModel);
-        cachedCameraModel =
-            (cameraCandidate > 0x10000 &&
-             IsClass(cameraCandidate, "BattleCameraModel"))
-            ? cameraCandidate : 0;
+        const std::uint64_t camNow = GetTickCount64();
+        if (!cachedCameraModel || camNow - cameraResolveStamp >= 500) {
+            cameraResolveStamp = camNow;
+            const std::uintptr_t cameraCandidate = ReadPtr(
+                cachedBattleModel + rr::BattleModel::BattleCameraModel);
+            cachedCameraModel =
+                (cameraCandidate > 0x10000 &&
+                 IsClass(cameraCandidate, "BattleCameraModel"))
+                ? cameraCandidate : 0;
+        }
     }
     g_renderCameraModel.store(cachedCameraModel, std::memory_order_release);
     cameraState = RobRunCamera::Read(cachedCameraModel);
@@ -817,26 +853,28 @@ static void UpdateInternal()
                 localPosition = position;
             }
 
-            // Resolve LookDirectionModel for multi-model aim writes:
-            // BattleCharacterModel -> Data(0x40) -> CommonModel::LookDirection(0x30)
-            const std::uintptr_t dataModel = ReadPtr(
-                cachedLocalCharacter + rr::BattleCharacterModel::Data);
-            if (dataModel > 0x10000)
-                cachedLookDirectionModel = ReadPtr(
-                    dataModel + rr::CommonModel::LookDirection);
-            else
-                cachedLookDirectionModel = 0;
+            {
+                const std::uint64_t chainNow = GetTickCount64();
+                if (!cachedLookDirectionModel || chainNow - localChainStamp >= 500) {
+                    localChainStamp = chainNow;
+                    const std::uintptr_t dataModel = ReadPtr(
+                        cachedLocalCharacter + rr::BattleCharacterModel::Data);
+                    if (dataModel > 0x10000)
+                        cachedLookDirectionModel = ReadPtr(
+                            dataModel + rr::CommonModel::LookDirection);
+                    else
+                        cachedLookDirectionModel = 0;
 
-            // BCM+0x70 LookDirectionModel (has _value, _yaw, _pitch)
-            cachedLookDirDirect = ReadPtr(cachedLocalCharacter + rr::BattleCharacterModel::LookDirection);
-            if (cachedLookDirDirect <= 0x10000) cachedLookDirDirect = 0;
+                    cachedLookDirDirect = ReadPtr(cachedLocalCharacter + rr::BattleCharacterModel::LookDirection);
+                    if (cachedLookDirDirect <= 0x10000) cachedLookDirDirect = 0;
 
-            // BattleModel+0x40 PlayerRotationInput
-            if (cachedBattleModel > 0x10000)
-                cachedPlayerRotationInput = ReadPtr(cachedBattleModel + rr::BattleModel::PlayerRotationInput);
-            else
-                cachedPlayerRotationInput = 0;
-            if (cachedPlayerRotationInput <= 0x10000) cachedPlayerRotationInput = 0;
+                    if (cachedBattleModel > 0x10000)
+                        cachedPlayerRotationInput = ReadPtr(cachedBattleModel + rr::BattleModel::PlayerRotationInput);
+                    else
+                        cachedPlayerRotationInput = 0;
+                    if (cachedPlayerRotationInput <= 0x10000) cachedPlayerRotationInput = 0;
+                }
+            }
         }
     } else {
         cachedLocalCharacter = 0;
@@ -860,65 +898,79 @@ static void UpdateInternal()
         }
     }
 
-    std::unordered_map<std::int32_t, std::uintptr_t> views;
-    if (cachedUpdater > 0x10000) {
-        const std::uintptr_t viewDictionary = ReadPtr(
-            cachedUpdater + rr::BattleEntitiesUpdater::_characterEntityViews);
-        std::vector<RobRunMemory::DictEntry> viewEntries;
-        if (RobRunMemory::ReadDictInt(viewDictionary, viewEntries)) {
-            views.reserve(viewEntries.size());
-            for (const auto& entry : viewEntries)
-                views[entry.key] = entry.value;
+    {
+        // The view is registered per entity id by the updater; it is not
+        // cached by the model. Re-read it often enough that a respawn or a
+        // pooled character cannot keep the old rig for long.
+        const std::uint64_t viewNow = GetTickCount64();
+        if (cachedUpdater > 0x10000 &&
+            (viewRefreshStamp == 0 || viewNow - viewRefreshStamp >= 400))
+        {
+            viewRefreshStamp = viewNow;
+            cachedViews.clear();
+            const std::uintptr_t viewDictionary = ReadPtr(
+                cachedUpdater + rr::BattleEntitiesUpdater::_characterEntityViews);
+            std::vector<RobRunMemory::DictEntry> viewEntries;
+            if (RobRunMemory::ReadDictInt(viewDictionary, viewEntries)) {
+                cachedViews.reserve(viewEntries.size());
+                for (const auto& entry : viewEntries)
+                    cachedViews[entry.key] = entry.value;
+            }
         }
     }
+    const auto& views = cachedViews;
 
-    std::unordered_map<std::int32_t, std::uintptr_t> slots;
-    std::vector<RobRunMemory::DictEntry> slotEntries;
-    bool slotsRead = false;
+    {
+        const std::uint64_t slotNow = GetTickCount64();
+        if (slotRefreshStamp == 0 || slotNow - slotRefreshStamp >= 5000)
+        {
+            slotRefreshStamp = slotNow;
+            cachedSlots.clear();
 
-    // New offset set: BattleModel+0x248 -> slots model +0x18 -> dictionary.
-    // Both the model offset and the dictionary offset have legacy variants, so
-    // try the new pair first and fall back without losing older sessions.
-    const std::uintptr_t slotsModel = ReadPtr(
-        cachedBattleModel + rr::BattleModel::CharacterSlotsModel);
-    if (slotsModel > 0x10000) {
-        std::uintptr_t slotDictionary = ReadPtr(
-            slotsModel + rr::CharacterSlotsModel::SlotDict);
-        slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
-        if (!slotsRead) {
-            slotDictionary = ReadPtr(
-                slotsModel + rr::CharacterSlotsModel::SlotDictLegacy);
-            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+            std::vector<RobRunMemory::DictEntry> slotEntries;
+            bool slotsRead = false;
+
+            const std::uintptr_t slotsModel = ReadPtr(
+                cachedBattleModel + rr::BattleModel::CharacterSlotsModel);
+            if (slotsModel > 0x10000) {
+                std::uintptr_t slotDictionary = ReadPtr(
+                    slotsModel + rr::CharacterSlotsModel::SlotDict);
+                slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+                if (!slotsRead) {
+                    slotDictionary = ReadPtr(
+                        slotsModel + rr::CharacterSlotsModel::SlotDictLegacy);
+                    slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+                }
+            }
+
+            if (!slotsRead) {
+                const std::uintptr_t legacyModel = ReadPtr(
+                    cachedBattleModel + rr::BattleModel::CharacterSlotsModelLegacy);
+                if (legacyModel > 0x10000) {
+                    std::uintptr_t slotDictionary = ReadPtr(
+                        legacyModel + rr::CharacterSlotsModel::SlotDictLegacy);
+                    slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+                }
+            }
+
+            if (!slotsRead) {
+                const std::uintptr_t slotsRoot = ReadPtr(
+                    cachedBattleEntities + rr::BattleEntitiesModel::CharacterSlotsRoot);
+                if (slotsRoot > 0x10000) {
+                    const std::uintptr_t slotDictionary = ReadPtr(
+                        slotsRoot + rr::CharacterSlotsRoot::SlotDict);
+                    slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
+                }
+            }
+
+            if (slotsRead) {
+                cachedSlots.reserve(slotEntries.size());
+                for (const auto& entry : slotEntries)
+                    cachedSlots[entry.key] = entry.value;
+            }
         }
     }
-
-    // Legacy model offset.
-    if (!slotsRead) {
-        const std::uintptr_t legacyModel = ReadPtr(
-            cachedBattleModel + rr::BattleModel::CharacterSlotsModelLegacy);
-        if (legacyModel > 0x10000) {
-            std::uintptr_t slotDictionary = ReadPtr(
-                legacyModel + rr::CharacterSlotsModel::SlotDictLegacy);
-            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
-        }
-    }
-
-    // Legacy fallback: BattleEntitiesModel+0x80 -> root +0x18 -> dictionary.
-    if (!slotsRead) {
-        const std::uintptr_t slotsRoot = ReadPtr(
-            cachedBattleEntities + rr::BattleEntitiesModel::CharacterSlotsRoot);
-        if (slotsRoot > 0x10000) {
-            const std::uintptr_t slotDictionary = ReadPtr(
-                slotsRoot + rr::CharacterSlotsRoot::SlotDict);
-            slotsRead = RobRunMemory::ReadDictInt(slotDictionary, slotEntries);
-        }
-    }
-
-    if (slotsRead) {
-        slots.reserve(slotEntries.size());
-        for (const auto& entry : slotEntries)
-            slots[entry.key] = entry.value;
-    }
+    const auto& slots = cachedSlots;
 
     const std::uintptr_t entityDictionary = ReadPtr(
         cachedBattleEntities + rr::BattleEntitiesModel::EntityDict);
@@ -959,36 +1011,49 @@ static void UpdateInternal()
         };
         std::vector<PreResolve> pre;
         pre.reserve(entityEntries.size());
+        std::vector<std::size_t> needResolve;
+
+        const std::uint64_t resolveNow = GetTickCount64();
+        const bool forceFullResolve = resolveNow - fullResolveStamp >= 2000;
+        if (forceFullResolve) fullResolveStamp = resolveNow;
+
         for (const auto& entry : entityEntries) {
             if (entry.value <= 0x10000) continue;
-            pre.push_back({ entry.key, entry.value, 0, 0 });
+            PreResolve p{ entry.key, entry.value, 0, 0 };
+            if (!forceFullResolve) {
+                const auto cd = detailCache.find(entry.key);
+                if (cd != detailCache.end() && cd->second.characterModel > 0x10000)
+                    p.clientModel = cd->second.characterModel;
+                else
+                    needResolve.push_back(pre.size());
+            } else {
+                needResolve.push_back(pre.size());
+            }
+            pre.push_back(p);
         }
 
-        if (!pre.empty()) {
+        if (!needResolve.empty()) {
             auto sc = TargetProcess.CreateScatterHandleCached();
             if (sc) {
-                for (auto& p : pre) {
+                for (auto idx : needResolve) {
                     TargetProcess.AddScatterReadRequest(sc,
-                        p.entityModel + rr::BattleCharacterEntityModel::ClientModel,
-                        &p.clientModel, sizeof(std::uintptr_t));
+                        pre[idx].entityModel + rr::BattleCharacterEntityModel::ClientModel,
+                        &pre[idx].clientModel, sizeof(std::uintptr_t));
                     TargetProcess.AddScatterReadRequest(sc,
-                        p.entityModel + rr::BattleCharacterEntityModel::SimulatedModel,
-                        &p.simulatedModel, sizeof(std::uintptr_t));
+                        pre[idx].entityModel + rr::BattleCharacterEntityModel::SimulatedModel,
+                        &pre[idx].simulatedModel, sizeof(std::uintptr_t));
                 }
                 TargetProcess.ExecuteScatterReadCached(sc);
                 TargetProcess.CloseScatterHandle(sc);
             }
         }
 
-        for (auto& p : pre) {
+        for (auto idx : needResolve) {
+            auto& p = pre[idx];
             std::uintptr_t characterModel = p.clientModel;
             if (characterModel <= 0x10000) characterModel = 0;
 
-            const auto cachedDetail = detailCache.find(p.key);
-            const bool clientModelKnown = characterModel > 0x10000 &&
-                cachedDetail != detailCache.end() &&
-                cachedDetail->second.characterModel == characterModel;
-            if (characterModel > 0x10000 && !clientModelKnown &&
+            if (characterModel > 0x10000 &&
                 !IsClass(characterModel, "BattleCharacterModel"))
             {
                 if (p.simulatedModel > 0x10000 &&
@@ -1062,14 +1127,98 @@ static void UpdateInternal()
         }
 
         // ---------------------------------------------------------------
-        // Phase 2: Scatter-read all position blocks in one DMA call.
+        // Phase 2b: confirm the cached matrix array still belongs to the live
+        // transform hierarchy. The view is the per-entity registry entry, so
+        // the chain is re-navigated from it (movement view -> _transform() ->
+        // native Transform -> hierarchy) instead of trusting an array pointer
+        // read in an earlier pass. One entity is checked per pass, so a
+        // reallocated hierarchy is caught in about half a second rather than
+        // at the two-second rebuild timer.
+        // ---------------------------------------------------------------
+        if (!work.empty()) {
+            static std::size_t rigCheckSeed = 0;
+            auto& check = work[rigCheckSeed++ % work.size()];
+            auto rigIt = rigCache.find(check.entityId);
+            if (rigIt != rigCache.end() && rigIt->second.layoutValid &&
+                rigIt->second.layout.hierarchy > 0x10000)
+            {
+                auto& rig = rigIt->second;
+                std::uint64_t liveMatrices = 0;
+                const bool readOk = DmaRead(rig.layout.hierarchy + 0x18,
+                    &liveMatrices, sizeof(liveMatrices));
+                if (readOk && liveMatrices == rig.layout.matrices) {
+                    rig.targetFailures = 0;
+                } else {
+                    const auto viewIt = views.find(check.entityId);
+                    const std::uintptr_t checkView =
+                        (viewIt != views.end()) ? viewIt->second : 0;
+                    Skeleton::RigTarget target;
+                    if (checkView > 0x10000 &&
+                        Skeleton::ResolveRigTarget(checkView, DmaReadFresh, target))
+                    {
+                        rig.targetFailures = 0;
+                        if (!Skeleton::MatchesRigTarget(rig.layout, target)) {
+                            // The rig moved under us: rebuild before this
+                            // pass samples a pose from the old arrays.
+                            rig.layoutValid = false;
+                            rig.layoutStamp = 0;
+                            rig.bones.clear();
+                            rig.points = Skeleton::BonePoints{};
+                        }
+                    } else if (++rig.targetFailures >= 2) {
+                        // Two passes in a row with no reachable hierarchy:
+                        // the character is gone or pooled. Rebuild later.
+                        rig.targetFailures = 0;
+                        rig.layoutValid = false;
+                        rig.layoutStamp = 0;
+                        rig.bones.clear();
+                        rig.points = Skeleton::BonePoints{};
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------
+        // Pre-pass: collect pose requests from cached rig state so
+        // positions and poses can be read in one device transaction.
+        // ---------------------------------------------------------------
+        std::vector<unsigned char> poseBuf;
+        std::size_t poseTotal = 0;
+
+        for (auto& w : work) {
+            const auto viewIt = views.find(w.entityId);
+            const std::uintptr_t viewPtr =
+                (viewIt != views.end()) ? viewIt->second : 0;
+            auto rigIt = rigCache.find(w.entityId);
+            if (rigIt != rigCache.end() && rigIt->second.layoutValid &&
+                rigIt->second.view == viewPtr)
+            {
+                const std::size_t sz = Skeleton::PoseDataSize(rigIt->second.layout);
+                w.needsPose = true;
+                w.poseOffset = poseTotal;
+                w.poseSize = sz;
+                poseTotal += sz;
+            }
+        }
+        poseBuf.resize(poseTotal, 0);
+
+        // ---------------------------------------------------------------
+        // Phase 2: Scatter-read positions AND poses in one DMA call
+        // so skeletons are sampled at the same instant as positions.
         // ---------------------------------------------------------------
         if (!work.empty()) {
             auto scatter = TargetProcess.CreateScatterHandle();
             if (scatter) {
-                for (auto& w : work)
+                for (auto& w : work) {
                     TargetProcess.AddScatterReadRequest(scatter,
                         w.blockAddress, &w.block, sizeof(TransformBlock));
+                    if (w.needsPose) {
+                        auto& rig = rigCache[w.entityId];
+                        TargetProcess.AddScatterReadRequest(scatter,
+                            rig.layout.matrices,
+                            poseBuf.data() + w.poseOffset, w.poseSize);
+                    }
+                }
                 TargetProcess.ExecuteReadScatter(scatter);
                 TargetProcess.CloseScatterHandle(scatter);
             }
@@ -1094,15 +1243,15 @@ static void UpdateInternal()
         }
 
         // ---------------------------------------------------------------
-        // Phase 3: Build entity data, refresh details, resolve layouts,
-        //          and collect pose-read requests.
+        // Phase 3: Rig layout rebuilds and late pose collection.
+        // Layouts already valid had their pose read above; newly
+        // rebuilt layouts get a supplementary scatter.
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
+        std::vector<std::size_t> lateResolve;
 
-        std::vector<unsigned char> poseBuf;
-        std::size_t poseTotal = 0;
-
-        for (auto& w : work) {
+        for (std::size_t wi = 0; wi < work.size(); ++wi) {
+            auto& w = work[wi];
             if (!w.positionValid) continue;
 
             const auto viewIt = views.find(w.entityId);
@@ -1117,9 +1266,9 @@ static void UpdateInternal()
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
-                rig.smoothedValid = false;
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
+                rig.targetFailures = 0;
             }
 
             const bool dueForRebuild = !rig.layoutValid
@@ -1135,29 +1284,26 @@ static void UpdateInternal()
                 }
             }
 
-            if (rig.layoutValid) {
+            if (rig.layoutValid && !w.needsPose) {
                 const std::size_t sz = Skeleton::PoseDataSize(rig.layout);
                 w.needsPose = true;
                 w.poseOffset = poseTotal;
                 w.poseSize = sz;
                 poseTotal += sz;
+                lateResolve.push_back(wi);
             }
         }
 
-        // ---------------------------------------------------------------
-        // Phase 4: Scatter-read all pose matrices in one DMA call.
-        // ---------------------------------------------------------------
-        poseBuf.resize(poseTotal, 0);
-
-        if (poseTotal > 0) {
+        if (!lateResolve.empty()) {
+            poseBuf.resize(poseTotal, 0);
             auto scatter = TargetProcess.CreateScatterHandle();
             if (scatter) {
-                for (auto& w : work) {
-                    if (!w.needsPose) continue;
-                    auto& rig = rigCache[w.entityId];
+                for (auto idx : lateResolve) {
+                    auto& rig = rigCache[work[idx].entityId];
                     TargetProcess.AddScatterReadRequest(scatter,
                         rig.layout.matrices,
-                        poseBuf.data() + w.poseOffset, w.poseSize);
+                        poseBuf.data() + work[idx].poseOffset,
+                        work[idx].poseSize);
                 }
                 TargetProcess.ExecuteReadScatter(scatter);
                 TargetProcess.CloseScatterHandle(scatter);
@@ -1169,6 +1315,15 @@ static void UpdateInternal()
         // Cap periodic detail refreshes per pass so a full lobby never
         // stalls the loop with 20 sequential refresh chains at once.
         // ---------------------------------------------------------------
+        // Freshest camera for the occlusion pass. The render thread re-reads
+        // the camera every frame, so its copy is newer than the worker's ~30 Hz
+        // snapshot; using it keeps "visible from the camera" in step with the
+        // frame the overlay draws over.
+        RobRunCamera::CameraState visCamera = cameraState;
+        {
+            std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+            if (g_freshCamera.valid) visCamera = g_freshCamera;
+        }
         int detailBudget = 3;
         for (auto& w : work) {
             if (!w.positionValid) continue;
@@ -1278,7 +1433,6 @@ static void UpdateInternal()
                         rig.layoutValid = false;
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
-                        rig.smoothedValid = false;
                         rig.poseFailures = 0;
                     }
                 } else {
@@ -1321,92 +1475,52 @@ static void UpdateInternal()
                     rig.animatorActive = rig.lastMotionTick == 0 ||
                         now - rig.lastMotionTick < kFreezeMs;
 
+                    // Default visibility is animator state. It is only a
+                    // fallback: when the occluder scene is loaded the BVH pass
+                    // below replaces it with true camera occlusion. Poses are
+                    // published raw; interpolation/extrapolation happens once
+                    // per rendered frame in PlayerEsp.
                     for (auto& seg : rig.bones)
                         seg.visible = rig.animatorActive;
 
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
-
-                    if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
-                        rig.smoothedBones.size() == rig.bones.size()) {
-                        const float alpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
-                        const float inv = 1.0f - alpha;
-                        for (std::size_t i = 0; i < rig.bones.size(); ++i) {
-                            auto& s = rig.smoothedBones[i];
-                            const auto& r = rig.bones[i];
-                            s.a.x = s.a.x * inv + r.a.x * alpha;
-                            s.a.y = s.a.y * inv + r.a.y * alpha;
-                            s.a.z = s.a.z * inv + r.a.z * alpha;
-                            s.b.x = s.b.x * inv + r.b.x * alpha;
-                            s.b.y = s.b.y * inv + r.b.y * alpha;
-                            s.b.z = s.b.z * inv + r.b.z * alpha;
-                            s.visible = r.visible;
-                        }
-                        auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
-                            dst.x = dst.x * inv + src.x * alpha;
-                            dst.y = dst.y * inv + src.y * alpha;
-                            dst.z = dst.z * inv + src.z * alpha;
-                        };
-                        rig.smoothedPoints.valid = rig.points.valid;
-                        lerpVec(rig.smoothedPoints.head, rig.points.head);
-                        lerpVec(rig.smoothedPoints.neck, rig.points.neck);
-                        lerpVec(rig.smoothedPoints.chest, rig.points.chest);
-                        lerpVec(rig.smoothedPoints.pelvis, rig.points.pelvis);
-                        lerpVec(rig.smoothedPoints.leftShoulder, rig.points.leftShoulder);
-                        lerpVec(rig.smoothedPoints.leftElbow, rig.points.leftElbow);
-                        lerpVec(rig.smoothedPoints.leftHand, rig.points.leftHand);
-                        lerpVec(rig.smoothedPoints.rightShoulder, rig.points.rightShoulder);
-                        lerpVec(rig.smoothedPoints.rightElbow, rig.points.rightElbow);
-                        lerpVec(rig.smoothedPoints.rightHand, rig.points.rightHand);
-                        lerpVec(rig.smoothedPoints.leftHip, rig.points.leftHip);
-                        lerpVec(rig.smoothedPoints.leftKnee, rig.points.leftKnee);
-                        lerpVec(rig.smoothedPoints.leftFoot, rig.points.leftFoot);
-                        lerpVec(rig.smoothedPoints.rightHip, rig.points.rightHip);
-                        lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
-                        lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
-                    } else {
-                        rig.smoothedBones = rig.bones;
-                        rig.smoothedPoints = rig.points;
-                        rig.smoothedValid = true;
-                    }
                 }
             } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
                 rig.bones = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
                 rig.points = Skeleton::BonePoints{};
-                rig.smoothedValid = false;
             }
 
-            if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid) {
-                entity.bones = rig.smoothedBones;
-                entity.bonePoints = rig.smoothedPoints;
-            } else {
-                entity.bones = rig.bones;
-                entity.bonePoints = rig.points;
-            }
+            entity.bones = rig.bones;
+            entity.bonePoints = rig.points;
             entity.visible = rig.animatorActive;
 
-            if (ConfigInstance.Player.WallCheck && g_bvhScene.valid &&
-                cameraState.valid && entity.entityId != localEntityId)
+            // Camera-occlusion pass. VisCheck colours each bone by whether the
+            // camera can see it; WallCheck also hides the whole character from
+            // the aim gate when every bone is occluded. Both need the BVH, so
+            // without it the animator fallback above stays in effect and the
+            // menu says the occluder file is missing.
+            if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck) &&
+                g_bvhScene.valid && visCamera.valid &&
+                entity.entityId != localEntityId)
             {
                 const CollisionBVH::Float3 cam = {
-                    cameraState.position.x,
-                    cameraState.position.y,
-                    cameraState.position.z };
+                    visCamera.position.x,
+                    visCamera.position.y,
+                    visCamera.position.z };
                 bool anyVisible = false;
                 for (auto& seg : entity.bones) {
                     const CollisionBVH::Float3 mid = {
                         (seg.a.x + seg.b.x) * 0.5f,
                         (seg.a.y + seg.b.y) * 0.5f,
                         (seg.a.z + seg.b.z) * 0.5f };
-                    if (CollisionBVH::IsOccluded(g_bvhScene, cam, mid))
-                        seg.visible = false;
-                    else
+                    seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid);
+                    if (seg.visible)
                         anyVisible = true;
                 }
-                if (!anyVisible)
-                    entity.visible = false;
+                entity.visible = anyVisible;
             }
 
             if (entity.entityId == localEntityId && localPosition.IsZero() &&
@@ -1454,11 +1568,21 @@ void Update()
         !ConfigInstance.Player.BvhPath.empty() &&
         ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
     {
-        g_bvhScene = CollisionBVH::Scene{};
-        if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
-            g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
-        else
-            g_bvhLoadedPath.clear();
+        // Retry a missing occluder file at most every few seconds. Without
+        // this throttle a missing 31 MB BVH is reopened on every read pass and
+        // the reader spends its whole cycle in the filesystem.
+        static std::uint64_t bvhAttemptMs = 0;
+        const std::uint64_t bvhNow = GetTickCount64();
+        if (bvhAttemptMs != 0 && bvhNow - bvhAttemptMs < 5000) {
+            // still in the retry backoff
+        } else {
+            bvhAttemptMs = bvhNow ? bvhNow : 1;
+            g_bvhScene = CollisionBVH::Scene{};
+            if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
+                g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
+            else
+                g_bvhLoadedPath.clear();
+        }
     }
 
     UpdateInternal();
@@ -1517,18 +1641,35 @@ void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
 void RefreshCamera()
 {
-    // Managed camera first. Its position is never written by aim, so it is the
-    // anchor used to identify which tagged Unity camera is the real render
-    // camera; its orientation may be our aim angle, so the native camera is
-    // only accepted when it is the same physical camera.
+    // Fast path: when the native camera was valid last frame, skip the
+    // managed read entirely and scatter-read just view+projection in one
+    // device transaction (~2ms instead of ~8ms).
+    if (ConfigInstance.Player.NativeEspCamera) {
+        bool nativeWasValid;
+        {
+            std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+            nativeWasValid = g_nativeViewProjectionValid;
+        }
+        if (nativeWasValid) {
+            CameraFinder::CameraData fast = CameraFinder::GetCameraMatricesFast();
+            if (fast.valid) {
+                std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+                g_nativeViewProjectionValid = true;
+                g_nativeView = fast.view;
+                g_nativeProjection = fast.projection;
+                g_nativePositionError = -1.f;
+                g_nativeForwardDot = -1.f;
+                return;
+            }
+        }
+    }
+
+    // Full path: read managed camera, then validate native against it.
     RobRunCamera::CameraState managed{};
     const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
     if (model) {
         managed = RobRunCamera::Read(model);
         if (managed.valid) {
-            // The managed read gets FOV from Cinemachine, but some games
-            // modify the Unity Camera's FOV directly (e.g. speed-based zoom).
-            // Read the native projection to get the real rendered FOV.
             const float nativeFov = CameraFinder::ReadNativeFov();
             if (nativeFov > 0.f)
                 managed.verticalFov = nativeFov;

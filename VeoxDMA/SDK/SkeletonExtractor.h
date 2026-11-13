@@ -54,8 +54,32 @@ struct RigLayout {
     std::int32_t rightHip = -1, rightKnee = -1, rightFoot = -1;
 };
 
+// Live transform chain of one character, re-navigated from the entity view.
+// The view is the per-entity registry entry (BattleEntitiesUpdater ->
+// _characterEntityViews); the root transform hangs off its movement view
+// (MovementView / CharacterMovementView._transform). Unity recreates the
+// hierarchy and its arrays on weapon/armour changes, pooling and respawns, so
+// the array pointers must never be trusted across passes.
+struct RigTarget {
+    std::uint64_t view = 0;
+    std::uint64_t movementView = 0;
+    std::uint64_t managedTransform = 0;
+    std::uint64_t nativeTransform = 0;
+    std::uint64_t hierarchy = 0;
+    std::uint64_t matrices = 0;
+    std::int32_t count = 0;
+};
+
 // Resolves and validates the layout from a BattleCharacterEntityView.
 bool BuildLayoutFromView(std::uint64_t view, const ReadFn& read, RigLayout& out);
+
+// Walks view -> movement view -> managed Transform -> native Transform ->
+// hierarchy and returns the current array pointers. Cheap enough to run for a
+// few entities per pass; no class-name reads on this path.
+bool ResolveRigTarget(std::uint64_t view, const ReadFn& read, RigTarget& out);
+
+// True when a cached layout still describes the target's live arrays.
+bool MatchesRigTarget(const RigLayout& layout, const RigTarget& target);
 
 // Quick check: re-reads hierarchy pointer from the native transform and
 // verifies it still matches. Returns false when Unity reallocated the

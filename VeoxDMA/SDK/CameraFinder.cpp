@@ -231,10 +231,12 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
 
     Matrix4x4 view{};
     Matrix4x4 projection{};
-    if (!TargetProcess.Read(node + viewOff, &view, sizeof(view)))
-        return false;
-    if (!TargetProcess.Read(node + projOff, &projection, sizeof(projection)))
-        return false;
+    auto scatter = TargetProcess.CreateScatterHandle();
+    if (!scatter) return false;
+    TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
+    TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
+    TargetProcess.ExecuteReadScatter(scatter);
+    TargetProcess.CloseScatterHandle(scatter);
 
     Vector3 position{};
     Vector3 forward{};
@@ -502,8 +504,8 @@ float ReadNativeFov()
     }
     if (!projOff) projOff = 0xB0;
 
-    const float yScale = TargetProcess.Read<float>(
-        node + projOff + sizeof(float) * 5);
+    float yScale = 0.f;
+    TargetProcess.ReadFresh(node + projOff + sizeof(float) * 5, &yScale, sizeof(yScale));
     if (!std::isfinite(yScale) || yScale <= 0.f)
         return 0.f;
 
@@ -511,6 +513,18 @@ float ReadNativeFov()
     const float fovDeg = fovRad * 180.f / 3.14159265358979323846f;
     if (fovDeg < 1.f || fovDeg > 179.f) return 0.f;
     return fovDeg;
+}
+
+CameraData GetCameraMatricesFast()
+{
+    CameraData data{};
+    const std::uintptr_t node = g_cameraNode.load(std::memory_order_acquire);
+    const std::uintptr_t viewOff = g_viewOff.load(std::memory_order_acquire);
+    const std::uintptr_t projOff = g_projOff.load(std::memory_order_acquire);
+    if (!node || !viewOff || !projOff) return data;
+
+    ReadMatricesAt(node, viewOff, projOff, data);
+    return data;
 }
 
 } // namespace CameraFinder

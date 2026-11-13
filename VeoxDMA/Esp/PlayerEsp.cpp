@@ -6,7 +6,9 @@
 #include "EspDraw.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
+#include <chrono>
 #include <cmath>
+#include <unordered_map>
 
 static ImU32 D2DColorToImU32(const D2D1::ColorF& c)
 {
@@ -85,6 +87,54 @@ void DrawPlayers()
 	const float fontSize = (float)pcfg.FontSize;
 	ImFont* font = ImGui::GetFont();
 
+	// --- render-thread pose interpolation ------------------------------
+	// The reader publishes raw poses at ~30 Hz while the camera is re-read
+	// every rendered frame. Drawing the newest pose unchanged makes the
+	// skeleton trail the camera, and smoothing it again in the worker only
+	// added a whole sample of lag. Instead keep the two newest snapshots and
+	// advance the pose by how far the render clock is past the newest sample.
+	// PoseSmoothAlpha is the "lead" (0 = draw the newest sample, 1 = allow up
+	// to one extra sample interval of extrapolation).
+	static RobRunReader::SnapshotPtr sPrev, sCur;
+	static std::uint64_t sPrevUs = 0, sCurUs = 0;
+	static std::unordered_map<int32_t, const RobRunReader::EntityData*> sPrevById;
+
+	if (snapshot != sCur)
+	{
+		sPrev = sCur;
+		sPrevUs = sCurUs;
+		sCur = snapshot;
+		sCurUs = snapshot->stampUs;
+		sPrevById.clear();
+		if (sPrev)
+		{
+			sPrevById.reserve(sPrev->entities.size() * 2 + 1);
+			for (const auto& e : sPrev->entities)
+				sPrevById[e.entityId] = &e;
+		}
+	}
+
+	const std::uint64_t frameUs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+
+	float alpha = 1.f;
+	const bool blend = pcfg.PoseSmoothing && sPrev && sCurUs > sPrevUs;
+	if (blend)
+	{
+		const double dtUs = static_cast<double>(sCurUs - sPrevUs);
+		const double elapsedUs = static_cast<double>(frameUs) - static_cast<double>(sCurUs);
+		const float lead = std::clamp(pcfg.PoseSmoothAlpha, 0.f, 1.f);
+		const double ratio = std::clamp(elapsedUs / dtUs, 0.0, 1.0);
+		alpha = static_cast<float>(1.0 + static_cast<double>(lead) * ratio);
+	}
+
+	auto LerpPos = [](const Vector3& a, const Vector3& b, float t) {
+		return Vector3(a.x + (b.x - a.x) * t,
+			a.y + (b.y - a.y) * t,
+			a.z + (b.z - a.z) * t);
+	};
+
 	std::vector<std::string> lookingNames;
 
 	for (const auto& ent : snapshot->entities)
@@ -94,24 +144,56 @@ void DrawPlayers()
 		if (ent.isDead)
 			continue;
 
-		const int distance = (int)DistanceTo(ent.position, localPos);
+		// Interpolated root position so the box and text track the same pose
+		// the bones are drawn with.
+		const RobRunReader::EntityData* prevEnt = nullptr;
+		if (blend)
+		{
+			const auto it = sPrevById.find(ent.entityId);
+			if (it != sPrevById.end())
+				prevEnt = it->second;
+		}
+		const Vector3 entPos = prevEnt
+			? LerpPos(prevEnt->position, ent.position, alpha)
+			: ent.position;
+
+		const int distance = (int)DistanceTo(entPos, localPos);
 		if (haveLocalPosition && distance > pcfg.MaxDistance)
 			continue;
 
 		ImVec2 screenPos{};
-		if (!Project(viewProjection, ent.position, screenW, screenH, screenPos))
+		if (!Project(viewProjection, entPos, screenW, screenH, screenPos))
 			continue;
 
 		// --- skeleton bones + box ---
 		bool boxValid = false;
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
 
-		for (const auto& seg : ent.bones)
+		const bool blendBones = prevEnt &&
+			prevEnt->bones.size() == ent.bones.size();
+		for (std::size_t si = 0; si < ent.bones.size(); ++si)
 		{
+			const auto& seg = ent.bones[si];
+			float ax = seg.a.x, ay = seg.a.y, az = seg.a.z;
+			float bx = seg.b.x, by = seg.b.y, bz = seg.b.z;
+			if (blendBones)
+			{
+				// Both endpoints, so limbs keep their length and joints meet.
+				// The visible flag always comes from the newest sample: pose
+				// motion is interpolated, occlusion is not.
+				const auto& ps = prevEnt->bones[si];
+				ax += (ax - ps.a.x) * (alpha - 1.f);
+				ay += (ay - ps.a.y) * (alpha - 1.f);
+				az += (az - ps.a.z) * (alpha - 1.f);
+				bx += (bx - ps.b.x) * (alpha - 1.f);
+				by += (by - ps.b.y) * (alpha - 1.f);
+				bz += (bz - ps.b.z) * (alpha - 1.f);
+			}
+
 			ImVec2 a{}, b{};
-			if (!Project(viewProjection, Vector3(seg.a.x, seg.a.y, seg.a.z),
+			if (!Project(viewProjection, Vector3(ax, ay, az),
 					screenW, screenH, a)) continue;
-			if (!Project(viewProjection, Vector3(seg.b.x, seg.b.y, seg.b.z),
+			if (!Project(viewProjection, Vector3(bx, by, bz),
 					screenW, screenH, b)) continue;
 
 			ImU32 segCol = espCol;
@@ -140,7 +222,7 @@ void DrawPlayers()
 			};
 			// Transform position is the character root at the feet; centre the
 			// box half a body height above it.
-			const Vector3 center(ent.position.x, ent.position.y + 0.95f, ent.position.z);
+			const Vector3 center(entPos.x, entPos.y + 0.95f, entPos.z);
 			ImVec2 mn{}, mx{};
 			if (Esp::ProjectWorldAABB(projector, center, 0.35f, 0.95f, mn, mx))
 			{
@@ -194,9 +276,9 @@ void DrawPlayers()
 		}
 		if ((pcfg.LookingAtYou || pcfg.LookingAlert) && haveLocalPosition)
 		{
-			const float dx = localPos.x - ent.position.x;
-			const float dy = localPos.y - ent.position.y;
-			const float dz = localPos.z - ent.position.z;
+			const float dx = localPos.x - entPos.x;
+			const float dy = localPos.y - entPos.y;
+			const float dz = localPos.z - entPos.z;
 			const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
 			if (len > 0.01f)
 			{

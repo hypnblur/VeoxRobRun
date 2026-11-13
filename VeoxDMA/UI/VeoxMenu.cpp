@@ -176,6 +176,25 @@ inline float RowTextY(float rowTop, float rowHeight, ImFont* font)
 	return rowTop + (rowHeight - font->FontSize) * 0.5f;
 }
 
+// Small purple pill marking rows that write into the game process over DMA.
+// Draws right-aligned ending at rightX, vertically centred in the row.
+inline void MemoryWriteBadge(float rightX, float rowTop, float rowHeight, bool active)
+{
+	const char* text = "MEM WRITE";
+	ImFont* f = font::inter_medium_small;
+	const float tw = TextW(f, text);
+	constexpr float bh = 16.f;
+	const ImVec2 mx(rightX, rowTop + (rowHeight - bh) * 0.5f);
+	const ImRect bb(ImVec2(mx.x - tw - 12.f, mx.y), ImVec2(mx.x, mx.y + bh));
+
+	ImDrawList* dl = ImGui::GetWindowDrawList();
+	dl->AddRectFilled(bb.Min, bb.Max, C(kAccent, active ? 0.20f : 0.10f), 4.f);
+	dl->AddRect(bb.Min, bb.Max, C(kAccent, active ? 0.55f : 0.28f), 4.f, 0, 1.f);
+	dl->AddText(f, f->FontSize,
+		ImVec2(bb.Min.x + 6.f, bb.Min.y + (bh - f->FontSize) * 0.5f - 1.f),
+		C(kAccentBright, active ? 1.f : 0.65f), text);
+}
+
 inline bool Match(const char* label)
 {
 	if (!g_search[0] || !label) return true;
@@ -302,7 +321,7 @@ void ForceCardHeight(const char* title, float height)
 }
 
 // ---- widgets --------------------------------------------------------------
-bool ToggleRow(const char* label, bool* v)
+bool ToggleRow(const char* label, bool* v, bool memoryWrite = false)
 {
 	if (!Match(label)) return false;
 
@@ -331,6 +350,8 @@ bool ToggleRow(const char* label, bool* v)
 	const float tw = 38.f, th = 20.f;
 	const ImVec2 tmin(p.x + w - tw, p.y + (kRow - th) * 0.5f);
 	const ImVec2 tmax(tmin.x + tw, tmin.y + th);
+	if (memoryWrite)
+		MemoryWriteBadge(tmin.x - 8.f, p.y, kRow, *v);
 	dl->AddRectFilled(tmin, tmax, C(Mix(kTrack, kAccent, t), 0.35f + 0.65f * t), th * 0.5f);
 	if (t > 0.01f)
 	{
@@ -459,7 +480,8 @@ bool ColorRow(const char* label, D2D1::ColorF& colour)
 	return pressed;
 }
 
-bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix = "")
+bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix = "",
+	const char* zeroText = nullptr)
 {
 	if (!Match(label)) return false;
 
@@ -496,7 +518,10 @@ bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix 
 		ImVec2(p.x, p.y + 1.f), C(Mix(kTextDim, kText, hov || held ? 0.5f : 0.f)), label);
 
 	char buf[64];
-	std::snprintf(buf, sizeof(buf), "%d%s", *v, suffix);
+	if (zeroText && *v == lo)
+		std::snprintf(buf, sizeof(buf), "%s", zeroText);
+	else
+		std::snprintf(buf, sizeof(buf), "%d%s", *v, suffix);
 	TextRight(font::inter_medium_small, p.x + w, p.y + 3.f, C(kText), buf);
 
 	dl->AddRectFilled(tmin, tmax, C(kTrack), 2.f);
@@ -555,7 +580,8 @@ bool SliderFloatRow(const char* label, float* v, float lo, float hi, const char*
 	return changed;
 }
 
-bool ComboRow(const char* label, int* current, const char* const* items, int count, float fieldW = 150.f)
+bool ComboRow(const char* label, int* current, const char* const* items, int count,
+	float fieldW = 150.f, bool memoryWrite = false)
 {
 	if (!Match(label) || count <= 0) return false;
 
@@ -586,6 +612,9 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 
 	dl->AddRectFilled(field.Min, field.Max, C(ImVec4(1, 1, 1, 0.045f)), 6.f);
 	dl->AddRect(field.Min, field.Max, C(Mix(kStroke, kAccent, hov ? 0.4f : 0.f)), 6.f, 0, 1.f);
+
+	if (memoryWrite)
+		MemoryWriteBadge(field.Min.x - 8.f, p.y, rowH, true);
 
 	int sel = ImClamp(*current, 0, count - 1);
 	const char* preview = items[sel] ? items[sel] : "-";
@@ -850,14 +879,16 @@ void DrawVisuals()
 			EndCard();
 		}
 
-		if (MatchAny({ "VisCheck", "WallCheck", "Pose Smoothing", "Native Camera" }))
+		if (MatchAny({ "VisCheck", "WallCheck", "Interpolate", "Lead", "Native Camera" }))
 		{
 			BeginCard("SKELETON", kCardW);
 			ToggleRow("Enable VisCheck", &ConfigInstance.Player.VisCheck);
 			if (ConfigInstance.Player.VisCheck)
 			{
-				ColorRow("Active (animating)", ConfigInstance.Player.VisibleColour);
-				ColorRow("Frozen (culled)", ConfigInstance.Player.HiddenColour);
+				ColorRow("Visible to camera", ConfigInstance.Player.VisibleColour);
+				ColorRow("Occluded", ConfigInstance.Player.HiddenColour);
+				Note("Each bone is ray-cast from the camera against the city "
+					"colliders, so only geometry blocks it.");
 			}
 
 			ToggleRow("Enable WallCheck", &ConfigInstance.Player.WallCheck);
@@ -866,12 +897,18 @@ void DrawVisuals()
 				if (status.loaded)
 					Note("BVH: %u nodes, %u triangles", status.nodeCount, status.triCount);
 				else
-					Note("BVH: city_colliders.bvh not loaded");
+					Note("BVH: city_colliders.bvh not loaded - VisCheck falls back "
+						"to animator state");
 			}
 
-			ToggleRow("Pose Smoothing", &ConfigInstance.Player.PoseSmoothing);
+			ToggleRow("Interpolate Poses", &ConfigInstance.Player.PoseSmoothing);
 			if (ConfigInstance.Player.PoseSmoothing)
-				SliderFloatRow("Blend", &ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.f);
+			{
+				SliderFloatRow("Lead", &ConfigInstance.Player.PoseSmoothAlpha, 0.f, 1.f);
+				Note("Bones are advanced on the render thread between the two "
+					"newest 30 Hz samples. Lead 0 draws the newest sample; 1 "
+					"extrapolates up to one extra interval to hide sample lag.");
+			}
 
 			ToggleRow("Native Camera", &ConfigInstance.Player.NativeEspCamera);
 			{
@@ -1053,7 +1090,8 @@ void DrawAim()
 		ToggleRow("Enable Aim", &ConfigInstance.Aim.Enabled);
 
 		static const char* aimTypes[] = { "Memory Aim", "Hardware Aim" };
-		ComboRow("Aim Type", &ConfigInstance.Aim.AimType, aimTypes, IM_ARRAYSIZE(aimTypes));
+		ComboRow("Aim Type", &ConfigInstance.Aim.AimType, aimTypes, IM_ARRAYSIZE(aimTypes),
+			150.f, ConfigInstance.Aim.AimType == 0);
 
 		static const char* bones[] = { "Head", "Neck", "Chest", "Pelvis" };
 		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, bones, IM_ARRAYSIZE(bones));
@@ -1068,8 +1106,9 @@ void DrawAim()
 		EndCard();
 
 		BeginCard("WEAPON", kCardW);
-		ToggleRow("No Recoil", &ConfigInstance.Aim.NoRecoil);
-		ToggleRow("No Spread", &ConfigInstance.Aim.NoSpread);
+		ToggleRow("No Recoil", &ConfigInstance.Aim.NoRecoil, true);
+		ToggleRow("No Spread", &ConfigInstance.Aim.NoSpread, true);
+		Note("No Recoil and No Spread (sway) zero the weapon vectors over DMA.");
 		EndCard();
 
 		BeginCard("PREDICTION", kCardW);
@@ -1090,7 +1129,7 @@ void DrawAim()
 	ImGui::BeginGroup();
 	{
 		BeginCard("MEMORY AIM", kCardW);
-		ToggleRow("Write Camera Angles", &ConfigInstance.Aim.MemoryWrite);
+		ToggleRow("Write Camera Angles", &ConfigInstance.Aim.MemoryWrite, true);
 		if (ConfigInstance.Aim.MemoryWrite)
 		{
 			ToggleRow("Cursor Fallback", &ConfigInstance.Aim.CursorFallback);
@@ -1287,9 +1326,10 @@ void DrawMisc()
 	{
 		BeginCard("READ-ONLY DMA", kCardW);
 		Note("ROB RUN is an external DMA reader. It never injects into the game process.");
-		Note("- VisCheck compares animator poses. It is not a wall check.");
-		Note("- WallCheck needs a city_colliders.bvh next to the exe.");
-		Note("- Memory aim writes the camera block over DMA; the game can rebuild it from input.");
+		Note("- VisCheck ray-casts each bone from the camera, so only geometry "
+			"blocks it. Without city_colliders.bvh it falls back to animator state.");
+		Note("- WallCheck treats a character whose bones are all occluded as hidden.");
+		Note("- Rows marked MEM WRITE change game memory over DMA, not the host.");
 		Note("- Hardware aim sends the same pixel delta through the selected device.");
 		EndCard();
 
@@ -1342,8 +1382,10 @@ void DrawSettings(bool attached, const std::string& statusText)
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
 
 		int cap = Overlay::FrameCap();
-		if (SliderIntRow("Frame Cap", &cap, 0, 360, " fps"))
+		if (SliderIntRow("Frame Cap", &cap, 0, 480, " fps", "Uncapped"))
 			Overlay::SetFrameCap(cap);
+		Note("Caps the overlay render loop. Uncapped redraws as fast as the GPU "
+			"allows, which costs CPU that the DMA reader needs.");
 
 		const int monCount = Overlay::MonitorCount();
 		if (monCount > 0)

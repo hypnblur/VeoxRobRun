@@ -168,13 +168,44 @@ void SyncOverlayWindowChrome(HWND hwnd)
 void WaitForFrameCap()
 {
 	using clock = std::chrono::steady_clock;
-	static clock::time_point next = clock::now();
+	static clock::time_point next{};
+	static int lastCap = -1;
+
 	const int cap = g_frameCap;
-	if (cap <= 0) { next = clock::now(); return; }
-	next += std::chrono::nanoseconds(1'000'000'000LL / cap);
 	const auto now = clock::now();
-	if (next > now) std::this_thread::sleep_for(next - now);
-	else next = now;
+
+	if (cap <= 0)
+	{
+		lastCap = cap;
+		next = now;
+		return;
+	}
+
+	const auto interval = std::chrono::nanoseconds(1'000'000'000LL / cap);
+	if (lastCap != cap || next.time_since_epoch().count() == 0 ||
+		now - next > interval)
+	{
+		// First frame after a cap change, or after a long stall (menu drag,
+		// display change): start a fresh schedule instead of firing a burst
+		// of catch-up frames.
+		lastCap = cap;
+		next = now + interval;
+		return;
+	}
+
+	next += interval;
+	const auto remain = next - now;
+	if (remain <= clock::duration::zero())
+		return;
+
+	// timeBeginPeriod(1) is already active in the render loop, but sleep_for
+	// still rounds up to the timer tick. Sleep the bulk, then spin the last
+	// millisecond so the cap is honoured within a frame at 240+ fps.
+	const auto spin = std::chrono::milliseconds(1);
+	if (remain > spin)
+		std::this_thread::sleep_for(remain - spin);
+	while (clock::now() < next)
+		std::this_thread::yield();
 }
 
 bool KeyJustPressed(int vk)
