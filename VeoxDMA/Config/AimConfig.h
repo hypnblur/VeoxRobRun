@@ -109,53 +109,29 @@ public:
 	{
 		if (!j.contains(ConfigName))
 			return;
-		if (j[ConfigName].contains(LIT("Enabled")))
-			Enabled = j[ConfigName][LIT("Enabled")];
-		if (j[ConfigName].contains(LIT("AimType")))
-			AimType = j[ConfigName][LIT("AimType")];
-		if (j[ConfigName].contains(LIT("TargetBone")))
-			TargetBone = j[ConfigName][LIT("TargetBone")];
-		if (j[ConfigName].contains(LIT("Smoothness")))
-			Smoothness = j[ConfigName][LIT("Smoothness")];
-		if (j[ConfigName].contains(LIT("HardwareGain")))
-			HardwareGain = j[ConfigName][LIT("HardwareGain")];
-		if (j[ConfigName].contains(LIT("Fov")))
-			Fov = j[ConfigName][LIT("Fov")];
-		if (j[ConfigName].contains(LIT("AimKey")))
-			AimKey = j[ConfigName][LIT("AimKey")];
-		if (j[ConfigName].contains(LIT("MaxDistance")))
-			MaxDistance = j[ConfigName][LIT("MaxDistance")];
-		if (j[ConfigName].contains(LIT("ShowFov")))
-			ShowFov = j[ConfigName][LIT("ShowFov")];
-		if (j[ConfigName].contains(LIT("ShowDebug")))
-			ShowDebug = j[ConfigName][LIT("ShowDebug")];
-		if (j[ConfigName].contains(LIT("VisibleBonesOnly")))
-			VisibleBonesOnly = j[ConfigName][LIT("VisibleBonesOnly")];
-		if (j[ConfigName].contains(LIT("MemoryWrite")))
-			MemoryWrite = j[ConfigName][LIT("MemoryWrite")];
-		if (j[ConfigName].contains(LIT("CursorFallback")))
-			CursorFallback = j[ConfigName][LIT("CursorFallback")];
-		if (j[ConfigName].contains(LIT("ResponseMs")))
-			ResponseMs = j[ConfigName][LIT("ResponseMs")];
-		if (j[ConfigName].contains(LIT("Prediction")))
-			Prediction = j[ConfigName][LIT("Prediction")];
-		if (j[ConfigName].contains(LIT("PredictionStrength")))
-			PredictionStrength = j[ConfigName][LIT("PredictionStrength")];
-		if (j[ConfigName].contains(LIT("PredictionYScale")))
-			PredictionYScale = j[ConfigName][LIT("PredictionYScale")];
-		if (j[ConfigName].contains(LIT("HardLock")))
-			HardLock = j[ConfigName][LIT("HardLock")];
-		if (j[ConfigName].contains(LIT("NoRecoil")))
-			NoRecoil = j[ConfigName][LIT("NoRecoil")];
-		if (j[ConfigName].contains(LIT("NoSpread")))
-			NoSpread = j[ConfigName][LIT("NoSpread")];
-		if (j[ConfigName].contains(LIT("ExpIgnorePolice")))
-			ExpIgnorePolice = j[ConfigName][LIT("ExpIgnorePolice")];
-		if (j[ConfigName].contains(LIT("ExpIgnoreCriminal")))
-			ExpIgnoreCriminal = j[ConfigName][LIT("ExpIgnoreCriminal")];
-		if (j[ConfigName].contains(LIT("ExpIgnoreCivilian")))
-			ExpIgnoreCivilian = j[ConfigName][LIT("ExpIgnoreCivilian")];
-		if (j[ConfigName].contains(LIT("ExpIgnoreTeammates")))
-			ExpIgnoreTeammates = j[ConfigName][LIT("ExpIgnoreTeammates")];
+		Enabled = j[ConfigName].value(LIT("Enabled"), Enabled);
+		AimType = j[ConfigName].value(LIT("AimType"), AimType);
+		TargetBone = j[ConfigName].value(LIT("TargetBone"), TargetBone);
+		Smoothness = j[ConfigName].value(LIT("Smoothness"), Smoothness);
+		HardwareGain = j[ConfigName].value(LIT("HardwareGain"), HardwareGain);
+		Fov = j[ConfigName].value(LIT("Fov"), Fov);
+		AimKey = j[ConfigName].value(LIT("AimKey"), AimKey);
+		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
+		ShowFov = j[ConfigName].value(LIT("ShowFov"), ShowFov);
+		ShowDebug = j[ConfigName].value(LIT("ShowDebug"), ShowDebug);
+		VisibleBonesOnly = j[ConfigName].value(LIT("VisibleBonesOnly"), VisibleBonesOnly);
+		MemoryWrite = j[ConfigName].value(LIT("MemoryWrite"), MemoryWrite);
+		CursorFallback = j[ConfigName].value(LIT("CursorFallback"), CursorFallback);
+		ResponseMs = j[ConfigName].value(LIT("ResponseMs"), ResponseMs);
+		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
+		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
+		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
+		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
+		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
+		NoSpread = j[ConfigName].value(LIT("NoSpread"), NoSpread);
+		ExpIgnorePolice = j[ConfigName].value(LIT("ExpIgnorePolice"), ExpIgnorePolice);
+		ExpIgnoreCriminal = j[ConfigName].value(LIT("ExpIgnoreCriminal"), ExpIgnoreCriminal);
+		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
+		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
 	}
 };

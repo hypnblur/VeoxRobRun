@@ -56,6 +56,10 @@ public:
 	bool HighContrastMenu = false;   // solid menu fills for bright scenes
 	bool ClickThroughWhenClosed = true;
 	bool AlwaysOnTop = true;
+	// When enabled, only player ESP is drawn (world ESP, radar and the money
+	// HUD are suppressed). Toggled by BattleModeKey.
+	bool BattleMode = false;
+	int BattleModeKey = 0;           // index into Aim::KeyNames()
 	D2D1::ColorF BackgroundColour = Colour(0, 0, 0);
 
 	// Saved screen placements. The menu and radar remember size as well as
@@ -92,6 +96,8 @@ public:
 		j[ConfigName][LIT("HighContrastMenu")] = HighContrastMenu;
 		j[ConfigName][LIT("ClickThroughWhenClosed")] = ClickThroughWhenClosed;
 		j[ConfigName][LIT("AlwaysOnTop")] = AlwaysOnTop;
+		j[ConfigName][LIT("BattleMode")] = BattleMode;
+		j[ConfigName][LIT("BattleModeKey")] = BattleModeKey;
 		j[ConfigName][LIT("FontName")] = FontName;
 		j[ConfigName][LIT("MenuWindow")] = MenuWindow.ToJson();
 		j[ConfigName][LIT("RadarWindow")] = RadarWindow.ToJson();
@@ -103,28 +109,23 @@ public:
 	{
 		if (!j.contains(ConfigName))
 			return;
-		if (j[ConfigName].contains(LIT("MonitorIndex")))
-			MonitorIndex = j[ConfigName][LIT("MonitorIndex")];
-		if (j[ConfigName].contains(LIT("FPSEnabled")))
-			FPSEnabled = j[ConfigName][LIT("FPSEnabled")];
-		if (j[ConfigName].contains(LIT("FrameCap")))
-			FrameCap = j[ConfigName][LIT("FrameCap")];
-		if (j[ConfigName].contains(LIT("Transparent")))
-			Transparent = j[ConfigName][LIT("Transparent")];
-		if (j[ConfigName].contains(LIT("HighContrastMenu")))
-			HighContrastMenu = j[ConfigName][LIT("HighContrastMenu")];
-		if (j[ConfigName].contains(LIT("ClickThroughWhenClosed")))
-			ClickThroughWhenClosed = j[ConfigName][LIT("ClickThroughWhenClosed")];
-		if (j[ConfigName].contains(LIT("AlwaysOnTop")))
-			AlwaysOnTop = j[ConfigName][LIT("AlwaysOnTop")];
-		if (j[ConfigName].contains(LIT("FontName")))
-			FontName = j[ConfigName][LIT("FontName")].get<std::string>();
-		if (j[ConfigName].contains(LIT("MenuWindow")))
-			MenuWindow.FromJson(j[ConfigName][LIT("MenuWindow")]);
-		if (j[ConfigName].contains(LIT("RadarWindow")))
-			RadarWindow.FromJson(j[ConfigName][LIT("RadarWindow")]);
-		if (j[ConfigName].contains(LIT("AlertWindow")))
-			AlertWindow.FromJson(j[ConfigName][LIT("AlertWindow")]);
+		auto& s = j[ConfigName];
+		MonitorIndex = s.value(LIT("MonitorIndex"), MonitorIndex);
+		FPSEnabled = s.value(LIT("FPSEnabled"), FPSEnabled);
+		FrameCap = s.value(LIT("FrameCap"), FrameCap);
+		Transparent = s.value(LIT("Transparent"), Transparent);
+		HighContrastMenu = s.value(LIT("HighContrastMenu"), HighContrastMenu);
+		ClickThroughWhenClosed = s.value(LIT("ClickThroughWhenClosed"), ClickThroughWhenClosed);
+		AlwaysOnTop = s.value(LIT("AlwaysOnTop"), AlwaysOnTop);
+		BattleMode = s.value(LIT("BattleMode"), BattleMode);
+		BattleModeKey = s.value(LIT("BattleModeKey"), BattleModeKey);
+		FontName = s.value(LIT("FontName"), FontName);
+		if (s.contains(LIT("MenuWindow")))
+			MenuWindow.FromJson(s[LIT("MenuWindow")]);
+		if (s.contains(LIT("RadarWindow")))
+			RadarWindow.FromJson(s[LIT("RadarWindow")]);
+		if (s.contains(LIT("AlertWindow")))
+			AlertWindow.FromJson(s[LIT("AlertWindow")]);
 		FromJsonColour(j, LIT("BackgroundColour"), &BackgroundColour);
 	}
 };

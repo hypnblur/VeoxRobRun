@@ -51,18 +51,18 @@ public:
 		if (!j.contains(ConfigName))
 			return;
 		auto& s = j[ConfigName];
-		if (s.contains(LIT("Enabled")))          Enabled = s[LIT("Enabled")];
-		if (s.contains(LIT("Size")))             Size = s[LIT("Size")];
-		if (s.contains(LIT("Zoom")))             Zoom = s[LIT("Zoom")];
-		if (s.contains(LIT("Opacity")))          Opacity = s[LIT("Opacity")];
-		if (s.contains(LIT("ShowPlayers")))      ShowPlayers = s[LIT("ShowPlayers")];
-		if (s.contains(LIT("ShowVehicles")))     ShowVehicles = s[LIT("ShowVehicles")];
-		if (s.contains(LIT("ShowLoot")))         ShowLoot = s[LIT("ShowLoot")];
-		if (s.contains(LIT("RotateWithCamera"))) RotateWithCamera = s[LIT("RotateWithCamera")];
-		if (s.contains(LIT("WorldMinX")))        WorldMinX = s[LIT("WorldMinX")];
-		if (s.contains(LIT("WorldMaxX")))        WorldMaxX = s[LIT("WorldMaxX")];
-		if (s.contains(LIT("WorldMinZ")))        WorldMinZ = s[LIT("WorldMinZ")];
-		if (s.contains(LIT("WorldMaxZ")))        WorldMaxZ = s[LIT("WorldMaxZ")];
-		if (s.contains(LIT("SelectedMap")))      SelectedMap = s[LIT("SelectedMap")].get<std::string>();
+		Enabled = s.value(LIT("Enabled"), Enabled);
+		Size = s.value(LIT("Size"), Size);
+		Zoom = s.value(LIT("Zoom"), Zoom);
+		Opacity = s.value(LIT("Opacity"), Opacity);
+		ShowPlayers = s.value(LIT("ShowPlayers"), ShowPlayers);
+		ShowVehicles = s.value(LIT("ShowVehicles"), ShowVehicles);
+		ShowLoot = s.value(LIT("ShowLoot"), ShowLoot);
+		RotateWithCamera = s.value(LIT("RotateWithCamera"), RotateWithCamera);
+		WorldMinX = s.value(LIT("WorldMinX"), WorldMinX);
+		WorldMaxX = s.value(LIT("WorldMaxX"), WorldMaxX);
+		WorldMinZ = s.value(LIT("WorldMinZ"), WorldMinZ);
+		WorldMaxZ = s.value(LIT("WorldMaxZ"), WorldMaxZ);
+		SelectedMap = s.value(LIT("SelectedMap"), SelectedMap);
 	}
 };

@@ -10,32 +10,32 @@ Vector2::Vector2(float _x, float _y) : x(_x), y(_y) { }
 
 Vector2::~Vector2() { }
 
-Vector2 Vector2::operator*(Vector2 a)
+Vector2 Vector2::operator*(const Vector2& a) const
 {
     return Vector2(x * a.x, y * a.y);
 }
 
-Vector2 Vector2::operator/(Vector2 a)
+Vector2 Vector2::operator/(const Vector2& a) const
 {
     return Vector2(x / a.x, y / a.y);
 }
 
-Vector2 Vector2::operator+(Vector2 a)
+Vector2 Vector2::operator+(const Vector2& a) const
 {
     return Vector2(x + a.x, y + a.y);
 }
 
-Vector2 Vector2::operator-(Vector2 a)
+Vector2 Vector2::operator-(const Vector2& a) const
 {
     return Vector2(x - a.x, y - a.y);
 }
 
-bool Vector2::operator==(Vector2 a)
+bool Vector2::operator==(const Vector2& a) const
 {
     return x == a.x && y == a.y;
 }
 
-bool Vector2::operator!=(Vector2 a)
+bool Vector2::operator!=(const Vector2& a) const
 {
     return x != a.x || y != a.y;
 }
@@ -50,24 +50,13 @@ Vector2 Vector2::Zero()
     return Vector2();
 }
 
-float Vector2::Distance(Vector2 a, Vector2 b)
-{
-    const auto difference = Vector2(
-        a.x - b.x,
-        a.y - b.y);
-
-    return sqrt(
-        powf(difference.x, 2.0f) +
-        powf(difference.y, 2.0f));
-}
-
 Vector3::Vector3() : x(0), y(0), z(0) { }
 
 Vector3::Vector3(float _x, float _y, float _z) : x(_x), y(_y), z(_z) { }
 
 Vector3::~Vector3() { }
 
-Vector3 Vector3::operator*(Vector3 a)
+Vector3 Vector3::operator*(const Vector3& a) const
 {
     return Vector3(x * a.x, y * a.y, z * a.z);
 }
@@ -77,7 +66,7 @@ Vector3 Vector3::operator*(float f)
     return Vector3(x * f, y * f, z * f);
 }
 
-Vector3 Vector3::operator/(Vector3 a)
+Vector3 Vector3::operator/(const Vector3& a) const
 {
     return Vector3(x / a.x, y / a.y, z / a.z);
 }
@@ -87,22 +76,22 @@ Vector3 Vector3::operator/(float f)
     return Vector3(x / f, y / f, z / f);
 }
 
-Vector3 Vector3::operator+(Vector3 a)
+Vector3 Vector3::operator+(const Vector3& a) const
 {
     return Vector3(x + a.x, y + a.y, z + a.z);
 }
 
-Vector3 Vector3::operator-(Vector3 a)
+Vector3 Vector3::operator-(const Vector3& a) const
 {
     return Vector3(x - a.x, y - a.y, z - a.z);
 }
 
-bool Vector3::operator==(Vector3 a)
+bool Vector3::operator==(const Vector3& a) const
 {
     return x == a.x && y == a.y && z == a.z;
 }
 
-bool Vector3::operator!=(Vector3 a)
+bool Vector3::operator!=(const Vector3& a) const
 {
     return x != a.x || y != a.y || z != a.z;
 }
@@ -117,20 +106,6 @@ float Vector3::Dot(Vector3 left, Vector3 right)
     return (left.x * right.x) + (left.y * right.y) + (left.z * right.z);
 }
 
-float Vector3::Distance(Vector3 a, Vector3 b)
-{
-    const auto difference = Vector3(
-        a.x - b.x,
-        a.y - b.y,
-        a.z - b.z);
-
-    return sqrt(
-        powf(difference.x, 2.0f) +
-        powf(difference.y, 2.0f) +
-        powf(difference.z, 2.0f)
-    );
-
-}
 
 int Vector3::FormattedDistance(Vector3 a, Vector3 b)
 {

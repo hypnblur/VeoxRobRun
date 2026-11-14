@@ -45,5 +45,9 @@ DebugInfo GetDebug();
 // lookup cannot drift apart.
 const char* const* KeyNames();
 int KeyCount();
+// Returns true while the selected key index is held (same sources as the aim
+// activation key: DMA keyboard, aim device, host keyboard). Index 0 follows
+// KeyNames() ordering; "Always" is treated as held.
+bool IsKeyHeld(int keyIndex);
 
 } // namespace Aim

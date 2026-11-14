@@ -265,16 +265,16 @@ public:
 	 * \param size the size of buffer
 	 */
 	void AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size);
-	void AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size);
+	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size);
 	template <typename T>
 	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addr, T value) const
 	{
-		bool ret = !VMMDLL_Scatter_PrepareWrite(handle, addr, reinterpret_cast<PBYTE>(&value), sizeof(value));
-		if (!ret)
+		const bool ok = VMMDLL_Scatter_PrepareWrite(handle, addr, reinterpret_cast<PBYTE>(&value), sizeof(value)) != 0;
+		if (!ok)
 		{
 			//	LOG("failed to prepare scatter write at 0x%p\n", addr);
 		}
-		return ret;
+		return ok;
 	}
 
 	/**
@@ -283,14 +283,26 @@ public:
 	 * \param handle
 	 * \param pid
 	 */
-	void ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid = 0);
-	void ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid = 0);
-	void ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle);
-	void ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle);
+	bool ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid = 0);
+	bool ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid = 0);
+	bool ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle);
+	bool ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle);
 
 	VMMDLL_SCATTER_HANDLE CreateScatterHandleCached();
 	VMMDLL_SCATTER_HANDLE CreateScatterHandleCached(int pid);
-	void ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle);
+	bool ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle);
+
+	/**
+		* \brief RAII scatter handle. Closes the handle on scope exit so an early
+		* return or an exception between create and execute cannot leak it.
+		*/
+	struct ScopedScatter {
+		VMMDLL_SCATTER_HANDLE handle = nullptr;
+		Memory* owner = nullptr;
+		ScopedScatter(Memory& mem) : owner(&mem) { handle = mem.CreateScatterHandle(); }
+		~ScopedScatter() { if (handle) owner->CloseScatterHandle(handle); }
+		operator VMMDLL_SCATTER_HANDLE() const { return handle; }
+	};
 
 	/*the FPGA handle*/
 	VMM_HANDLE vHandle;

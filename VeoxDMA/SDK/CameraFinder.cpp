@@ -293,7 +293,7 @@ bool MatchesManaged(const CameraData& data, const Vector3& expectedPosition,
     if (!ParseViewMatrix(&data.view.matrix[0][0], position, forward))
         return false;
 
-    const float error = Vector3::Distance(position, expectedPosition);
+    const float error = Distance(position, expectedPosition);
     const float dot = Vector3::Dot(forward, expectedForward);
     if (error > kMaxPositionError || dot < kMinForwardDot)
         return false;
@@ -326,7 +326,7 @@ bool DiscoverLayout(std::uintptr_t node, const Vector3& expectedPosition,
 
         float score = 0.f;
         if (haveExpected) {
-            const float error = Vector3::Distance(position, expectedPosition);
+            const float error = Distance(position, expectedPosition);
             const float dot = Vector3::Dot(forward, expectedForward);
             if (error > kMaxPositionError * 4.f || dot < 0.f)
                 continue;
@@ -445,7 +445,7 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
                 Vector3 forward{};
                 if (ParseViewMatrix(&cached.view.matrix[0][0], position, forward)) {
                     cached.positionError =
-                        Vector3::Distance(position, expectedPosition);
+                        Distance(position, expectedPosition);
                     cached.forwardDot = Vector3::Dot(forward, expectedForward);
                 }
             }
@@ -476,7 +476,7 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
             Vector3 forward{};
             if (!ParseViewMatrix(&candidate.view.matrix[0][0], position, forward))
                 continue;
-            candidate.positionError = Vector3::Distance(position, expectedPosition);
+            candidate.positionError = Distance(position, expectedPosition);
             candidate.forwardDot = Vector3::Dot(forward, expectedForward);
         }
 

@@ -10,7 +10,6 @@
 #include <set>
 #include <list>
 #include <fstream>
-#include <ppltasks.h>
 #include <windowsx.h>
 #include <WinSock2.h>
 #include <ws2tcpip.h>
@@ -54,7 +53,9 @@
 #undef min
 #endif
 #include <vmmdll.h>
+#ifndef NDEBUG
 #define DEBUG_INFO
+#endif
 #ifdef DEBUG_INFO
 #define LOG(fmt, ...) std::printf(fmt, ##__VA_ARGS__)
 #define LOGW(fmt, ...) std::wprintf(fmt, ##__VA_ARGS__)

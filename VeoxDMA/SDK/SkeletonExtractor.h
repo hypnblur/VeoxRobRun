@@ -5,9 +5,11 @@
 #include <utility>
 #include <vector>
 
+#include "../Misc/Vector.h"
+
 namespace Skeleton {
 
-struct Vec { float x, y, z; };
+using Vec = Vector3;
 struct BoneSegment { Vec a, b; bool visible = true; };
 
 // Full local pose of one bone. Animator-activity detection needs the rotation:

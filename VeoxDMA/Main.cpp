@@ -4,6 +4,7 @@
 #include "CameraFinder.h"
 #include "RobRunReader.h"
 #include "ConfigFile.h"
+#include "ConfigInstance.h"
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Esp/Radar.h"
@@ -91,6 +92,25 @@ static void TickOverlay()
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
 
+	// Battle mode suppresses world ESP/radar/money HUD so only player ESP is
+	// shown. Toggle on the rising edge of the selected key ("Always" is not a
+	// toggle key). Ignore while the menu is open to avoid accidental toggles
+	// when changing the binding.
+	static bool battleKeyWasHeld = false;
+	if (!Overlay::MenuOpen()) {
+		const int key = ConfigInstance.Overlay.BattleModeKey;
+		const bool held = key >= 0 && key < Aim::KeyCount() - 1 && Aim::IsKeyHeld(key);
+		if (held && !battleKeyWasHeld) {
+			ConfigInstance.Overlay.BattleMode = !ConfigInstance.Overlay.BattleMode;
+			Overlay::Notify(ConfigInstance.Overlay.BattleMode
+				? "Battle Mode: ON (player ESP only)"
+				: "Battle Mode: OFF", 0xFF8CDC64u, 2.f);
+		}
+		battleKeyWasHeld = held;
+	} else {
+		battleKeyWasHeld = false;
+	}
+
 	// Persist settings whenever the menu closes, so a user does not have to
 	// remember a separate save step. Shutdown saves again as a backstop.
 	static bool wasMenuOpen = false;
@@ -134,8 +154,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		if (g_attached.load(std::memory_order_acquire))
 			RobRunReader::RefreshCamera();
 		DrawPlayers();
-		DrawWorldEntities();
-		Radar::Draw();
+		if (!ConfigInstance.Overlay.BattleMode) {
+			DrawWorldEntities();
+			Radar::Draw();
+		}
 		Aim::Draw();
 		Aim::DrawDebug();
 		if (Overlay::MenuOpen())

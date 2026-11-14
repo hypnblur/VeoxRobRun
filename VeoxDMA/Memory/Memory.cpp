@@ -93,8 +93,6 @@ bool Memory::DumpMemoryMap(bool debug)
 
 	VMMDLL_MemFree(pPhysMemMap);
 	LOG("Successfully dumped memory map to file!\n");
-	//Little sleep to make sure it's written to file.
-	Sleep(3000);
 	VMMDLL_Close(handle);
 	return true;
 }
@@ -141,49 +139,52 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 	if (!DMA_INITIALIZED)
 	{
 		LOG("inizializing...\n");
-	reinit:
-		LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
-		DWORD argc = 3;
-		if (debug)
+		bool vmmReady = false;
+		for (int attempt = 0; attempt < 2 && !vmmReady; ++attempt)
 		{
-			args[argc++] = (LPSTR)"-v";
-			args[argc++] = (LPSTR)"-printf";
-		}
-
-		std::string path = "";
-		if (memMap)
-		{
-			auto temp_path = std::filesystem::temp_directory_path();
-			path = (temp_path.string() + "\\mmap.txt");
-			bool dumped = false;
-			if (!std::filesystem::exists(path))
-				dumped = this->DumpMemoryMap(debug);
-			else
-				dumped = true;
-			LOG("dumping memory map to file...\n");
-			if (!dumped)
+			LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
+			DWORD argc = 3;
+			if (debug)
 			{
-				LOG("[!] ERROR: Could not dump memory map!\n");
-				LOG("Defaulting to no memory map!\n");
+				args[argc++] = (LPSTR)"-v";
+				args[argc++] = (LPSTR)"-printf";
 			}
-			else
-			{
-				LOG("Dumped memory map!\n");
 
-				//Add the memory map to the arguments and increase arg count.
-				args[argc++] = (LPSTR)"-memmap";
-				args[argc++] = (LPSTR)path.c_str();
-			}
-		}
-		this->vHandle = VMMDLL_Initialize(argc, args);
-		if (!this->vHandle)
-		{
+			std::string path = "";
 			if (memMap)
+			{
+				auto temp_path = std::filesystem::temp_directory_path();
+				path = (temp_path.string() + "\\mmap.txt");
+				bool dumped = false;
+				if (!std::filesystem::exists(path))
+					dumped = this->DumpMemoryMap(debug);
+				else
+					dumped = true;
+				LOG("dumping memory map to file...\n");
+				if (!dumped)
+				{
+					LOG("[!] ERROR: Could not dump memory map!\n");
+					LOG("Defaulting to no memory map!\n");
+				}
+				else
+				{
+					LOG("Dumped memory map!\n");
+
+					//Add the memory map to the arguments and increase arg count.
+					args[argc++] = (LPSTR)"-memmap";
+					args[argc++] = (LPSTR)path.c_str();
+				}
+			}
+			this->vHandle = VMMDLL_Initialize(argc, args);
+			vmmReady = (this->vHandle != nullptr);
+			if (!vmmReady && memMap)
 			{
 				memMap = false;
 				LOG("[!] Initialization failed with Memory map? Try without MMap\n");
-				goto reinit;
 			}
+		}
+		if (!vmmReady)
+		{
 			LOG("[!] Initialization failed! Is the DMA in use or disconnected?\n");
 			return false;
 		}
@@ -816,42 +817,50 @@ void Memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addres
 	}
 }
 
-void Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
+bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
 {
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
-		return;
+		return false;
 	if (!VMMDLL_Scatter_PrepareWrite(handle, address, (PBYTE)buffer, size))
 	{
 		//LOG("[!] Failed to prepare scatter write at 0x%p\n", address);
+		return false;
 	}
+	return true;
 }
-void Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
+bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 {
 
 	if (!VMMDLL_Scatter_Execute(handle))
 	{
 		//	LOG("[-] Failed to Execute Scatter Read\n");
+		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE))
 	{
 		//	LOG("[-] Failed to clear Scatter\n");
+		return false;
 	}
+	return true;
 }
-void Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
+bool Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
 {
 
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
 		LOG("[-] Failed to Execute Scatter Read\n");
+		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE))
 	{
 		LOG("[-] Failed to clear Scatter\n");
+		return false;
 	}
+	return true;
 }
-void Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
+bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
 		pid = this->current_process.PID;
@@ -859,15 +868,18 @@ void Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
 		LOG("[-] Failed to Execute Scatter Read\n");
+		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
 	{
 		LOG("[-] Failed to clear Scatter\n");
+		return false;
 	}
+	return true;
 }
 
-void Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
+bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
 		pid = this->current_process.PID;
@@ -875,12 +887,15 @@ void Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 	if (!VMMDLL_Scatter_Execute(handle))
 	{
 		LOG("[-] Failed to Execute Scatter Read\n");
+		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
 	{
 		LOG("[-] Failed to clear Scatter\n");
+		return false;
 	}
+	return true;
 }
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached()
@@ -899,14 +914,17 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached(int pid)
 	return h;
 }
 
-void Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
+bool Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
 {
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
 		LOG("[-] Failed to Execute Cached Scatter Read\n");
+		return false;
 	}
 	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0))
 	{
 		LOG("[-] Failed to clear Cached Scatter\n");
+		return false;
 	}
+	return true;
 }

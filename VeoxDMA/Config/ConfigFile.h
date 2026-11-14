@@ -2,8 +2,8 @@
 
 namespace ConfigFile {
 
-// Config lives at C:\VeoxDMA\RobRun\config.json. The directory is created on
-// first save, so a fresh machine does not need any setup.
+// Config lives at %APPDATA%\VeoxDMA\RobRun\config.json (Roaming AppData). The
+// directory is created on first save, so a fresh machine does not need any setup.
 const wchar_t* Directory();
 const wchar_t* Path();
 

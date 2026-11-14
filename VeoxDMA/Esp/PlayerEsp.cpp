@@ -11,27 +11,11 @@
 #include <cmath>
 #include <unordered_map>
 
-static ImU32 D2DColorToImU32(const D2D1::ColorF& c)
-{
-	return IM_COL32(
-		(int)(c.r * 255.f),
-		(int)(c.g * 255.f),
-		(int)(c.b * 255.f),
-		(int)(c.a * 255.f));
-}
-
 static ImVec2 MeasureText(const char* text, float size)
 {
 	ImFont* font = ImGui::GetFont();
 	if (!font) return ImGui::CalcTextSize(text);
 	return font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
-}
-
-static bool ResolveViewProjection(Matrix4x4& viewProjection, int width, int height)
-{
-	if (RobRunReader::GetViewProjection(viewProjection, width, height))
-		return true;
-	return RobRunReader::GetFallbackViewProjection(viewProjection);
 }
 
 static bool Project(const Matrix4x4& viewProjection, const Vector3& world,
@@ -42,41 +26,6 @@ static bool Project(const Matrix4x4& viewProjection, const Vector3& world,
 		return false;
 	out = ImVec2(screen.x, screen.y);
 	return true;
-}
-
-static float DistanceTo(const Vector3& a, const Vector3& b)
-{
-	const float dx = a.x - b.x;
-	const float dy = a.y - b.y;
-	const float dz = a.z - b.z;
-	return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-// Role ids are hashed enums, so the reader resolves a name through reflection.
-// These two ids are the ones seen in every dump and act as the fallback when
-// reflection could not walk the wrapper.
-static std::string ResolveRoleLabel(const RobRunReader::EntityData& ent,
-	ImU32 defaultCol, bool useRoleColors, ImU32& outCol)
-{
-	outCol = defaultCol;
-	std::string label = ent.roleName;
-	if (label.empty() && ent.role == 1257638368)
-		label = "Criminal";
-	if (label.empty() && ent.role == 6)
-		label = "Hubber";
-	if (label.empty() && ent.role > 0 && ent.role < 100000)
-		label = "Role:" + std::to_string(ent.role);
-	if (useRoleColors && !label.empty()) {
-		if (label == "Criminal")
-			outCol = IM_COL32(255, 85, 85, 255);
-		else if (label == "Police Officer")
-			outCol = IM_COL32(80, 175, 255, 255);
-		else if (label == "Civilian")
-			outCol = IM_COL32(100, 235, 130, 255);
-		else if (label == "Hubber")
-			outCol = IM_COL32(150, 175, 225, 255);
-	}
-	return label;
 }
 
 void DrawPlayers()
@@ -94,7 +43,7 @@ void DrawPlayers()
 		return;
 
 	Matrix4x4 viewProjection{};
-	if (!ResolveViewProjection(viewProjection, screenW, screenH))
+	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
 		return;
 
 	const int32_t localId = snapshot->localEntityId;
@@ -103,15 +52,15 @@ void DrawPlayers()
 
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	const auto& pcfg = ConfigInstance.Player;
-	const ImU32 espCol = D2DColorToImU32(pcfg.TextColour);
-	const ImU32 boxCol = D2DColorToImU32(pcfg.BoxColour);
-	const ImU32 nameCol = D2DColorToImU32(pcfg.NameColour);
-	const ImU32 distCol = D2DColorToImU32(pcfg.DistanceColour);
-	const ImU32 hpTxtCol = D2DColorToImU32(pcfg.HealthTextColour);
-	const ImU32 weapCol = D2DColorToImU32(pcfg.WeaponColour);
-	const ImU32 roleCol = D2DColorToImU32(pcfg.RoleColour);
-	const ImU32 lookCol = D2DColorToImU32(pcfg.LookingColour);
-	const ImU32 stateCol = D2DColorToImU32(pcfg.StateColour);
+	const ImU32 espCol = Esp::D2DColorToImU32(pcfg.TextColour);
+	const ImU32 boxCol = Esp::D2DColorToImU32(pcfg.BoxColour);
+	const ImU32 nameCol = Esp::D2DColorToImU32(pcfg.NameColour);
+	const ImU32 distCol = Esp::D2DColorToImU32(pcfg.DistanceColour);
+	const ImU32 hpTxtCol = Esp::D2DColorToImU32(pcfg.HealthTextColour);
+	const ImU32 weapCol = Esp::D2DColorToImU32(pcfg.WeaponColour);
+	const ImU32 roleCol = Esp::D2DColorToImU32(pcfg.RoleColour);
+	const ImU32 lookCol = Esp::D2DColorToImU32(pcfg.LookingColour);
+	const ImU32 stateCol = Esp::D2DColorToImU32(pcfg.StateColour);
 	const float fontSize = (float)pcfg.FontSize;
 	ImFont* font = ImGui::GetFont();
 
@@ -132,7 +81,7 @@ void DrawPlayers()
 
 		const Vector3 entPos = ent.position;
 
-		const float distF = DistanceTo(entPos, localPos);
+		const float distF = Distance(entPos, localPos);
 		if (haveLocalPosition && (int)distF > pcfg.MaxDistance)
 			continue;
 
@@ -147,16 +96,14 @@ void DrawPlayers()
 		for (const auto& seg : ent.bones)
 		{
 			ImVec2 a{}, b{};
-			if (!Project(viewProjection, Vector3(seg.a.x, seg.a.y, seg.a.z),
-					screenW, screenH, a)) continue;
-			if (!Project(viewProjection, Vector3(seg.b.x, seg.b.y, seg.b.z),
-					screenW, screenH, b)) continue;
+			if (!Project(viewProjection, seg.a, screenW, screenH, a)) continue;
+			if (!Project(viewProjection, seg.b, screenW, screenH, b)) continue;
 
 			ImU32 segCol = espCol;
 			if (pcfg.VisCheck || pcfg.WallCheck) {
 				segCol = seg.visible
-					? D2DColorToImU32(pcfg.VisibleColour)
-					: D2DColorToImU32(pcfg.HiddenColour);
+					? Esp::D2DColorToImU32(pcfg.VisibleColour)
+					: Esp::D2DColorToImU32(pcfg.HiddenColour);
 			}
 			dl->AddLine(a, b, segCol, 2.f);
 			minX = std::min(minX, std::min(a.x, b.x));
@@ -329,7 +276,18 @@ void DrawPlayers()
 		{
 			ImU32 roleTextCol = roleCol;
 			const std::string roleLabel =
-				ResolveRoleLabel(ent, roleCol, pcfg.ExpRoleColors, roleTextCol);
+				RobRunReader::RoleLabel(ent.role, ent.roleName);
+			if (pcfg.ExpRoleColors && !roleLabel.empty())
+			{
+				if (roleLabel == "Criminal")
+					roleTextCol = IM_COL32(255, 85, 85, 255);
+				else if (roleLabel == "Police Officer")
+					roleTextCol = IM_COL32(80, 175, 255, 255);
+				else if (roleLabel == "Civilian")
+					roleTextCol = IM_COL32(100, 235, 130, 255);
+				else if (roleLabel == "Hubber")
+					roleTextCol = IM_COL32(150, 175, 225, 255);
+			}
 			if (!roleLabel.empty())
 				stateSegs.push_back({ "[" + roleLabel + "]", roleTextCol });
 		}
@@ -397,7 +355,7 @@ void DrawPlayers()
 			place.Y = wp.y;
 		}
 
-		const ImU32 alertCol = D2DColorToImU32(pcfg.LookingColour);
+		const ImU32 alertCol = Esp::D2DColorToImU32(pcfg.LookingColour);
 		for (const auto& name : lookingNames)
 		{
 			std::string line = name + " is looking at you!";
@@ -410,8 +368,10 @@ void DrawPlayers()
 	}
 
 	// Wallet / bag value HUD. Values are read by the inventory worker once a
-	// second, so this window only formats the published state.
-	if (pcfg.ExpMoneyHud && snapshot->inventory && snapshot->inventory->valid)
+	// second, so this window only formats the published state. Suppressed in
+	// battle mode so only player ESP remains on screen.
+	if (pcfg.ExpMoneyHud && !ConfigInstance.Overlay.BattleMode &&
+		snapshot->inventory && snapshot->inventory->valid)
 	{
 		const auto& inv = *snapshot->inventory;
 		ImGui::SetNextWindowPos(ImVec2(20.f, 106.f), ImGuiCond_FirstUseEver);

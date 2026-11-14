@@ -155,28 +155,17 @@ public:
 	{
 		if (!j.contains(ConfigName))
 			return;
-		if (j[ConfigName].contains(LIT("Enabled")))
-			Enabled = j[ConfigName][LIT("Enabled")];
-		if (j[ConfigName].contains(LIT("Containers")))
-			Containers = j[ConfigName][LIT("Containers")];
-		if (j[ConfigName].contains(LIT("Loot")))
-			Loot = j[ConfigName][LIT("Loot")];
-		if (j[ConfigName].contains(LIT("Vehicles")))
-			Vehicles = j[ConfigName][LIT("Vehicles")];
-		if (j[ConfigName].contains(LIT("Grenades")))
-			Grenades = j[ConfigName][LIT("Grenades")];
-		if (j[ConfigName].contains(LIT("Valuables")))
-			Valuables = j[ConfigName][LIT("Valuables")];
-		if (j[ConfigName].contains(LIT("PointsOfInterest")))
-			PointsOfInterest = j[ConfigName][LIT("PointsOfInterest")];
-		if (j[ConfigName].contains(LIT("ShowEmpty")))
-			ShowEmpty = j[ConfigName][LIT("ShowEmpty")];
-		if (j[ConfigName].contains(LIT("ShowDistance")))
-			ShowDistance = j[ConfigName][LIT("ShowDistance")];
-		if (j[ConfigName].contains(LIT("MaxDistance")))
-			MaxDistance = j[ConfigName][LIT("MaxDistance")];
-		if (j[ConfigName].contains(LIT("FontSize")))
-			FontSize = j[ConfigName][LIT("FontSize")];
+		Enabled = j[ConfigName].value(LIT("Enabled"), Enabled);
+		Containers = j[ConfigName].value(LIT("Containers"), Containers);
+		Loot = j[ConfigName].value(LIT("Loot"), Loot);
+		Vehicles = j[ConfigName].value(LIT("Vehicles"), Vehicles);
+		Grenades = j[ConfigName].value(LIT("Grenades"), Grenades);
+		Valuables = j[ConfigName].value(LIT("Valuables"), Valuables);
+		PointsOfInterest = j[ConfigName].value(LIT("PointsOfInterest"), PointsOfInterest);
+		ShowEmpty = j[ConfigName].value(LIT("ShowEmpty"), ShowEmpty);
+		ShowDistance = j[ConfigName].value(LIT("ShowDistance"), ShowDistance);
+		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
+		FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
 
 		FromJsonBool(j, LIT("LootNodes"), &LootNodes);
 		FromJsonBool(j, LIT("SafeDoors"), &SafeDoors);

@@ -130,51 +130,30 @@ public:
     {
         if (!j.contains(ConfigName))
             return;
-        if (j[ConfigName].contains(LIT("BoxEsp")))
-            BoxEsp = j[ConfigName][LIT("BoxEsp")];
-        if (j[ConfigName].contains(LIT("Health")))
-            Health = j[ConfigName][LIT("Health")];
-        if (j[ConfigName].contains(LIT("Distance")))
-            Distance = j[ConfigName][LIT("Distance")];
-        if (j[ConfigName].contains(LIT("PrimaryWeapon")))
-            PrimaryWeapon = j[ConfigName][LIT("PrimaryWeapon")];
-        if (j[ConfigName].contains(LIT("SecondaryWeapon")))
-            SecondaryWeapon = j[ConfigName][LIT("SecondaryWeapon")];
-        if (j[ConfigName].contains(LIT("FontSize")))
-            FontSize = j[ConfigName][LIT("FontSize")];
-        if (j[ConfigName].contains(LIT("MaxDistance")))
-            MaxDistance = j[ConfigName][LIT("MaxDistance")];
+        BoxEsp = j[ConfigName].value(LIT("BoxEsp"), BoxEsp);
+        Health = j[ConfigName].value(LIT("Health"), Health);
+        Distance = j[ConfigName].value(LIT("Distance"), Distance);
+        PrimaryWeapon = j[ConfigName].value(LIT("PrimaryWeapon"), PrimaryWeapon);
+        SecondaryWeapon = j[ConfigName].value(LIT("SecondaryWeapon"), SecondaryWeapon);
+        FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
+        MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
         FromJsonColour(j, LIT("TextColour"), &TextColour);
-        if (j[ConfigName].contains(LIT("VisCheck")))
-            VisCheck = j[ConfigName][LIT("VisCheck")];
+        VisCheck = j[ConfigName].value(LIT("VisCheck"), VisCheck);
         FromJsonColour(j, LIT("VisibleColour"), &VisibleColour);
         FromJsonColour(j, LIT("HiddenColour"), &HiddenColour);
-        if (j[ConfigName].contains(LIT("WallCheck")))
-            WallCheck = j[ConfigName][LIT("WallCheck")];
-        if (j[ConfigName].contains(LIT("BvhPath")))
-            BvhPath = j[ConfigName][LIT("BvhPath")];
-        if (j[ConfigName].contains(LIT("NativeEspCameraV2")))
-            NativeEspCamera = j[ConfigName][LIT("NativeEspCameraV2")];
-        if (j[ConfigName].contains(LIT("WeaponEsp")))
-            WeaponEsp = j[ConfigName][LIT("WeaponEsp")];
-        if (j[ConfigName].contains(LIT("LookingAtYou")))
-            LookingAtYou = j[ConfigName][LIT("LookingAtYou")];
-        if (j[ConfigName].contains(LIT("LookingAlert")))
-            LookingAlert = j[ConfigName][LIT("LookingAlert")];
-        if (j[ConfigName].contains(LIT("ShowRole")))
-            ShowRole = j[ConfigName][LIT("ShowRole")];
-        if (j[ConfigName].contains(LIT("ExpRoleColors")))
-            ExpRoleColors = j[ConfigName][LIT("ExpRoleColors")];
-        if (j[ConfigName].contains(LIT("ExpMoneyHud")))
-            ExpMoneyHud = j[ConfigName][LIT("ExpMoneyHud")];
-        if (j[ConfigName].contains(LIT("ShowFiring")))
-            ShowFiring = j[ConfigName][LIT("ShowFiring")];
-        if (j[ConfigName].contains(LIT("ShowReloading")))
-            ShowReloading = j[ConfigName][LIT("ShowReloading")];
-        if (j[ConfigName].contains(LIT("ShowArmor")))
-            ShowArmor = j[ConfigName][LIT("ShowArmor")];
-        if (j[ConfigName].contains(LIT("WeaponSprite")))
-            WeaponSprite = j[ConfigName][LIT("WeaponSprite")];
+        WallCheck = j[ConfigName].value(LIT("WallCheck"), WallCheck);
+        BvhPath = j[ConfigName].value(LIT("BvhPath"), BvhPath);
+        NativeEspCamera = j[ConfigName].value(LIT("NativeEspCameraV2"), NativeEspCamera);
+        WeaponEsp = j[ConfigName].value(LIT("WeaponEsp"), WeaponEsp);
+        LookingAtYou = j[ConfigName].value(LIT("LookingAtYou"), LookingAtYou);
+        LookingAlert = j[ConfigName].value(LIT("LookingAlert"), LookingAlert);
+        ShowRole = j[ConfigName].value(LIT("ShowRole"), ShowRole);
+        ExpRoleColors = j[ConfigName].value(LIT("ExpRoleColors"), ExpRoleColors);
+        ExpMoneyHud = j[ConfigName].value(LIT("ExpMoneyHud"), ExpMoneyHud);
+        ShowFiring = j[ConfigName].value(LIT("ShowFiring"), ShowFiring);
+        ShowReloading = j[ConfigName].value(LIT("ShowReloading"), ShowReloading);
+        ShowArmor = j[ConfigName].value(LIT("ShowArmor"), ShowArmor);
+        WeaponSprite = j[ConfigName].value(LIT("WeaponSprite"), WeaponSprite);
         FromJsonColour(j, LIT("NameColour"), &NameColour);
         FromJsonColour(j, LIT("DistanceColour"), &DistanceColour);
         FromJsonColour(j, LIT("HealthTextColour"), &HealthTextColour);
@@ -186,10 +165,8 @@ public:
         FromJsonColour(j, LIT("FiringColour"), &FiringColour);
         FromJsonColour(j, LIT("ReloadColour"), &ReloadColour);
         FromJsonColour(j, LIT("ArmorColour"), &ArmorColour);
-        if (j[ConfigName].contains(LIT("PoseSmoothing")))
-            PoseSmoothing = j[ConfigName][LIT("PoseSmoothing")];
-        if (j[ConfigName].contains(LIT("PoseSmoothAlpha")))
-            PoseSmoothAlpha = j[ConfigName][LIT("PoseSmoothAlpha")];
+        PoseSmoothing = j[ConfigName].value(LIT("PoseSmoothing"), PoseSmoothing);
+        PoseSmoothAlpha = j[ConfigName].value(LIT("PoseSmoothAlpha"), PoseSmoothAlpha);
     }
 };
 

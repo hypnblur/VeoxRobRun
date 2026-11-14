@@ -113,32 +113,13 @@ bool Finite(const Vector3& v)
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-float Distance(const Vector3& a, const Vector3& b)
-{
-    const float dx = a.x - b.x;
-    const float dy = a.y - b.y;
-    const float dz = a.z - b.z;
-    return std::sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-// Role ids are hashed enums, so the reader resolves a name through reflection.
-// These two ids are the ones seen in every dump and act as the fallback when
-// reflection could not walk the wrapper.
-std::string RoleLabel(int role, const std::string& name)
-{
-    if (!name.empty()) return name;
-    if (role == 1257638368) return "Criminal";
-    if (role == 6) return "Hubber";
-    return {};
-}
-
 // Role labels come from the reader's reflection pass. Mirror the ESP's id
 // fallbacks so the aim filter and the overlay never disagree about a target.
 // The teammate filter is party based: the reader resolves the local party's
 // member ids and marks each entity, so same-role strangers stay targetable.
 bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 {
-    const std::string role = RoleLabel(ent.role, ent.roleName);
+    const std::string role = RobRunReader::RoleLabel(ent.role, ent.roleName);
     if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
@@ -156,10 +137,10 @@ Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
         Vector3 point{};
         bool have = false;
         switch (bone) {
-        case 0: point = Vector3(points.head.x, points.head.y, points.head.z); have = true; break;
-        case 1: point = Vector3(points.neck.x, points.neck.y, points.neck.z); have = true; break;
-        case 2: point = Vector3(points.chest.x, points.chest.y, points.chest.z); have = true; break;
-        case 3: point = Vector3(points.pelvis.x, points.pelvis.y, points.pelvis.z); have = true; break;
+        case 0: point = points.head;   have = true; break;
+        case 1: point = points.neck;   have = true; break;
+        case 2: point = points.chest;  have = true; break;
+        case 3: point = points.pelvis; have = true; break;
         default: break;
         }
         // A stale or mis-resolved rig layout can point a bone at the world
@@ -328,42 +309,41 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
     float rotYaw = 0.f;
     float rotPitch = 0.f;
     {
-        VMMDLL_SCATTER_HANDLE rh = TargetProcess.CreateScatterHandle();
-        if (!rh) return false;
-        TargetProcess.AddScatterReadRequest(rh,
+        Memory::ScopedScatter scatter(TargetProcess);
+        if (!scatter.handle) return false;
+        TargetProcess.AddScatterReadRequest(scatter,
             battleModel + rr::BattleModel::BattleCameraModel, &liveCamera,
             sizeof(liveCamera));
-        TargetProcess.AddScatterReadRequest(rh,
+        TargetProcess.AddScatterReadRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Orientation,
             liveQuat, sizeof(liveQuat));
-        TargetProcess.AddScatterReadRequest(rh,
+        TargetProcess.AddScatterReadRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Forward,
             &liveForward, sizeof(liveForward));
         if (lookDirModel > 0x10000)
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 lookDirModel + rr::ReferenceData::Value, &lookModelValue,
                 sizeof(lookModelValue));
         if (lookDirDirect > 0x10000) {
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Value, &lookDirectValue,
                 sizeof(lookDirectValue));
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Yaw, &lookDirectYaw,
                 sizeof(lookDirectYaw));
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Pitch, &lookDirectPitch,
                 sizeof(lookDirectPitch));
         }
         if (playerRotInput > 0x10000) {
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 playerRotInput + rr::PlayerRotationInputModel::Yaw, &rotYaw,
                 sizeof(rotYaw));
-            TargetProcess.AddScatterReadRequest(rh,
+            TargetProcess.AddScatterReadRequest(scatter,
                 playerRotInput + rr::PlayerRotationInputModel::Pitch, &rotPitch,
                 sizeof(rotPitch));
         }
-        TargetProcess.ExecuteReadScatter(rh);
-        TargetProcess.CloseScatterHandle(rh);
+        TargetProcess.ExecuteReadScatter(scatter);
     }
     if (liveForwardOut) *liveForwardOut = liveForward;
 
@@ -406,42 +386,42 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
 
     outcome.attempted = true;
 
-    VMMDLL_SCATTER_HANDLE handle = TargetProcess.CreateScatterHandle();
-    if (handle) {
-        TargetProcess.AddScatterWriteRequest(handle,
+    Memory::ScopedScatter scatter(TargetProcess);
+    if (scatter.handle) {
+        TargetProcess.AddScatterWriteRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
-        TargetProcess.AddScatterWriteRequest(handle,
+        TargetProcess.AddScatterWriteRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q));
-        TargetProcess.AddScatterWriteRequest(handle,
+        TargetProcess.AddScatterWriteRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward));
-        TargetProcess.AddScatterWriteRequest(handle,
+        TargetProcess.AddScatterWriteRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right));
-        TargetProcess.AddScatterWriteRequest(handle,
+        TargetProcess.AddScatterWriteRequest(scatter,
             cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up));
         // Write the forward vector to the LookDirection model so the game's
         // input pipeline reads the same direction we set on the camera.
         if (lookDirModel > 0x10000)
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
         // BCM+0x70 LookDirectionModel: _value(+0x10), _yaw(+0x1C), _pitch(+0x20)
         if (lookDirDirect > 0x10000) {
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Yaw, &yaw, sizeof(yaw));
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
         }
         if (playerRotInput > 0x10000) {
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 playerRotInput + rr::PlayerRotationInputModel::Yaw, &yaw, sizeof(yaw));
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
         }
-        TargetProcess.ExecuteScatterWrite(handle);
-        TargetProcess.CloseScatterHandle(handle);
-        outcome.scatter = true;
-        return true;
+        if (TargetProcess.ExecuteScatterWrite(scatter)) {
+            outcome.scatter = true;
+            return true;
+        }
     }
 
     bool ok = TargetProcess.Write(
@@ -519,6 +499,11 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
+bool IsKeyHeld(int keyIndex)
+{
+    const char* source = nullptr;
+    return Held(keyIndex, &source);
+}
 DebugInfo GetDebug() { return g_debug; }
 
 // The reference memory aim also writes the local input model, the player
@@ -727,8 +712,7 @@ void Tick()
     }
 
     Matrix4x4 viewProjection{};
-    if (!RobRunReader::GetViewProjection(viewProjection, width, height) &&
-        !RobRunReader::GetFallbackViewProjection(viewProjection)) {
+    if (!RobRunReader::ResolveViewProjection(viewProjection, width, height)) {
         g_debug.reason = "no view projection";
         stopAiming();
         return;
@@ -1059,8 +1043,8 @@ void TickRecoilSpread()
         if (g_cachedPlayerClient <= 0x10000) return;
     }
 
-    VMMDLL_SCATTER_HANDLE handle = TargetProcess.CreateScatterHandle();
-    if (!handle) return;
+    Memory::ScopedScatter scatter(TargetProcess);
+    if (!scatter.handle) return;
 
     struct { float x, y, z; } zero3 = {0.f, 0.f, 0.f};
 
@@ -1068,7 +1052,7 @@ void TickRecoilSpread()
         const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
             g_cachedPlayerClient + rr::PlayerClient::Recoil);
         if (recoilModel > 0x10000)
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 recoilModel + rr::RecoilModel::OffsetVec, &zero3, sizeof(zero3));
     }
 
@@ -1077,17 +1061,16 @@ void TickRecoilSpread()
             g_cachedPlayerClient + rr::PlayerClient::FakeSpread);
         if (spreadModel > 0x10000) {
             float zero = 0.f;
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
-            TargetProcess.AddScatterWriteRequest(handle,
+            TargetProcess.AddScatterWriteRequest(scatter,
                 spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
         }
     }
 
-    TargetProcess.ExecuteScatterWrite(handle);
-    TargetProcess.CloseScatterHandle(handle);
+    if (!TargetProcess.ExecuteScatterWrite(scatter)) return;
 }
 
 void Draw()
@@ -1104,8 +1087,7 @@ void Draw()
 
     Matrix4x4 viewProjection{};
     float radius;
-    if (RobRunReader::GetViewProjection(viewProjection, (int)display.x, (int)display.y) ||
-        RobRunReader::GetFallbackViewProjection(viewProjection)) {
+    if (RobRunReader::ResolveViewProjection(viewProjection, (int)display.x, (int)display.y)) {
         radius = ConeRadiusPixels(viewProjection, static_cast<float>(cfg.Fov),
             verticalFov, display.y);
     } else {

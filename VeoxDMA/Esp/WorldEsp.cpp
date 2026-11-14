@@ -18,22 +18,6 @@ static std::string FormatCash(int amount)
 	return s;
 }
 
-static ImU32 D2DColorToImU32(const D2D1::ColorF& c)
-{
-	return IM_COL32(
-		(int)(c.r * 255.f),
-		(int)(c.g * 255.f),
-		(int)(c.b * 255.f),
-		(int)(c.a * 255.f));
-}
-
-static bool ResolveWorldViewProjection(Matrix4x4& viewProjection, int width, int height)
-{
-	if (RobRunReader::GetViewProjection(viewProjection, width, height))
-		return true;
-	return RobRunReader::GetFallbackViewProjection(viewProjection);
-}
-
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
 	const auto& world = ConfigInstance.World;
@@ -93,49 +77,49 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 	switch (kind)
 	{
 	case RobRunWorld::Kind::Container:
-		return D2DColorToImU32(world.ContainerColour);
+		return Esp::D2DColorToImU32(world.ContainerColour);
 	case RobRunWorld::Kind::LootNode:
-		return D2DColorToImU32(world.LootNodeColour);
+		return Esp::D2DColorToImU32(world.LootNodeColour);
 	case RobRunWorld::Kind::SafeDoor:
-		return D2DColorToImU32(world.SafeDoorColour);
+		return Esp::D2DColorToImU32(world.SafeDoorColour);
 	case RobRunWorld::Kind::StorageBox:
-		return D2DColorToImU32(world.StorageBoxColour);
+		return Esp::D2DColorToImU32(world.StorageBoxColour);
 	case RobRunWorld::Kind::Shelving:
-		return D2DColorToImU32(world.ShelvingColour);
+		return Esp::D2DColorToImU32(world.ShelvingColour);
 	case RobRunWorld::Kind::CollectionTable:
-		return D2DColorToImU32(world.CollectionTableColour);
+		return Esp::D2DColorToImU32(world.CollectionTableColour);
 	case RobRunWorld::Kind::PlotContainer:
-		return D2DColorToImU32(world.PlotContainerColour);
+		return Esp::D2DColorToImU32(world.PlotContainerColour);
 	case RobRunWorld::Kind::Loot:
 	case RobRunWorld::Kind::StaticLoot:
 	case RobRunWorld::Kind::RandomLoot:
-		return D2DColorToImU32(world.LootColour);
+		return Esp::D2DColorToImU32(world.LootColour);
 	case RobRunWorld::Kind::DroppedBag:
-		return D2DColorToImU32(world.DroppedBagColour);
+		return Esp::D2DColorToImU32(world.DroppedBagColour);
 	case RobRunWorld::Kind::VehicleLoot:
-		return D2DColorToImU32(world.VehicleLootColour);
+		return Esp::D2DColorToImU32(world.VehicleLootColour);
 	case RobRunWorld::Kind::Cargo:
-		return D2DColorToImU32(world.CargoColour);
+		return Esp::D2DColorToImU32(world.CargoColour);
 	case RobRunWorld::Kind::PlotLoot:
-		return D2DColorToImU32(world.PlotLootColour);
+		return Esp::D2DColorToImU32(world.PlotLootColour);
 	case RobRunWorld::Kind::FurnitureLoot:
-		return D2DColorToImU32(world.FurnitureLootColour);
+		return Esp::D2DColorToImU32(world.FurnitureLootColour);
 	case RobRunWorld::Kind::BuildingLoot:
-		return D2DColorToImU32(world.BuildingLootColour);
+		return Esp::D2DColorToImU32(world.BuildingLootColour);
 	case RobRunWorld::Kind::Vehicle:
 	case RobRunWorld::Kind::Car:
 	case RobRunWorld::Kind::Helicopter:
-		return D2DColorToImU32(world.VehicleColour);
+		return Esp::D2DColorToImU32(world.VehicleColour);
 	case RobRunWorld::Kind::Grenade:
-		return D2DColorToImU32(world.GrenadeColour);
+		return Esp::D2DColorToImU32(world.GrenadeColour);
 	case RobRunWorld::Kind::CashLootNode:
-		return D2DColorToImU32(world.CashLootNodeColour);
+		return Esp::D2DColorToImU32(world.CashLootNodeColour);
 	case RobRunWorld::Kind::SettlementCash:
-		return D2DColorToImU32(world.SettlementCashColour);
+		return Esp::D2DColorToImU32(world.SettlementCashColour);
 	case RobRunWorld::Kind::MoneyWorkbench:
-		return D2DColorToImU32(world.MoneyWorkbenchColour);
+		return Esp::D2DColorToImU32(world.MoneyWorkbenchColour);
 	case RobRunWorld::Kind::PointOfInterest:
-		return D2DColorToImU32(world.PointOfInterestColour);
+		return Esp::D2DColorToImU32(world.PointOfInterestColour);
 	}
 	return IM_COL32(255, 255, 255, 255);
 }
@@ -156,7 +140,7 @@ void DrawWorldEntities()
 		return;
 
 	Matrix4x4 viewProjection{};
-	if (!ResolveWorldViewProjection(viewProjection, screenW, screenH))
+	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
 		return;
 
 	const Vector3 localPos = snapshot->localPosition;

@@ -5,6 +5,7 @@
 #include "WorldConfig.h"
 #include "AimConfig.h"
 #include "RadarConfig.h"
+#include <cassert>
 
 class ConfigInstances
 {
@@ -14,6 +15,19 @@ public:
 	WorldConfig World = WorldConfig(LIT("World"));
 	AimConfig Aim = AimConfig(LIT("Aim"));
 	RadarConfig Radar = RadarConfig(LIT("Radar"));
+
+	static_assert(
+		std::string_view("Player") != std::string_view("Overlay") &&
+		std::string_view("Player") != std::string_view("World") &&
+		std::string_view("Player") != std::string_view("Aim") &&
+		std::string_view("Player") != std::string_view("Radar") &&
+		std::string_view("Overlay") != std::string_view("World") &&
+		std::string_view("Overlay") != std::string_view("Aim") &&
+		std::string_view("Overlay") != std::string_view("Radar") &&
+		std::string_view("World") != std::string_view("Aim") &&
+		std::string_view("World") != std::string_view("Radar") &&
+		std::string_view("Aim") != std::string_view("Radar"),
+		"Config section names must be unique — merge_patch silently overwrites on collision");
 
 	json ToJson()
 	{

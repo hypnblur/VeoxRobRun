@@ -153,6 +153,16 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight);
 // walk on the render thread.
 bool GetFallbackViewProjection(Matrix4x4& out);
 
+// Single resolution path shared by the ESP, the aim cone and the debug HUD: the
+// verified managed camera first, the native Unity camera fallback second, so
+// every consumer projects with the same answer.
+bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight);
+
+// Single role-label resolver. Role ids are hashed enums, so names come from the
+// reflection pass and the known-id fallbacks live here; the aim filter and the
+// ESP must both go through it so they cannot disagree about a target.
+std::string RoleLabel(int role, const std::string& name);
+
 // Which camera GetViewProjection is currently projecting with: "native" (the
 // Unity render camera), "managed" (BattleCameraModel), "snapshot" (worker
 // copy) or "none". Useful for confirming the ESP is glued to the rendered frame

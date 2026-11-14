@@ -59,6 +59,9 @@ static std::uint64_t g_partyStamp = 0;
 
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedSlots;
 static std::uint64_t slotRefreshStamp = 0;
+// Worker-owned view cache. Threading contract: only the read worker writes
+// cachedViews; the render thread consumes the published Snapshot instead of
+// touching this map, so no lock is required as long as that stays true.
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViews;
 static std::unordered_map<std::int32_t, std::uintptr_t> cachedViewOwner;
 static std::unordered_map<std::int32_t, int> viewOwnerMisses;
@@ -175,6 +178,9 @@ struct DetailCacheEntry {
     bool isHandcuffed = false;
     std::string reloadPhase;
 };
+// Worker-owned slow-changing detail cache (health, role, identity). Same
+// threading contract as cachedViews: worker writes only, render thread reads
+// the published Snapshot.
 static std::unordered_map<std::int32_t, DetailCacheEntry> detailCache;
 
 // Rig layout + last sampled pose. The layout (matrix array, parent table and
@@ -326,13 +332,6 @@ static void MatchViewsToEntities()
     for (std::size_t v = 0; v < views.size(); ++v)
         viewIndex.emplace(views[v].view, v);
 
-    auto distanceTo = [](const Vector3& a, const Vector3& b) {
-        const float dx = a.x - b.x;
-        const float dy = a.y - b.y;
-        const float dz = a.z - b.z;
-        return std::sqrt(dx * dx + dy * dy + dz * dz);
-    };
-
     // A player can cover several metres between two 400 ms refreshes, so the
     // acquire radius is generous. The release radius is far larger so only a
     // genuinely different player breaks an existing pair.
@@ -379,7 +378,7 @@ static void MatchViewsToEntities()
             const auto& entity = entities[entityIt->second];
             if (RobRunMemory::Finite(entity.position) &&
                 !entity.position.IsZero() &&
-                distanceTo(entity.position, candidate.position) > kReleaseRadius)
+                Distance(entity.position, candidate.position) > kReleaseRadius)
             {
                 // The positions have clearly diverged, so this rig belongs to
                 // somebody else now. Free it for re-pairing below.
@@ -405,7 +404,7 @@ static void MatchViewsToEntities()
         for (std::size_t v = 0; v < views.size(); ++v)
         {
             if (!views[v].hasPosition || views[v].claimed) continue;
-            const float distance = distanceTo(entity.position, views[v].position);
+            const float distance = Distance(entity.position, views[v].position);
             if (distance <= kMatchRadius)
                 pairs.push_back(Pair{ distance, e, v });
         }
@@ -2651,6 +2650,22 @@ bool GetFallbackViewProjection(Matrix4x4& out)
     if (!snapshot || !snapshot->fallbackViewProjectionValid) return false;
     out = snapshot->fallbackViewProjection;
     return true;
+}
+
+bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
+{
+    if (screenWidth <= 0 || screenHeight <= 0) return false;
+    if (GetViewProjection(out, screenWidth, screenHeight)) return true;
+    return GetFallbackViewProjection(out);
+}
+
+std::string RoleLabel(int role, const std::string& name)
+{
+    if (!name.empty()) return name;
+    if (role == 1257638368) return "Criminal";
+    if (role == 6) return "Hubber";
+    if (role > 0 && role < 100000) return "Role:" + std::to_string(role);
+    return {};
 }
 
 const char* GetViewProjectionSource()

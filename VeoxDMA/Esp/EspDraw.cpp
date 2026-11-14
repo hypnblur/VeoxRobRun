@@ -48,6 +48,15 @@ ImU32 ShadeColour(const D2D1::ColorF& c, float extraAlpha)
 		(int)(a * 255.f + 0.5f));
 }
 
+ImU32 D2DColorToImU32(const D2D1::ColorF& c)
+{
+	return IM_COL32(
+		(int)(c.r * 255.f),
+		(int)(c.g * 255.f),
+		(int)(c.b * 255.f),
+		(int)(c.a * 255.f));
+}
+
 void DrawOutlinedText(ImDrawList* dl, const ImVec2& pos, ImU32 col,
 	ImFont* font, float size, const char* text)
 {

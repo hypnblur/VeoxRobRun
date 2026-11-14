@@ -960,7 +960,7 @@ void DrawVisuals()
 		}
 
 		if (MatchAny({ "Looking At You", "Looking Alert", "Show Role", "Color-code by role",
-			"Money & Value HUD" }))
+			"Money & Value HUD", "Battle Mode", "Battle Mode Key" }))
 		{
 			BeginCard("PLAYER FLAGS", kCardW);
 			ColorToggleRow("Looking At You", &ConfigInstance.Player.LookingAtYou, ConfigInstance.Player.LookingColour);
@@ -969,6 +969,11 @@ void DrawVisuals()
 			if (ConfigInstance.Player.ShowRole)
 				ToggleRow("Color-code by role", &ConfigInstance.Player.ExpRoleColors);
 			ToggleRow("Money & Value HUD", &ConfigInstance.Player.ExpMoneyHud);
+			ToggleRow("Battle Mode", &ConfigInstance.Overlay.BattleMode);
+			ComboRow("Battle Mode Key", &ConfigInstance.Overlay.BattleModeKey, Aim::KeyNames(), Aim::KeyCount());
+			if (ConfigInstance.Overlay.BattleModeKey == Aim::KeyCount() - 1)
+				Note("Choose a specific key to toggle battle mode.");
+			Note("When Battle Mode is on, only player ESP is shown.");
 			EndCard();
 		}
 
@@ -1647,7 +1652,10 @@ void DrawSettings(bool attached, const std::string& statusText)
 			Overlay::Notify(ok ? "Config loaded" : "Config load failed",
 				ok ? IM_COL32(74, 201, 126, 255) : IM_COL32(255, 75, 75, 255), 2.f);
 		}
-		Note("C:\\VeoxDMA\\RobRun\\config.json");
+		const wchar_t* configPath = ConfigFile::Path();
+		char configPathUtf8[1024];
+		WideCharToMultiByte(CP_UTF8, 0, configPath, -1, configPathUtf8, _countof(configPathUtf8), nullptr, nullptr);
+		Note("%s", configPathUtf8);
 		Note("Saved automatically when the overlay closes.");
 		EndCard();
 
