@@ -21,38 +21,39 @@ static std::string FormatCash(int amount)
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
 	const auto& world = ConfigInstance.World;
+	if (!world.Enabled) return false;
 	switch (kind)
 	{
 	case RobRunWorld::Kind::Container:
 		return world.Containers;
 	case RobRunWorld::Kind::LootNode:
-		return world.Containers && world.LootNodes;
+		return world.Containers || world.LootNodes;
 	case RobRunWorld::Kind::SafeDoor:
-		return world.Containers && world.SafeDoors;
+		return world.Containers || world.SafeDoors;
 	case RobRunWorld::Kind::StorageBox:
-		return world.Containers && world.StorageBoxes;
+		return world.Containers || world.StorageBoxes;
 	case RobRunWorld::Kind::Shelving:
-		return world.Containers && world.Shelvings;
+		return world.Containers || world.Shelvings;
 	case RobRunWorld::Kind::CollectionTable:
-		return world.Containers && world.CollectionTables;
+		return world.Containers || world.CollectionTables;
 	case RobRunWorld::Kind::PlotContainer:
-		return world.Containers && world.PlotContainers;
+		return world.Containers || world.PlotContainers;
 	case RobRunWorld::Kind::Loot:
 	case RobRunWorld::Kind::StaticLoot:
 	case RobRunWorld::Kind::RandomLoot:
 		return world.Loot;
 	case RobRunWorld::Kind::DroppedBag:
-		return world.Loot && world.DroppedBags;
+		return world.Loot || world.DroppedBags;
 	case RobRunWorld::Kind::VehicleLoot:
-		return world.Loot && world.VehicleLoots;
+		return world.Loot || world.VehicleLoots;
 	case RobRunWorld::Kind::Cargo:
-		return world.Loot && world.Cargos;
+		return world.Loot || world.Cargos;
 	case RobRunWorld::Kind::PlotLoot:
-		return world.Loot && world.PlotLoots;
+		return world.Loot || world.PlotLoots;
 	case RobRunWorld::Kind::FurnitureLoot:
-		return world.Loot && world.FurnitureLoots;
+		return world.Loot || world.FurnitureLoots;
 	case RobRunWorld::Kind::BuildingLoot:
-		return world.Loot && world.BuildingLoots;
+		return world.Loot || world.BuildingLoots;
 	case RobRunWorld::Kind::Vehicle:
 	case RobRunWorld::Kind::Car:
 	case RobRunWorld::Kind::Helicopter:
@@ -60,24 +61,24 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 	case RobRunWorld::Kind::Grenade:
 		return world.Grenades;
 	case RobRunWorld::Kind::CashLootNode:
-		return world.Valuables && world.CashLootNodes;
+		return world.Valuables || world.CashLootNodes;
 	case RobRunWorld::Kind::SettlementCash:
-		return world.Valuables && world.SettlementCash;
+		return world.Valuables || world.SettlementCash;
 	case RobRunWorld::Kind::MoneyWorkbench:
-		return world.Valuables && world.MoneyWorkbenches;
+		return world.Valuables || world.MoneyWorkbenches;
 	case RobRunWorld::Kind::CryptoWorkbench:
-		return world.Valuables && world.CryptoWorkbenches;
+		return world.Valuables || world.CryptoWorkbenches;
 	case RobRunWorld::Kind::SecurityAlarm:
 	case RobRunWorld::Kind::LocationSecurityAlarm:
 		return world.SecurityAlarms;
 	case RobRunWorld::Kind::FirstAidCabinet:
 		return world.FirstAidCabinets;
 	case RobRunWorld::Kind::VehicleTrunk:
-		return world.Containers && world.VehicleTrunks;
+		return world.Containers || world.VehicleTrunks;
 	case RobRunWorld::Kind::PointOfInterest:
 		return world.PointsOfInterest;
 	}
-	return false;
+	return true;
 }
 
 static ImU32 ColourFor(RobRunWorld::Kind kind)

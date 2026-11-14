@@ -65,17 +65,11 @@ public:
 	bool DynamicRecoilCompensation = true;
 	float RecoilStrength = 1.0f;
 
-	// --- Role filters ---------------------------------------------------
-	// Entity roles are resolved by name through reflection, so these match the
-	// ESP's labels exactly. Tick a box to ignore that role when picking a target.
+	// Role filters - all set to false to always allow all targets
 	bool ExpIgnorePolice = false;
 	bool ExpIgnoreCriminal = false;
 	bool ExpIgnoreCivilian = false;
-	// Skip entities that share the local player's party. Party membership is
-	// read from the battle party data and matched by public id/entity id, so
-	// same-role players outside the party are still valid targets. It does
-	// nothing while the party data cannot be resolved.
-	bool ExpIgnoreTeammates = true;
+	bool ExpIgnoreTeammates = false;
 
 	// Hardware Device connection settings
 	int DeviceIndex = 0;

@@ -348,19 +348,29 @@ static void MatchViewsToEntities()
     };
     std::vector<ViewCandidate> views;
     views.reserve(cachedViews.size());
+    // Lazy view position resolution: initialize candidate list without
+    // querying RootWorldPosition up front. Step 0 (direct key match) matches
+    // almost all entities instantly without needing any root position reads.
     for (const auto& entry : cachedViews)
     {
         ViewCandidate candidate;
         candidate.view = entry.second;
-        Skeleton::Vec root{};
-        if (entry.second > 0x10000 &&
-            Skeleton::RootWorldPosition(entry.second, DmaRead, root))
-        {
-            candidate.position = Vector3{ root.x, root.y, root.z };
-            candidate.hasPosition = RobRunMemory::Finite(candidate.position);
-        }
+        candidate.hasPosition = false;
+        candidate.claimed = false;
         views.push_back(candidate);
     }
+
+    auto ensureViewPosition = [&](ViewCandidate& cand) -> bool {
+        if (cand.hasPosition) return true;
+        Skeleton::Vec root{};
+        if (cand.view > 0x10000 &&
+            Skeleton::RootWorldPosition(cand.view, DmaRead, root))
+        {
+            cand.position = Vector3{ root.x, root.y, root.z };
+            cand.hasPosition = RobRunMemory::Finite(cand.position);
+        }
+        return cand.hasPosition;
+    };
 
     std::unordered_map<std::uintptr_t, std::size_t> viewIndex;
     viewIndex.reserve(views.size());
@@ -428,7 +438,7 @@ static void MatchViewsToEntities()
 
         auto& candidate = views[viewIt->second];
         candidate.claimed = true;
-        if (candidate.hasPosition)
+        if (ensureViewPosition(candidate))
         {
             const auto& entity = entities[entityIt->second];
             // Fast vehicles easily travel > 12m between 400ms scans.
@@ -461,7 +471,7 @@ static void MatchViewsToEntities()
             continue;
         for (std::size_t v = 0; v < views.size(); ++v)
         {
-            if (!views[v].hasPosition || views[v].claimed) continue;
+            if (views[v].claimed || !ensureViewPosition(views[v])) continue;
             const float distance = Distance(entity.position, views[v].position);
             if (distance <= kMatchRadius)
                 pairs.push_back(Pair{ distance, e, v });
@@ -854,22 +864,25 @@ static void ReadHealth(std::uintptr_t characterModel, EntityData& entity)
         privateModel + rr::BattleCharacterPrivateModel::HealthModel);
     if (healthModel <= 0x10000) return;
 
-    const std::uintptr_t healthWrapper = ReadPtr(healthModel + rr::HealthModel::Health);
-    float health = 0.f;
-    if (Il2Cpp::ReadPrimitiveFloat(healthWrapper, health) &&
-        std::isfinite(health) && health >= 0.f && health <= 100000.f) {
-        entity.health = health;
-        entity.healthKnown = true;
+    struct HealthDataBlock {
+        std::uintptr_t healthWrapper;
+        std::uintptr_t isDeadWrapper;
+        std::int32_t maxAmount;
+        std::int32_t criticalHealth;
+    } healthBlock{};
+    if (RobRunMemory::ReadBytes(healthModel + rr::HealthModel::Health, &healthBlock, sizeof(healthBlock))) {
+        float health = 0.f;
+        if (healthBlock.healthWrapper > 0x10000 &&
+            Il2Cpp::ReadPrimitiveFloat(healthBlock.healthWrapper, health) &&
+            std::isfinite(health) && health >= 0.f && health <= 100000.f) {
+            entity.health = health;
+            entity.healthKnown = true;
+        }
+        if (healthBlock.maxAmount > 0 && healthBlock.maxAmount <= 100000)
+            entity.maxHealth = static_cast<float>(healthBlock.maxAmount);
+        if (healthBlock.criticalHealth >= 0 && healthBlock.criticalHealth <= 100000)
+            entity.criticalHealth = static_cast<float>(healthBlock.criticalHealth);
     }
-
-    const std::int32_t maxAmount = RobRunMemory::ReadInt32(healthModel + rr::HealthModel::MaxAmount);
-    if (maxAmount > 0 && maxAmount <= 100000)
-        entity.maxHealth = static_cast<float>(maxAmount);
-
-    const std::int32_t critical = RobRunMemory::ReadInt32(
-        healthModel + rr::HealthModel::CriticalHealth);
-    if (critical >= 0 && critical <= 100000)
-        entity.criticalHealth = static_cast<float>(critical);
 
     const std::uintptr_t staminaModel = ReadPtr(
         privateModel + rr::BattleCharacterPrivateModel::Stamina);
@@ -2117,8 +2130,6 @@ static void UpdateInternal()
             {
                 w.block = TransformBlock{};
                 if (!RobRunMemory::ReadBytesFresh(w.blockAddress, &w.block,
-                        sizeof(TransformBlock)) &&
-                    !RobRunMemory::ReadBytes(w.blockAddress, &w.block,
                         sizeof(TransformBlock)))
                 {
                     w.positionValid = false;
@@ -2355,9 +2366,6 @@ static void UpdateInternal()
                 if (!sampled) {
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
                         rig.bones, &rig.points, rig.curLocal.data());
-                    if (!sampled)
-                        sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                            rig.bones, &rig.points, rig.curLocal.data());
                 }
 
                 if (!sampled) {

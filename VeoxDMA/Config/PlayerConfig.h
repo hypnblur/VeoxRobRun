@@ -15,7 +15,7 @@ public:
 	bool Distance = true;
 	int MaxDistance = 1000;
 	bool PrimaryWeapon = true;
-	bool SecondaryWeapon = false;
+	bool SecondaryWeapon = true;
 	D2D1::ColorF TextColour = Colour(255, 255, 255);
 	int FontSize = 11;
 	// Camera occlusion pass over the city colliders: each bone is ray-cast
@@ -37,7 +37,7 @@ public:
 	bool LookingAlert = true;
 	bool ShowRole = true;
 	// Colour the role tag per role instead of using RoleColour.
-	bool ExpRoleColors = false;
+	bool ExpRoleColors = true;
 	// Compact overlay with coin/crypto balances and bag value, fed by the
 	// inventory worker.
 	bool ExpMoneyHud = true;

@@ -906,7 +906,7 @@ void Tick()
         // re-checks BattleModel -> camera itself, but gating here stops the
         // 16 ms stream during the teardown/rebuild window entirely.
         const bool freshSnapshot =
-            snapshot->stampMs != 0 && now - snapshot->stampMs <= 250;
+            snapshot->stampMs != 0 && now - snapshot->stampMs <= 500;
         const bool validRoots = cameraModel > 0x10000 &&
             battleModel > 0x10000 && snapshot->localCharacter > 0x10000;
         if (!validRoots) {

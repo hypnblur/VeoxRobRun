@@ -424,8 +424,9 @@ void Draw()
 			for (const auto& ent : snapshot->entities) {
 				if (ent.entityId == snapshot->localEntityId) continue;
 				if (ent.isDead) continue;
-				// Filter friendly party members so only enemy players appear on radar
-				if (ent.isPartyMember) continue;
+				// All players allowed on radar; party members receive a distinct friendly perimeter
+				const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
+				const ImU32 ringColor = ent.isPartyMember ? IM_COL32(50, 220, 100, 255) : marker.color;
 
 				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw,
 					cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
@@ -434,12 +435,11 @@ void Draw()
 				float ddy = pos.y - radarCenter.y;
 				if (ddx * ddx + ddy * ddy > (side * 0.5f) * (side * 0.5f)) continue;
 
-				const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
 				const float badgeRadius = (marker.text[1] != '\0') ? 8.5f : 7.0f;
 
 				// Dark badge circle with colored perimeter
 				dl->AddCircleFilled(pos, badgeRadius, IM_COL32(10, 12, 16, 220));
-				dl->AddCircle(pos, badgeRadius, marker.color, 0, 1.5f);
+				dl->AddCircle(pos, badgeRadius, ringColor, 0, 1.5f);
 
 				// Centered letter label (C for Criminals, CI for Civilians, P for Police)
 				ImVec2 ts = ImGui::CalcTextSize(marker.text);

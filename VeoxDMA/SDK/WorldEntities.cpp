@@ -233,6 +233,116 @@ void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind k
     }
 }
 
+// High-speed scatter reader for description-based world collections.
+// Reduces hundreds of individual DMA round trips down to two batched transactions.
+void AddDictionaryDescriptionScatter(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
+    std::uintptr_t descriptionOffset, std::uintptr_t positionOffset, State& out, int& kindCounter)
+{
+    std::vector<RobRunMemory::DictEntry> entries;
+    if (!ReadCollection(world, dictionaryOffset, entries) || entries.empty()) return;
+
+    struct ItemWork {
+        std::int32_t id = 0;
+        std::uintptr_t model = 0;
+        std::uintptr_t desc = 0;
+        Vector3 position{};
+    };
+    std::vector<ItemWork> work;
+    work.reserve(entries.size());
+    for (const auto& e : entries) {
+        if (e.value > 0x10000)
+            work.push_back({ e.key, e.value, 0, {} });
+    }
+    if (work.empty()) return;
+
+    // Phase 1: scatter read description pointers
+    auto sc1 = TargetProcess.CreateScatterHandleCached();
+    if (sc1) {
+        for (auto& item : work) {
+            TargetProcess.AddScatterReadRequest(sc1, item.model + descriptionOffset, &item.desc, sizeof(std::uintptr_t));
+        }
+        TargetProcess.ExecuteScatterReadCached(sc1);
+        TargetProcess.CloseScatterHandle(sc1);
+    }
+
+    // Phase 2: scatter read positions from valid description pointers
+    std::vector<std::size_t> validDesc;
+    validDesc.reserve(work.size());
+    for (std::size_t i = 0; i < work.size(); ++i) {
+        if (work[i].desc > 0x10000)
+            validDesc.push_back(i);
+    }
+
+    if (!validDesc.empty()) {
+        auto sc2 = TargetProcess.CreateScatterHandleCached();
+        if (sc2) {
+            for (auto idx : validDesc) {
+                TargetProcess.AddScatterReadRequest(sc2, work[idx].desc + positionOffset, &work[idx].position, sizeof(Vector3));
+            }
+            TargetProcess.ExecuteScatterReadCached(sc2);
+            TargetProcess.CloseScatterHandle(sc2);
+        }
+    }
+
+    for (auto idx : validDesc) {
+        const auto& item = work[idx];
+        if (ValidPosition(item.position) && (item.position.x != 0.f || item.position.y != 0.f || item.position.z != 0.f)) {
+            Entity entity{};
+            entity.id = item.id;
+            entity.kind = kind;
+            entity.position = item.position;
+            entity.label = KindName(kind);
+            out.entities.push_back(std::move(entity));
+            ++kindCounter;
+            if (out.entities.size() >= 4096) break;
+        }
+    }
+}
+
+// High-speed scatter reader for inline-position collections (e.g. PlotLoot, FurnitureLoot).
+// Executes in a single batched DMA transaction.
+void AddDictionaryInlineScatter(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
+    std::uintptr_t positionOffset, State& out, int& kindCounter)
+{
+    std::vector<RobRunMemory::DictEntry> entries;
+    if (!ReadCollection(world, dictionaryOffset, entries) || entries.empty()) return;
+
+    struct ItemWork {
+        std::int32_t id = 0;
+        std::uintptr_t model = 0;
+        Vector3 position{};
+    };
+    std::vector<ItemWork> work;
+    work.reserve(entries.size());
+    for (const auto& e : entries) {
+        if (e.value > 0x10000)
+            work.push_back({ e.key, e.value, {} });
+    }
+    if (work.empty()) return;
+
+    auto sc = TargetProcess.CreateScatterHandleCached();
+    if (sc) {
+        for (auto& item : work) {
+            TargetProcess.AddScatterReadRequest(sc, item.model + positionOffset, &item.position, sizeof(Vector3));
+        }
+        TargetProcess.ExecuteScatterReadCached(sc);
+        TargetProcess.CloseScatterHandle(sc);
+    }
+
+    for (const auto& item : work) {
+        if (ValidPosition(item.position) && (item.position.x != 0.f || item.position.y != 0.f || item.position.z != 0.f)) {
+            Entity entity{};
+            entity.id = item.id;
+            entity.kind = kind;
+            entity.position = item.position;
+            entity.label = KindName(kind);
+            out.entities.push_back(std::move(entity));
+            ++kindCounter;
+            if (out.entities.size() >= 4096) break;
+        }
+    }
+}
+
 } // namespace
 
 bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
@@ -308,19 +418,11 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     // DroppedBag below would duplicate every bag and double the DMA traffic,
     // so the DroppedBag pass is the only reader for this offset.
 
-    AddDictionary(world, rr::WorldEntitiesModel::StaticLootObjects, Kind::StaticLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t description = RobRunMemory::ReadPtr(
-                model + rr::StaticLootObjectModel::Description);
-            return RobRunMemory::ReadVector3(description + 0x30, position);
-        }, out, out.loots);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::StaticLootObjects, Kind::StaticLoot,
+        rr::StaticLootObjectModel::Description, 0x30, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::RandomLootObjects, Kind::RandomLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t description = RobRunMemory::ReadPtr(
-                model + rr::RandomLootObjectModel::Description);
-            return RobRunMemory::ReadVector3(description + 0x24, position);
-        }, out, out.loots);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::RandomLootObjects, Kind::RandomLoot,
+        rr::RandomLootObjectModel::Description, 0x24, out, out.loots);
 
     AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
         [](std::uintptr_t model, Vector3& position) {
@@ -344,30 +446,18 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 transform + rr::GrenadeTransformModel::Position, position);
         }, out, out.grenades);
 
-    // --- New dump: containers, storage and safes -----------------------
-    AddDictionary(world, rr::WorldEntitiesModel::LootNodes, Kind::LootNode,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::LootNodeModel::Description,
-                rr::LootNodeModel::DescriptionPosition, position);
-        }, out, out.containers);
+    // --- New dump: containers, storage and safes (scatter-accelerated) -
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::LootNodes, Kind::LootNode,
+        rr::LootNodeModel::Description, rr::LootNodeModel::DescriptionPosition, out, out.containers);
 
-    AddDictionary(world, rr::WorldEntitiesModel::SafeDoors, Kind::SafeDoor,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::SafeDoorModel::Description,
-                rr::SafeDoorModel::DescriptionPosition, position);
-        }, out, out.containers);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::SafeDoors, Kind::SafeDoor,
+        rr::SafeDoorModel::Description, rr::SafeDoorModel::DescriptionPosition, out, out.containers);
 
-    AddDictionary(world, rr::WorldEntitiesModel::StorageBoxes, Kind::StorageBox,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::StorageBoxModel::DescriptionModel,
-                rr::StorageBoxModel::DescriptionPosition, position);
-        }, out, out.containers);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::StorageBoxes, Kind::StorageBox,
+        rr::StorageBoxModel::DescriptionModel, rr::StorageBoxModel::DescriptionPosition, out, out.containers);
 
-    AddDictionary(world, rr::WorldEntitiesModel::Shelvings, Kind::Shelving,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::ShelvingModel::DescriptionModel,
-                rr::ShelvingModel::DescriptionPosition, position);
-        }, out, out.containers);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::Shelvings, Kind::Shelving,
+        rr::ShelvingModel::DescriptionModel, rr::ShelvingModel::DescriptionPosition, out, out.containers);
 
     // CollectionTables — inline loop to read cash reward
     {
@@ -424,11 +514,8 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    AddDictionary(world, rr::WorldEntitiesModel::PlotContainers, Kind::PlotContainer,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::PlotContainerModel::Description,
-                rr::PlotContainerModel::DescriptionPosition, position);
-        }, out, out.containers);
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::PlotContainers, Kind::PlotContainer,
+        rr::PlotContainerModel::Description, rr::PlotContainerModel::DescriptionPosition, out, out.containers);
 
     // --- New dump: dropped bags, vehicle loot, cargo and loose loot ----
     AddDictionary(world, rr::WorldEntitiesModel::DroppedLootBags, Kind::DroppedBag,
@@ -439,10 +526,8 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadInlineField(model, rr::DroppedBagModel::InteractPosition, position);
         }, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::VehicleLoots, Kind::VehicleLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, rr::VehicleLootModel::InteractPosition, position);
-        }, out, out.loots);
+    AddDictionaryInlineScatter(world, rr::WorldEntitiesModel::VehicleLoots, Kind::VehicleLoot,
+        rr::VehicleLootModel::InteractPosition, out, out.loots);
 
     AddDictionary(world, rr::WorldEntitiesModel::Cargos, Kind::Cargo,
         [](std::uintptr_t model, Vector3& position) {
@@ -452,20 +537,14 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadInlineField(model, rr::CargoModel::InteractPosition, position);
         }, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::PlotLoots, Kind::PlotLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, rr::PlotLootModel::Position, position);
-        }, out, out.loots);
+    AddDictionaryInlineScatter(world, rr::WorldEntitiesModel::PlotLoots, Kind::PlotLoot,
+        rr::PlotLootModel::Position, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::FurnitureLoots, Kind::FurnitureLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, rr::FurnitureLootModel::Position, position);
-        }, out, out.loots);
+    AddDictionaryInlineScatter(world, rr::WorldEntitiesModel::FurnitureLoots, Kind::FurnitureLoot,
+        rr::FurnitureLootModel::Position, out, out.loots);
 
-    AddDictionary(world, rr::WorldEntitiesModel::BuildingLoots, Kind::BuildingLoot,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, rr::BuildingLootModel::Position, position);
-        }, out, out.loots);
+    AddDictionaryInlineScatter(world, rr::WorldEntitiesModel::BuildingLoots, Kind::BuildingLoot,
+        rr::BuildingLootModel::Position, out, out.loots);
 
     // --- Valuables with cash amounts ------------------------------------
     // CashLootNodes
@@ -618,12 +697,9 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    // --- New dump: points of interest ----------------------------------
-    AddDictionary(world, rr::WorldEntitiesModel::PointOfInterest, Kind::PointOfInterest,
-        [](std::uintptr_t model, Vector3& position) {
-            return ReadDescriptionPosition(model, rr::PointOfInterestModel::Description,
-                rr::PointOfInterestModel::DescriptionPosition, position);
-        }, out, out.pointsOfInterest);
+    // --- New dump: points of interest (scatter-accelerated) ------------
+    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::PointOfInterest, Kind::PointOfInterest,
+        rr::PointOfInterestModel::Description, rr::PointOfInterestModel::DescriptionPosition, out, out.pointsOfInterest);
 
     // --- Security, First Aid, Crypto & Trunks -------------------------
     AddDictionary(world, rr::WorldEntitiesModel::SecurityAlarms, Kind::SecurityAlarm,
