@@ -1,18 +1,33 @@
 #pragma once
+#include <string>
+#include <vector>
 
 namespace ConfigFile {
 
-// Config lives at %APPDATA%\VeoxDMA\RobRun\config.json (Roaming AppData). The
-// directory is created on first save, so a fresh machine does not need any setup.
+// Config directory is fixed at C:\VeoxDMA\RobRun (auto-created if missing)
 const wchar_t* Directory();
 const wchar_t* Path();
 
-// Serializes ConfigInstance to disk. Returns false if the directory or file
-// could not be written.
-bool Save();
+std::string GetConfigDirectory();
+std::string GetActiveConfigName();
+void SetActiveConfigName(const std::string& name);
 
-// Reads config.json and applies it to ConfigInstance. Returns false when the
-// file does not exist or cannot be parsed; the current settings are kept.
-bool Load();
+// Lists all config file names in C:\VeoxDMA\RobRun without the .json extension
+std::vector<std::string> ListConfigs();
+
+// Serializes ConfigInstance to C:\VeoxDMA\RobRun\<name>.json
+bool Save(const std::string& name = "");
+
+// Reads C:\VeoxDMA\RobRun\<name>.json and applies to ConfigInstance
+bool Load(const std::string& name = "");
+
+// Creates a new config file initialized with current settings
+bool CreateConfig(const std::string& name);
+
+// Renames an existing config file
+bool RenameConfig(const std::string& oldName, const std::string& newName);
+
+// Deletes a config file
+bool DeleteConfig(const std::string& name);
 
 } // namespace ConfigFile

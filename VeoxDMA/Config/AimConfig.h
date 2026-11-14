@@ -75,6 +75,16 @@ public:
 	// nothing while the party data cannot be resolved.
 	bool ExpIgnoreTeammates = true;
 
+	// Hardware Device connection settings
+	int DeviceIndex = 0;
+	std::string ComPort = "";
+	std::string IpAddr = "";
+	std::string NetPort = "8899";
+	std::string MacId = "";
+	int BaudIndex = 0;
+	bool ManualPort = false;
+	bool FerrumController = false;
+
 	json ToJson()
 	{
 		json j;
@@ -102,6 +112,14 @@ public:
 		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
+		j[ConfigName][LIT("DeviceIndex")] = DeviceIndex;
+		j[ConfigName][LIT("ComPort")] = ComPort;
+		j[ConfigName][LIT("IpAddr")] = IpAddr;
+		j[ConfigName][LIT("NetPort")] = NetPort;
+		j[ConfigName][LIT("MacId")] = MacId;
+		j[ConfigName][LIT("BaudIndex")] = BaudIndex;
+		j[ConfigName][LIT("ManualPort")] = ManualPort;
+		j[ConfigName][LIT("FerrumController")] = FerrumController;
 		return j;
 	}
 
@@ -133,5 +151,13 @@ public:
 		ExpIgnoreCriminal = j[ConfigName].value(LIT("ExpIgnoreCriminal"), ExpIgnoreCriminal);
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
 		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
+		DeviceIndex = j[ConfigName].value(LIT("DeviceIndex"), DeviceIndex);
+		ComPort = j[ConfigName].value(LIT("ComPort"), ComPort);
+		IpAddr = j[ConfigName].value(LIT("IpAddr"), IpAddr);
+		NetPort = j[ConfigName].value(LIT("NetPort"), NetPort);
+		MacId = j[ConfigName].value(LIT("MacId"), MacId);
+		BaudIndex = j[ConfigName].value(LIT("BaudIndex"), BaudIndex);
+		ManualPort = j[ConfigName].value(LIT("ManualPort"), ManualPort);
+		FerrumController = j[ConfigName].value(LIT("FerrumController"), FerrumController);
 	}
 };

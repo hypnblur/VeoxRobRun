@@ -12,6 +12,7 @@
 #include "Aim/AimController.h"
 #include "Input/InputManager.h"
 #include "UI/VeoxMenu.h"
+#include "ImGUI/imgui.h"
 #include "Overlay/Overlay.h"
 #include "Overlay/Backdrop.h"
 #include <atomic>
@@ -89,6 +90,9 @@ static void StopAttachLoop()
 
 static void TickOverlay()
 {
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	Aim::SetDisplaySize(display.x, display.y);
+
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
 
@@ -140,19 +144,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		VeoxMenu::Init();
 		Radar::Init();
 		WeaponSprites::Init();
+		Aim::StartAimWorker();
 	};
 	callbacks.tick = [] {
 		TickOverlay();
 	};
 	callbacks.draw = [] {
-		Aim::Tick();
-		Aim::TickRecoilSpread();
-		// Read the camera after the aim has written its angles. The ESP must use
-		// the same camera state the game will render this frame; reading before
-		// the write projected with last frame's angle, which made skeletons drift
-		// while memory aim was active.
-		if (g_attached.load(std::memory_order_acquire))
-			RobRunReader::RefreshCamera();
 		DrawPlayers();
 		if (!ConfigInstance.Overlay.BattleMode) {
 			DrawWorldEntities();
@@ -164,6 +161,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 	};
 	callbacks.shutdown = [] {
+		Aim::StopAimWorker();
 		ConfigFile::Save();
 		WeaponSprites::Shutdown();
 		Radar::Shutdown();
@@ -179,6 +177,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	// Run only invokes the shutdown callback on its normal teardown path. Join
 	// here too so an early startup failure cannot leave a joinable thread for
 	// the static destructor to terminate on.
+	Aim::StopAimWorker();
 	StopAttachLoop();
 	RobRunReader::Shutdown();
 	return result;

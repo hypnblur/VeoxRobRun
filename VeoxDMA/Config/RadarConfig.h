@@ -16,9 +16,10 @@ public:
 	float Zoom = 1.f;
 	float Opacity = 0.85f;
 	bool ShowPlayers = true;
-	bool ShowVehicles = true;
+	bool ShowVehicles = false;
 	bool ShowLoot = false;
 	bool RotateWithCamera = true;
+	bool ShowMap = true;
 
 	float WorldMinX = -600.f;
 	float WorldMaxX = 600.f;
@@ -38,6 +39,7 @@ public:
 		j[ConfigName][LIT("ShowVehicles")] = ShowVehicles;
 		j[ConfigName][LIT("ShowLoot")] = ShowLoot;
 		j[ConfigName][LIT("RotateWithCamera")] = RotateWithCamera;
+		j[ConfigName][LIT("ShowMap")] = ShowMap;
 		j[ConfigName][LIT("WorldMinX")] = WorldMinX;
 		j[ConfigName][LIT("WorldMaxX")] = WorldMaxX;
 		j[ConfigName][LIT("WorldMinZ")] = WorldMinZ;
@@ -59,6 +61,7 @@ public:
 		ShowVehicles = s.value(LIT("ShowVehicles"), ShowVehicles);
 		ShowLoot = s.value(LIT("ShowLoot"), ShowLoot);
 		RotateWithCamera = s.value(LIT("RotateWithCamera"), RotateWithCamera);
+		ShowMap = s.value(LIT("ShowMap"), ShowMap);
 		WorldMinX = s.value(LIT("WorldMinX"), WorldMinX);
 		WorldMaxX = s.value(LIT("WorldMaxX"), WorldMaxX);
 		WorldMinZ = s.value(LIT("WorldMinZ"), WorldMinZ);

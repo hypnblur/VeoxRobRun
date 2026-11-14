@@ -32,7 +32,7 @@ bool g_menuOpen = true;
 bool g_transparent = false;
 bool g_clickThrough = true;
 bool g_alwaysOnTop = true;
-int g_frameCap = 0;
+int g_frameCap = 144;
 std::atomic<bool> g_requestExit{ false };
 
 #ifdef _DEBUG
@@ -400,7 +400,7 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	g_transparent = ConfigInstance.Overlay.Transparent;
 	g_clickThrough = ConfigInstance.Overlay.ClickThroughWhenClosed;
 	g_alwaysOnTop = ConfigInstance.Overlay.AlwaysOnTop;
-	g_frameCap = std::clamp(ConfigInstance.Overlay.FrameCap, 0, 1000);
+	g_frameCap = ConfigInstance.Overlay.FrameCap > 0 ? std::clamp(ConfigInstance.Overlay.FrameCap, 0, 1000) : 144;
 	g_appliedChrome.valid = false;
 
 	ImGui_ImplWin32_EnableDpiAwareness();

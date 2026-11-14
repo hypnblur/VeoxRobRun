@@ -337,26 +337,21 @@ VMMDLL_PROCESS_INFORMATION Memory::GetProcessInformation()
 size_t Memory::GetBaseAddress(std::string module_name)
 {
 	std::wstring str(module_name.begin(), module_name.end());
-	if (!Modules.contains(str))
+	std::lock_guard<std::mutex> lock(this->modules_mutex);
+	auto it = Modules.find(str);
+	if (it != Modules.end())
+		return it->second;
+
+	PVMMDLL_MAP_MODULEENTRY module_info = nullptr;
+	if (!VMMDLL_Map_GetModuleFromNameW(this->vHandle, this->current_process.PID, (LPWSTR)str.c_str(), &module_info, VMMDLL_MODULE_FLAG_NORMAL))
 	{
-
-
-		PVMMDLL_MAP_MODULEENTRY module_info;
-		if (!VMMDLL_Map_GetModuleFromNameW(this->vHandle, this->current_process.PID, (LPWSTR)str.c_str(), &module_info, VMMDLL_MODULE_FLAG_NORMAL))
-		{
-			LOG("[!] Couldn't find Base Address for %s\n", module_name.c_str());
-			return 0;
-		}
-
-		LOG("[+] Found Base Address for %s at 0x%p\n", module_name.c_str(), module_info->vaBase);
-		Modules[str] = module_info->vaBase;
-		return module_info->vaBase;
-	}
-	else
-	{
-		return Modules[str];
+		LOG("[!] Couldn't find Base Address for %s\n", module_name.c_str());
+		return 0;
 	}
 
+	LOG("[+] Found Base Address for %s at 0x%p\n", module_name.c_str(), module_info->vaBase);
+	Modules[str] = module_info->vaBase;
+	return module_info->vaBase;
 }
 
 size_t Memory::GetBaseSize(std::string module_name)
@@ -846,16 +841,13 @@ bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 }
 bool Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
 {
-
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
-		LOG("[-] Failed to Execute Scatter Read\n");
 		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE))
 	{
-		LOG("[-] Failed to clear Scatter\n");
 		return false;
 	}
 	return true;
@@ -867,13 +859,11 @@ bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
-		LOG("[-] Failed to Execute Scatter Read\n");
 		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
 	{
-		LOG("[-] Failed to clear Scatter\n");
 		return false;
 	}
 	return true;
@@ -886,13 +876,11 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 
 	if (!VMMDLL_Scatter_Execute(handle))
 	{
-		LOG("[-] Failed to Execute Scatter Read\n");
 		return false;
 	}
 	//Clear after using it
 	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
 	{
-		LOG("[-] Failed to clear Scatter\n");
 		return false;
 	}
 	return true;
@@ -918,12 +906,10 @@ bool Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
 {
 	if (!VMMDLL_Scatter_ExecuteRead(handle))
 	{
-		LOG("[-] Failed to Execute Cached Scatter Read\n");
 		return false;
 	}
 	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0))
 	{
-		LOG("[-] Failed to clear Cached Scatter\n");
 		return false;
 	}
 	return true;

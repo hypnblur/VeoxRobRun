@@ -218,6 +218,7 @@ struct RigCacheEntry {
     std::vector<Skeleton::BoneSegment> smoothedBones;
     Skeleton::BonePoints smoothedPoints;
     bool smoothedValid = false;
+    Vector3 lastSampledPos{};
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -235,6 +236,8 @@ static std::mutex g_snapshotMutex;
 static std::shared_ptr<const Snapshot> g_snapshot = std::make_shared<Snapshot>();
 static std::atomic<bool> g_workerStop{ false };
 static std::thread g_workerThread;
+static std::atomic<bool> g_worldWorkerStop{ false };
+static std::thread g_worldWorkerThread;
 
 // Render-thread camera refresh. The worker publishes cachedCameraModel via
 // this atomic; RefreshCamera() re-reads the camera block with uncached DMA
@@ -259,6 +262,38 @@ static float g_nativeForwardDot = -1.f;
 
 static CollisionBVH::Scene g_bvhScene;
 static std::string g_bvhLoadedPath;
+
+static void TryLoadBvh(bool force = false)
+{
+    const std::string& path = ConfigInstance.Player.BvhPath.empty()
+        ? "city_colliders.bvh"
+        : ConfigInstance.Player.BvhPath;
+
+    static std::uint64_t s_lastAttemptMs = 0;
+    static std::string s_lastAttemptPath;
+    const std::uint64_t now = GetTickCount64();
+
+    if (!force)
+    {
+        if (g_bvhScene.valid && path == s_lastAttemptPath)
+            return;
+        if (s_lastAttemptMs != 0 && (now - s_lastAttemptMs) < 3000 && path == s_lastAttemptPath)
+            return;
+    }
+
+    s_lastAttemptMs = now ? now : 1;
+    s_lastAttemptPath = path;
+
+    g_bvhScene = CollisionBVH::Scene{};
+    if (CollisionBVH::Load(path, g_bvhScene))
+    {
+        g_bvhLoadedPath = g_bvhScene.loadedPath;
+    }
+    else
+    {
+        g_bvhLoadedPath.clear();
+    }
+}
 
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
 {
@@ -335,18 +370,38 @@ static void MatchViewsToEntities()
     // A player can cover several metres between two 400 ms refreshes, so the
     // acquire radius is generous. The release radius is far larger so only a
     // genuinely different player breaks an existing pair.
-    constexpr float kMatchRadius = 3.f;
-    constexpr float kReleaseRadius = 12.f;
+    constexpr float kMatchRadius = 25.f;
+    constexpr float kReleaseRadius = 80.f;
     constexpr int kMaxMisses = 3;
 
     std::unordered_map<std::int32_t, std::uintptr_t> nextOwner;
     std::unordered_map<std::int32_t, int> nextMisses;
     std::unordered_map<std::int32_t, std::uintptr_t> claimedByEntity;
 
+    // 0. Direct dictionary key match: _characterEntityViews is keyed by entity ID.
+    for (std::size_t e = 0; e < entities.size(); ++e)
+    {
+        const auto& entity = entities[e];
+        auto it = cachedViews.find(entity.entityId);
+        if (it != cachedViews.end() && it->second > 0x10000)
+        {
+            auto vIt = viewIndex.find(it->second);
+            if (vIt != viewIndex.end() && !views[vIt->second].claimed)
+            {
+                views[vIt->second].claimed = true;
+                nextOwner.emplace(entity.entityId, it->second);
+                claimedByEntity.emplace(entity.entityId, it->second);
+            }
+        }
+    }
+
     // 1. Carry over pairs that are still plausible.
     for (const auto& owner : cachedViewOwner)
     {
         const std::int32_t entityId = owner.first;
+        if (claimedByEntity.find(entityId) != claimedByEntity.end())
+            continue;
+
         const std::uintptr_t view = owner.second;
         const auto viewIt = viewIndex.find(view);
         if (viewIt == viewIndex.end())
@@ -376,7 +431,10 @@ static void MatchViewsToEntities()
         if (candidate.hasPosition)
         {
             const auto& entity = entities[entityIt->second];
-            if (RobRunMemory::Finite(entity.position) &&
+            // Fast vehicles easily travel > 12m between 400ms scans.
+            // Never unpair an existing entity in a vehicle by distance!
+            if (!entity.inVehicle &&
+                RobRunMemory::Finite(entity.position) &&
                 !entity.position.IsZero() &&
                 Distance(entity.position, candidate.position) > kReleaseRadius)
             {
@@ -481,8 +539,11 @@ static void PublishSnapshot()
 void Shutdown()
 {
     g_workerStop.store(true, std::memory_order_relaxed);
+    g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
         g_workerThread.join();
+    if (g_worldWorkerThread.joinable())
+        g_worldWorkerThread.join();
 }
 
 void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
@@ -550,15 +611,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         g_freshCamera = RobRunCamera::CameraState{};
     }
 
-    if (!ConfigInstance.Player.BvhPath.empty() &&
-        ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
-    {
-        g_bvhScene = CollisionBVH::Scene{};
-        if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
-            g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
-        else
-            g_bvhLoadedPath.clear();
-    }
+    TryLoadBvh(true);
 
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
@@ -573,6 +626,31 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             // one simply runs slower instead of blocking the render thread.
             for (int i = 0; i < 10 && !g_workerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(1);
+        }
+    });
+
+    g_worldWorkerStop.store(false, std::memory_order_relaxed);
+    g_worldWorkerThread = std::thread([] {
+        while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
+            const std::uintptr_t bm = cachedBattleModel;
+            const std::uintptr_t be = cachedBattleEntities;
+            const std::uintptr_t lc = cachedLocalCharacter;
+            if (bm > 0x10000) {
+                auto state = std::make_shared<RobRunWorld::State>();
+                if (RobRunWorld::Read(bm, be, *state)) {
+                    std::lock_guard<std::mutex> lock(g_worldMutex);
+                    g_worldState = std::move(state);
+                }
+            }
+            if (lc > 0x10000) {
+                auto inv = std::make_shared<RobRunInventory::State>();
+                if (RobRunInventory::Read(bm, lc, *inv, readCatalog.load())) {
+                    std::lock_guard<std::mutex> lock(g_worldMutex);
+                    g_inventoryState = std::move(inv);
+                }
+            }
+            for (int i = 0; i < 25 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
+                Sleep(10);
         }
     });
 
@@ -2034,6 +2112,7 @@ static void UpdateInternal()
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
                 rig.smoothedValid = false;
+                rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
             }
@@ -2089,8 +2168,8 @@ static void UpdateInternal()
 
         if (!lateResolve.empty()) {
             poseBuf.resize(poseTotal, 0);
-            auto scatter = TargetProcess.CreateScatterHandle();
-            if (scatter) {
+            Memory::ScopedScatter scatter(TargetProcess);
+            if (scatter.handle) {
                 for (auto idx : lateResolve) {
                     auto& rig = rigCache[work[idx].entityId];
                     TargetProcess.AddScatterReadRequest(scatter,
@@ -2099,7 +2178,6 @@ static void UpdateInternal()
                         work[idx].poseSize);
                 }
                 TargetProcess.ExecuteReadScatter(scatter);
-                TargetProcess.CloseScatterHandle(scatter);
             }
         }
 
@@ -2298,10 +2376,10 @@ static void UpdateInternal()
                         }
                     }
 
-                    if (moved)
+                    if (moved || entity.inVehicle)
                         rig.lastMotionTick = now;
                     rig.animatorActive = rig.lastMotionTick == 0 ||
-                        now - rig.lastMotionTick < kFreezeMs;
+                        now - rig.lastMotionTick < kFreezeMs || entity.inVehicle;
 
                     // Default visibility is animator state. It is only a
                     // fallback: when the occluder scene is loaded the BVH pass
@@ -2312,6 +2390,12 @@ static void UpdateInternal()
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
 
+                    // Vehicles move fast: smoothing world coordinates creates a lagging trailing skeleton.
+                    // Bypass exponential smoothing when inside a vehicle or moving fast (> 0.4m / pass).
+                    const bool isFastMoving = entity.inVehicle ||
+                        (Distance(rig.lastSampledPos, entity.position) > 0.4f);
+                    rig.lastSampledPos = entity.position;
+
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
                     // the weight of the new sample: 1 publishes the raw pose,
                     // lower values damp the per-frame jitter that partial or
@@ -2319,7 +2403,7 @@ static void UpdateInternal()
                     // drawing the result directly) means the overlay never
                     // extrapolates past the newest pose, which is what made
                     // the old render-side blend shake.
-                    if (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
+                    if (!isFastMoving && ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
                         rig.smoothedBones.size() == rig.bones.size()) {
                         const float alpha = std::clamp(
                             ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
@@ -2404,14 +2488,31 @@ static void UpdateInternal()
                     visCamera.position.y,
                     visCamera.position.z };
                 bool anyVisible = false;
-                for (auto& seg : entity.bones) {
-                    const CollisionBVH::Float3 mid = {
-                        (seg.a.x + seg.b.x) * 0.5f,
-                        (seg.a.y + seg.b.y) * 0.5f,
-                        (seg.a.z + seg.b.z) * 0.5f };
-                    seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid);
-                    if (seg.visible)
-                        anyVisible = true;
+                if (!entity.bones.empty()) {
+                    for (auto& seg : entity.bones) {
+                        const CollisionBVH::Float3 mid = {
+                            (seg.a.x + seg.b.x) * 0.5f,
+                            (seg.a.y + seg.b.y) * 0.5f,
+                            (seg.a.z + seg.b.z) * 0.5f };
+                        seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid);
+                        if (seg.visible)
+                            anyVisible = true;
+                    }
+                } else {
+                    // Fallback when entity lacks skeleton segments (rig not yet built or culled at distance):
+                    // Automatically cast rays to torso (y + halfHeight) and head (y + headHeight)
+                    const CollisionBVH::Float3 torso = {
+                        entity.position.x,
+                        entity.position.y + 0.95f,
+                        entity.position.z };
+                    const CollisionBVH::Float3 head = {
+                        entity.position.x,
+                        entity.position.y + 1.65f,
+                        entity.position.z };
+
+                    bool torsoVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, torso);
+                    bool headVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, head);
+                    anyVisible = torsoVis || headVis;
                 }
                 entity.visible = anyVisible;
             }
@@ -2437,25 +2538,8 @@ static void UpdateInternal()
 
     const std::uint64_t passNow = GetTickCount64();
 
-    if (cachedBattleModel > 0x10000 &&
-        (worldRefreshStamp == 0 || passNow - worldRefreshStamp >= 250)) {
-        auto state = std::make_shared<RobRunWorld::State>();
-        if (RobRunWorld::Read(cachedBattleModel, cachedBattleEntities, *state)) {
-            std::lock_guard<std::mutex> lock(g_worldMutex);
-            g_worldState = std::move(state);
-        }
-        worldRefreshStamp = passNow;
-    }
-
-    if (cachedLocalCharacter > 0x10000 &&
-        (inventoryRefreshStamp == 0 || passNow - inventoryRefreshStamp >= 1000)) {
-        auto state = std::make_shared<RobRunInventory::State>();
-        if (RobRunInventory::Read(cachedBattleModel, cachedLocalCharacter, *state, readCatalog.load())) {
-            std::lock_guard<std::mutex> lock(g_worldMutex);
-            g_inventoryState = std::move(state);
-        }
-        inventoryRefreshStamp = passNow;
-    }
+    // World and inventory reading runs on dedicated g_worldWorkerThread
+    // so this player pose pass runs at full speed without latency spikes.
 
     // A root change here means this pass rebuilt the scene identity. Bump the
     // generation so memory aim blocks writes while the new objects settle.
@@ -2467,25 +2551,9 @@ static void UpdateInternal()
 
 void Update()
 {
-    if (!g_bvhScene.valid &&
-        !ConfigInstance.Player.BvhPath.empty() &&
-        ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
+    if (!g_bvhScene.valid || ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
     {
-        // Retry a missing occluder file at most every few seconds. Without
-        // this throttle a missing 31 MB BVH is reopened on every read pass and
-        // the reader spends its whole cycle in the filesystem.
-        static std::uint64_t bvhAttemptMs = 0;
-        const std::uint64_t bvhNow = GetTickCount64();
-        if (bvhAttemptMs != 0 && bvhNow - bvhAttemptMs < 5000) {
-            // still in the retry backoff
-        } else {
-            bvhAttemptMs = bvhNow ? bvhNow : 1;
-            g_bvhScene = CollisionBVH::Scene{};
-            if (CollisionBVH::Load(ConfigInstance.Player.BvhPath, g_bvhScene))
-                g_bvhLoadedPath = ConfigInstance.Player.BvhPath;
-            else
-                g_bvhLoadedPath.clear();
-        }
+        TryLoadBvh(false);
     }
 
     UpdateInternal();
@@ -2721,7 +2789,13 @@ BvhStatus GetBvhStatus()
     s.loaded = g_bvhScene.valid;
     s.nodeCount = (uint32_t)g_bvhScene.nodes.size();
     s.triCount = (uint32_t)g_bvhScene.tris.size();
+    s.path = g_bvhScene.loadedPath;
     return s;
+}
+
+void ReloadBvh()
+{
+    TryLoadBvh(true);
 }
 
 } // namespace RobRunReader

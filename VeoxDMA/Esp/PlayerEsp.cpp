@@ -136,8 +136,14 @@ void DrawPlayers()
 
 		if (boxValid && pcfg.BoxEsp)
 		{
+			ImU32 currentBoxCol = boxCol;
+			if (pcfg.VisCheck || pcfg.WallCheck) {
+				currentBoxCol = ent.visible
+					? Esp::D2DColorToImU32(pcfg.VisibleColour)
+					: Esp::D2DColorToImU32(pcfg.HiddenColour);
+			}
 			Esp::DrawCornerBox(dl, ImVec2(minX - 4.f, minY - 4.f),
-				ImVec2(maxX + 4.f, maxY + 4.f), boxCol, 1.5f, 25.f, true);
+				ImVec2(maxX + 4.f, maxY + 4.f), currentBoxCol, 1.5f, 25.f, true);
 
 			if (pcfg.Health && ent.healthKnown && ent.maxHealth > 0.f)
 			{
@@ -260,6 +266,13 @@ void DrawPlayers()
 
 		// State indicators line
 		std::vector<TextSeg> stateSegs;
+		if (pcfg.VisCheck || pcfg.WallCheck)
+		{
+			const ImU32 visBadgeCol = ent.visible
+				? Esp::D2DColorToImU32(pcfg.VisibleColour)
+				: Esp::D2DColorToImU32(pcfg.HiddenColour);
+			stateSegs.push_back({ ent.visible ? "[VIS]" : "[WALL]", visBadgeCol });
+		}
 		if (pcfg.Health && ent.healthKnown)
 			stateSegs.push_back({ "[" + std::to_string((int)ent.health) + "hp]", hpTxtCol });
 		if (pcfg.ShowFiring && ent.isFiring)

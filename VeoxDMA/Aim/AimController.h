@@ -40,6 +40,9 @@ void TickRecoilSpread();
 void Draw();
 void DrawDebug();
 DebugInfo GetDebug();
+void StartAimWorker();
+void StopAimWorker();
+void SetDisplaySize(float width, float height);
 
 // Activation-key labels shared with the menu so the combo and the runtime
 // lookup cannot drift apart.

@@ -1,61 +1,115 @@
 #include "pch.h"
 #include "ConfigFile.h"
 #include "ConfigInstance.h"
-#include <Shlobj.h>
-#include <wchar.h>
+#include <filesystem>
+#include <fstream>
+#include <algorithm>
 
 namespace {
 
-constexpr const wchar_t* kAppDataFolderName = L"VeoxDMA";
-constexpr const wchar_t* kRelativeDir = L"RobRun";
-constexpr size_t kMaxPath = 1024;
+const std::wstring kConfigDirW = L"C:\\VeoxDMA\\RobRun";
+const std::string kConfigDirA = "C:\\VeoxDMA\\RobRun";
 
-wchar_t g_configDir[kMaxPath] = {};
-wchar_t g_configPath[kMaxPath] = {};
-bool g_configResolved = false;
+std::string g_activeConfig = "default";
+wchar_t g_activeConfigPathW[1024] = {};
 
-bool ResolveConfigPaths()
+void EnsureDirectoryExists()
 {
-    if (g_configResolved) return true;
-    PWSTR knownPath = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &knownPath)) && knownPath)
-    {
-        const std::wstring dir = std::wstring(knownPath) + L"\\" + kAppDataFolderName + L"\\" + kRelativeDir;
-        wcscpy_s(g_configDir, kMaxPath, dir.c_str());
-        const std::wstring path = dir + L"\\config.json";
-        wcscpy_s(g_configPath, kMaxPath, path.c_str());
-        CoTaskMemFree(knownPath);
-    }
-    g_configResolved = true;
-    return true;
+    std::error_code ec;
+    std::filesystem::create_directories(kConfigDirW, ec);
+}
+
+void UpdateActivePath()
+{
+    EnsureDirectoryExists();
+    std::string safeName = g_activeConfig;
+    if (safeName.empty()) safeName = "default";
+    if (safeName.size() >= 5 && safeName.substr(safeName.size() - 5) == ".json")
+        safeName = safeName.substr(0, safeName.size() - 5);
+
+    g_activeConfig = safeName;
+    std::wstring fullPath = kConfigDirW + L"\\" + std::wstring(safeName.begin(), safeName.end()) + L".json";
+    wcscpy_s(g_activeConfigPathW, fullPath.c_str());
 }
 
 } // namespace
 
-const wchar_t* ConfigFile::Directory()
+namespace ConfigFile {
+
+const wchar_t* Directory()
 {
-    ResolveConfigPaths();
-    return g_configDir;
+    EnsureDirectoryExists();
+    return kConfigDirW.c_str();
 }
 
-const wchar_t* ConfigFile::Path()
+const wchar_t* Path()
 {
-    ResolveConfigPaths();
-    return g_configPath;
+    UpdateActivePath();
+    return g_activeConfigPathW;
 }
 
-bool ConfigFile::Save()
+std::string GetConfigDirectory()
 {
+    EnsureDirectoryExists();
+    return kConfigDirA;
+}
+
+std::string GetActiveConfigName()
+{
+    return g_activeConfig;
+}
+
+void SetActiveConfigName(const std::string& name)
+{
+    if (!name.empty()) {
+        g_activeConfig = name;
+        if (g_activeConfig.size() >= 5 && g_activeConfig.substr(g_activeConfig.size() - 5) == ".json")
+            g_activeConfig = g_activeConfig.substr(0, g_activeConfig.size() - 5);
+        UpdateActivePath();
+    }
+}
+
+std::vector<std::string> ListConfigs()
+{
+    EnsureDirectoryExists();
+    std::vector<std::string> configs;
     std::error_code ec;
-    std::filesystem::create_directories(g_configDir, ec);
-    if (ec) {
-        LOG("[Config] cannot create %ls: %s\n", g_configDir, ec.message().c_str());
-        return false;
+
+    for (const auto& entry : std::filesystem::directory_iterator(kConfigDirW, ec))
+    {
+        if (!entry.is_regular_file()) continue;
+        auto ext = entry.path().extension().string();
+        for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".json")
+        {
+            configs.push_back(entry.path().stem().string());
+        }
     }
 
-    std::ofstream out(g_configPath, std::ios::binary | std::ios::trunc);
+    if (configs.empty())
+    {
+        configs.push_back("default");
+    }
+
+    std::sort(configs.begin(), configs.end());
+    return configs;
+}
+
+bool Save(const std::string& name)
+{
+    EnsureDirectoryExists();
+    std::string target = name.empty() ? g_activeConfig : name;
+    if (target.empty()) target = "default";
+    if (target.size() >= 5 && target.substr(target.size() - 5) == ".json")
+        target = target.substr(0, target.size() - 5);
+
+    g_activeConfig = target;
+    UpdateActivePath();
+
+    std::filesystem::path fullPath = std::filesystem::path(kConfigDirW) / (target + ".json");
+    std::ofstream out(fullPath, std::ios::binary | std::ios::trunc);
     if (!out) {
-        LOG("[Config] cannot open %ls for writing\n", g_configPath);
+        LOG("[Config] cannot open %ls for writing\n", fullPath.c_str());
         return false;
     }
 
@@ -68,32 +122,121 @@ bool ConfigFile::Save()
     }
 
     if (!out.good()) {
-        LOG("[Config] write failed for %ls\n", g_configPath);
+        LOG("[Config] write failed for %ls\n", fullPath.c_str());
         return false;
     }
 
-    LOG("[Config] saved %ls\n", g_configPath);
+    LOG("[Config] saved %ls\n", fullPath.c_str());
     return true;
 }
 
-bool ConfigFile::Load()
+bool Load(const std::string& name)
 {
-    std::ifstream in(g_configPath, std::ios::binary);
+    EnsureDirectoryExists();
+    std::string target = name.empty() ? g_activeConfig : name;
+    if (target.empty()) target = "default";
+    if (target.size() >= 5 && target.substr(target.size() - 5) == ".json")
+        target = target.substr(0, target.size() - 5);
+
+    std::filesystem::path fullPath = std::filesystem::path(kConfigDirW) / (target + ".json");
+    std::ifstream in(fullPath, std::ios::binary);
     if (!in) {
-        LOG("[Config] %ls not found, using defaults\n", g_configPath);
-        return false;
+        auto list = ListConfigs();
+        if (!list.empty()) {
+            fullPath = std::filesystem::path(kConfigDirW) / (list[0] + ".json");
+            target = list[0];
+            in.open(fullPath, std::ios::binary);
+        }
+        if (!in) {
+            LOG("[Config] %ls not found, initializing default\n", fullPath.c_str());
+            Save("default");
+            return true;
+        }
     }
 
     try {
         json parsed;
         in >> parsed;
         ConfigInstance.FromJson(parsed);
+        g_activeConfig = target;
+        UpdateActivePath();
     }
     catch (const std::exception& e) {
-        LOG("[Config] parse failed for %ls: %s\n", g_configPath, e.what());
+        LOG("[Config] parse failed for %ls: %s\n", fullPath.c_str(), e.what());
         return false;
     }
 
-    LOG("[Config] loaded %ls\n", g_configPath);
+    LOG("[Config] loaded %ls\n", fullPath.c_str());
     return true;
 }
+
+bool CreateConfig(const std::string& name)
+{
+    if (name.empty()) return false;
+    std::string safe = name;
+    if (safe.size() >= 5 && safe.substr(safe.size() - 5) == ".json")
+        safe = safe.substr(0, safe.size() - 5);
+
+    return Save(safe);
+}
+
+bool RenameConfig(const std::string& oldName, const std::string& newName)
+{
+    if (oldName.empty() || newName.empty() || oldName == newName) return false;
+    EnsureDirectoryExists();
+
+    std::string safeOld = oldName;
+    if (safeOld.size() >= 5 && safeOld.substr(safeOld.size() - 5) == ".json")
+        safeOld = safeOld.substr(0, safeOld.size() - 5);
+
+    std::string safeNew = newName;
+    if (safeNew.size() >= 5 && safeNew.substr(safeNew.size() - 5) == ".json")
+        safeNew = safeNew.substr(0, safeNew.size() - 5);
+
+    std::filesystem::path oldPath = std::filesystem::path(kConfigDirW) / (safeOld + ".json");
+    std::filesystem::path newPath = std::filesystem::path(kConfigDirW) / (safeNew + ".json");
+
+    std::error_code ec;
+    if (!std::filesystem::exists(oldPath, ec)) return false;
+
+    std::filesystem::rename(oldPath, newPath, ec);
+    if (ec) {
+        LOG("[Config] rename %ls -> %ls failed: %s\n", oldPath.c_str(), newPath.c_str(), ec.message().c_str());
+        return false;
+    }
+
+    if (g_activeConfig == safeOld) {
+        g_activeConfig = safeNew;
+        UpdateActivePath();
+    }
+
+    LOG("[Config] renamed %ls -> %ls\n", oldPath.c_str(), newPath.c_str());
+    return true;
+}
+
+bool DeleteConfig(const std::string& name)
+{
+    if (name.empty()) return false;
+    EnsureDirectoryExists();
+
+    std::string safe = name;
+    if (safe.size() >= 5 && safe.substr(safe.size() - 5) == ".json")
+        safe = safe.substr(0, safe.size() - 5);
+
+    std::filesystem::path path = std::filesystem::path(kConfigDirW) / (safe + ".json");
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return false;
+
+    std::filesystem::remove(path, ec);
+    if (ec) return false;
+
+    auto list = ListConfigs();
+    if (!list.empty())
+        Load(list[0]);
+    else
+        Save("default");
+
+    return true;
+}
+
+} // namespace ConfigFile

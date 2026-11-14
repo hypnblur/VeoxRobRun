@@ -148,6 +148,40 @@ ImVec2 WorldToRadar(const Vector3& world, const Vector3& center,
 	return ImVec2(radarCenter.x + dx * scale, radarCenter.y + dz * scale);
 }
 
+struct RoleMarker {
+	const char* text;
+	ImU32 color;
+};
+
+RoleMarker GetRoleMarker(int role, const std::string& roleName)
+{
+	std::string label = RobRunReader::RoleLabel(role, roleName);
+	std::string lower;
+	lower.reserve(label.size());
+	for (char c : label) lower.push_back((char)::tolower((unsigned char)c));
+
+	if (lower.find("crim") != std::string::npos || lower.find("rob") != std::string::npos ||
+		lower.find("thief") != std::string::npos || lower.find("bandit") != std::string::npos ||
+		lower.find("gang") != std::string::npos || role == 1257638368)
+	{
+		return { "C", IM_COL32(255, 75, 75, 255) }; // Criminal - Red
+	}
+	if (lower.find("polic") != std::string::npos || lower.find("cop") != std::string::npos ||
+		lower.find("officer") != std::string::npos || lower.find("swat") != std::string::npos ||
+		lower.find("guard") != std::string::npos || lower.find("sheriff") != std::string::npos)
+	{
+		return { "P", IM_COL32(75, 160, 255, 255) }; // Police - Blue
+	}
+	if (lower.find("civil") != std::string::npos || lower.find("citizen") != std::string::npos ||
+		lower.find("bystander") != std::string::npos || lower.find("hub") != std::string::npos ||
+		lower.find("npc") != std::string::npos || role == 6)
+	{
+		return { "CI", IM_COL32(90, 235, 120, 255) }; // Civilian - Green
+	}
+
+	return { "CI", IM_COL32(220, 220, 100, 255) };
+}
+
 } // namespace
 
 namespace Radar {
@@ -190,7 +224,6 @@ void Init()
 void Draw()
 {
 	if (!ConfigInstance.Radar.Enabled) return;
-	if (!g_mapSRV) return;
 
 	const auto snapshot = RobRunReader::GetSnapshot();
 	const Vector3 localPos = snapshot ? snapshot->localPosition : Vector3{};
@@ -209,8 +242,8 @@ void Draw()
 	const auto& cfg = ConfigInstance.Radar;
 	const float radarSize = cfg.Size;
 
-	// Restore the last on-screen placement, and follow the Size setting when
-	// the user changes it (the window itself is still freely resizable).
+	// Restore the last on-screen placement, defaulting to the top-left corner
+	// where the in-game map is situated.
 	const WindowPlacement& savedPlace = ConfigInstance.Overlay.RadarWindow;
 	static float s_lastSizeSetting = -1.f;
 	if (savedPlace.Saved)
@@ -225,6 +258,7 @@ void Draw()
 	}
 	else
 	{
+		ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(radarSize + 16.f, radarSize + 36.f),
 			ImGuiCond_FirstUseEver);
 	}
@@ -275,41 +309,9 @@ void Draw()
 	ImDrawList* dl = ImGui::GetWindowDrawList();
 	dl->PushClipRect(radarMin, radarMax, true);
 
-	if (cfg.RotateWithCamera && haveLocal) {
-		float worldW = cfg.WorldMaxX - cfg.WorldMinX;
-		float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
-		float scale = side / std::max(worldW, worldH) * cfg.Zoom;
-
-		float normX = (localPos.x - cfg.WorldMinX) / worldW;
-		float normZ = (localPos.z - cfg.WorldMinZ) / worldH;
-
-		float halfViewU = (side / (2.f * scale)) / worldW;
-		float halfViewV = (side / (2.f * scale)) / worldH;
-
-		ImVec2 uvA(normX - halfViewU, normZ - halfViewV);
-		ImVec2 uvB(normX + halfViewU, normZ + halfViewV);
-
-		float s = std::sin(-localYaw);
-		float c = std::cos(-localYaw);
-
-		auto rotatePoint = [&](float ox, float oy) -> ImVec2 {
-			float rx = ox * c - oy * s;
-			float ry = ox * s + oy * c;
-			return ImVec2(radarCenter.x + rx, radarCenter.y + ry);
-		};
-
-		float hs = side * 0.5f * 1.42f;
-		ImVec2 p1 = rotatePoint(-hs, -hs);
-		ImVec2 p2 = rotatePoint(hs, -hs);
-		ImVec2 p3 = rotatePoint(hs, hs);
-		ImVec2 p4 = rotatePoint(-hs, hs);
-
-		dl->AddImageQuad((ImTextureID)g_mapSRV,
-			p1, p2, p3, p4,
-			uvA, ImVec2(uvB.x, uvA.y), uvB, ImVec2(uvA.x, uvB.y));
-	}
-	else {
-		if (haveLocal) {
+	const bool drawMapTexture = (g_mapSRV != nullptr) && cfg.ShowMap;
+	if (drawMapTexture) {
+		if (cfg.RotateWithCamera && haveLocal) {
 			float worldW = cfg.WorldMaxX - cfg.WorldMinX;
 			float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
 			float scale = side / std::max(worldW, worldH) * cfg.Zoom;
@@ -323,12 +325,58 @@ void Draw()
 			ImVec2 uvA(normX - halfViewU, normZ - halfViewV);
 			ImVec2 uvB(normX + halfViewU, normZ + halfViewV);
 
-			dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax, uvA, uvB);
+			float s = std::sin(-localYaw);
+			float c = std::cos(-localYaw);
+
+			auto rotatePoint = [&](float ox, float oy) -> ImVec2 {
+				float rx = ox * c - oy * s;
+				float ry = ox * s + oy * c;
+				return ImVec2(radarCenter.x + rx, radarCenter.y + ry);
+			};
+
+			float hs = side * 0.5f * 1.42f;
+			ImVec2 p1 = rotatePoint(-hs, -hs);
+			ImVec2 p2 = rotatePoint(hs, -hs);
+			ImVec2 p3 = rotatePoint(hs, hs);
+			ImVec2 p4 = rotatePoint(-hs, hs);
+
+			dl->AddImageQuad((ImTextureID)g_mapSRV,
+				p1, p2, p3, p4,
+				uvA, ImVec2(uvB.x, uvA.y), uvB, ImVec2(uvA.x, uvB.y));
 		}
 		else {
-			dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax,
-				ImVec2(0.f, 0.f), ImVec2(1.f, 1.f));
+			if (haveLocal) {
+				float worldW = cfg.WorldMaxX - cfg.WorldMinX;
+				float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
+				float scale = side / std::max(worldW, worldH) * cfg.Zoom;
+
+				float normX = (localPos.x - cfg.WorldMinX) / worldW;
+				float normZ = (localPos.z - cfg.WorldMinZ) / worldH;
+
+				float halfViewU = (side / (2.f * scale)) / worldW;
+				float halfViewV = (side / (2.f * scale)) / worldH;
+
+				ImVec2 uvA(normX - halfViewU, normZ - halfViewV);
+				ImVec2 uvB(normX + halfViewU, normZ + halfViewV);
+
+				dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax, uvA, uvB);
+			}
+			else {
+				dl->AddImage((ImTextureID)g_mapSRV, radarMin, radarMax,
+					ImVec2(0.f, 0.f), ImVec2(1.f, 1.f));
+			}
 		}
+	}
+	else {
+		// Clean transparent/dark backing with range rings so the radar functions
+		// seamlessly whether overlaid on the in-game minimap or running standalone.
+		dl->AddCircleFilled(radarCenter, side * 0.5f, IM_COL32(14, 16, 24, 180));
+		dl->AddCircle(radarCenter, side * 0.5f * 0.66f, IM_COL32(50, 90, 160, 70), 64, 1.f);
+		dl->AddCircle(radarCenter, side * 0.5f * 0.33f, IM_COL32(50, 90, 160, 70), 64, 1.f);
+		dl->AddLine(ImVec2(radarCenter.x, radarCenter.y - side * 0.5f),
+			ImVec2(radarCenter.x, radarCenter.y + side * 0.5f), IM_COL32(50, 90, 160, 70), 1.f);
+		dl->AddLine(ImVec2(radarCenter.x - side * 0.5f, radarCenter.y),
+			ImVec2(radarCenter.x + side * 0.5f, radarCenter.y), IM_COL32(50, 90, 160, 70), 1.f);
 	}
 
 	dl->AddCircle(radarCenter, side * 0.5f, IM_COL32(40, 80, 160, 180), 64, 2.f);
@@ -376,6 +424,8 @@ void Draw()
 			for (const auto& ent : snapshot->entities) {
 				if (ent.entityId == snapshot->localEntityId) continue;
 				if (ent.isDead) continue;
+				// Filter friendly party members so only enemy players appear on radar
+				if (ent.isPartyMember) continue;
 
 				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw,
 					cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
@@ -384,8 +434,18 @@ void Draw()
 				float ddy = pos.y - radarCenter.y;
 				if (ddx * ddx + ddy * ddy > (side * 0.5f) * (side * 0.5f)) continue;
 
-				dl->AddCircleFilled(pos, 4.f, IM_COL32(255, 50, 50, 255));
-				dl->AddCircle(pos, 4.f, IM_COL32(0, 0, 0, 200), 0, 1.f);
+				const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
+				const float badgeRadius = (marker.text[1] != '\0') ? 8.5f : 7.0f;
+
+				// Dark badge circle with colored perimeter
+				dl->AddCircleFilled(pos, badgeRadius, IM_COL32(10, 12, 16, 220));
+				dl->AddCircle(pos, badgeRadius, marker.color, 0, 1.5f);
+
+				// Centered letter label (C for Criminals, CI for Civilians, P for Police)
+				ImVec2 ts = ImGui::CalcTextSize(marker.text);
+				ImVec2 tp(pos.x - ts.x * 0.5f, pos.y - ts.y * 0.5f);
+				dl->AddText(ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, 255), marker.text);
+				dl->AddText(tp, marker.color, marker.text);
 			}
 		}
 

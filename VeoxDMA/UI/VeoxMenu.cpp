@@ -361,13 +361,14 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false)
 	ImGui::ItemSize(bb);
 	if (!ImGui::ItemAdd(bb, id)) return false;
 
-	bool hov, held, pressed = ImGui::ButtonBehavior(bb, id, &hov, &held);
+	bool hov = false, held = false;
+	bool pressed = ImGui::ButtonBehavior(bb, id, &hov, &held);
+
+	if (pressed) *v = !*v;
 
 	static std::map<ImGuiID, float> anim;
 	float& t = anim[id];
 	t = ImLerp(t, *v ? 1.f : 0.f, ImGui::GetIO().DeltaTime * 14.f);
-
-	if (pressed) *v = !*v;
 
 	ImDrawList* dl = window->DrawList;
 	dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
@@ -501,25 +502,38 @@ bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
 	const float tw = 38.f, th = 20.f, sw = 28.f;
 	const ImVec2 tmin(p.x + w - tw, p.y + (kRow - th) * 0.5f);
 	const ImRect track(tmin, ImVec2(tmin.x + tw, tmin.y + th));
-	const ImRect swatch(ImVec2(track.Min.x - 10.f - sw, p.y + 3.f), ImVec2(track.Min.x - 10.f, p.y + 19.f));
+	const ImRect swatch(ImVec2(track.Min.x - 10.f - sw, p.y + (kRow - 16.f) * 0.5f),
+		ImVec2(track.Min.x - 10.f, p.y + (kRow + 16.f) * 0.5f));
 
-	bool thov, theld, tpressed = ImGui::ButtonBehavior(track, ImHashStr("tgl", 0, id), &thov, &theld);
-	bool shov, sheld, spressed = ImGui::ButtonBehavior(swatch, ImHashStr("sw", 0, id), &shov, &sheld);
+	bool hov = false, held = false;
+	bool pressed = ImGui::ButtonBehavior(bb, id, &hov, &held);
+
+	char popup[96];
+	std::snprintf(popup, sizeof(popup), "##colour_%s", label);
+
+	const ImVec2 mouse = ImGui::GetIO().MousePos;
+	const bool mouseInSwatch = swatch.Contains(mouse);
+
+	if (pressed)
+	{
+		if (mouseInSwatch)
+		{
+			ImGui::OpenPopup(popup);
+		}
+		else
+		{
+			*v = !*v;
+		}
+	}
 
 	static std::map<ImGuiID, float> anim;
 	float& t = anim[id];
 	t = ImLerp(t, *v ? 1.f : 0.f, ImGui::GetIO().DeltaTime * 14.f);
 
-	char popup[96];
-	std::snprintf(popup, sizeof(popup), "##colour_%s", label);
-
-	if (tpressed) *v = !*v;
-	if (spressed) ImGui::OpenPopup(popup);
-
 	ImDrawList* dl = window->DrawList;
 	dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
 		ImVec2(p.x, RowTextY(p.y, kRow, font::inter_medium_widget)),
-		C(Mix(kTextDim, kText, ImMax(t, (thov || shov) ? 0.55f : 0.f))), label);
+		C(Mix(kTextDim, kText, ImMax(t, hov ? 0.55f : 0.f))), label);
 
 	dl->AddRectFilled(track.Min, track.Max, C(Mix(kTrack, kAccent, t), 0.35f + 0.65f * t), th * 0.5f);
 	if (t > 0.01f)
@@ -534,13 +548,14 @@ bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
 	dl->AddCircleFilled(ImVec2(kx, (track.Min.y + track.Max.y) * 0.5f), 7.f,
 		C(Mix(kTextDim, ImVec4(1, 1, 1, 1), t)));
 
+	const bool shov = hov && mouseInSwatch;
 	dl->AddRectFilled(swatch.Min, swatch.Max,
 		C(ImVec4(colour.r, colour.g, colour.b, 1.f)), 4.f);
 	dl->AddRect(swatch.Min, swatch.Max, C(kStroke, shov ? 2.2f : 1.f), 4.f);
 
 	DrawColourPopup(popup, label, colour, swatch);
 
-	return tpressed;
+	return pressed && !mouseInSwatch;
 }
 
 bool ColorRow(const char* label, D2D1::ColorF& colour)
@@ -1003,10 +1018,20 @@ void DrawVisuals()
 			{
 				auto status = RobRunReader::GetBvhStatus();
 				if (status.loaded)
+				{
 					Note("BVH: %u nodes, %u triangles", status.nodeCount, status.triCount);
+					if (!status.path.empty())
+						Note("Path: %s", status.path.c_str());
+				}
 				else
+				{
 					Note("BVH: city_colliders.bvh not loaded - VisCheck falls back "
 						"to animator state");
+				}
+				if (ButtonRow("", "Reload BVH", 110.f))
+				{
+					RobRunReader::ReloadBvh();
+				}
 			}
 
 			ToggleRow("Pose Smoothing", &ConfigInstance.Player.PoseSmoothing);
@@ -1123,6 +1148,7 @@ void DrawRadar()
 		}
 
 		ToggleRow("Show Players", &ConfigInstance.Radar.ShowPlayers);
+		ToggleRow("Show Map Image", &ConfigInstance.Radar.ShowMap);
 		ToggleRow("Show Vehicles", &ConfigInstance.Radar.ShowVehicles);
 		ToggleRow("Show Loot", &ConfigInstance.Radar.ShowLoot);
 		ToggleRow("Rotate With Camera", &ConfigInstance.Radar.RotateWithCamera);
@@ -1166,6 +1192,7 @@ void DrawAim()
 {
 	using namespace Base::Hardware;
 
+	static bool aimVarsInit = false;
 	static int deviceIndex = 0;
 	static char comPort[16] = "";
 	static char ipAddr[64] = "";
@@ -1175,6 +1202,18 @@ void DrawAim()
 	static bool manualPort = false;
 	static bool ferrumController = false;
 	static bool needsRefresh = true;
+
+	if (!aimVarsInit) {
+		deviceIndex = ConfigInstance.Aim.DeviceIndex;
+		std::strncpy(comPort, ConfigInstance.Aim.ComPort.c_str(), sizeof(comPort) - 1);
+		std::strncpy(ipAddr, ConfigInstance.Aim.IpAddr.c_str(), sizeof(ipAddr) - 1);
+		std::strncpy(netPort, ConfigInstance.Aim.NetPort.c_str(), sizeof(netPort) - 1);
+		std::strncpy(macId, ConfigInstance.Aim.MacId.c_str(), sizeof(macId) - 1);
+		baudIndex = ConfigInstance.Aim.BaudIndex;
+		manualPort = ConfigInstance.Aim.ManualPort;
+		ferrumController = ConfigInstance.Aim.FerrumController;
+		aimVarsInit = true;
+	}
 
 	static const char* deviceNames[] = { "Off", "Kmbox USB", "Kmbox Net", "Makcu", "Makcu Controller",
 		"Ferrum", "Makcu Medius", "Kmbox NB Pro" };
@@ -1382,6 +1421,15 @@ void DrawAim()
 		EndCard();
 	}
 	ImGui::EndGroup();
+
+	ConfigInstance.Aim.DeviceIndex = deviceIndex;
+	ConfigInstance.Aim.ComPort = comPort;
+	ConfigInstance.Aim.IpAddr = ipAddr;
+	ConfigInstance.Aim.NetPort = netPort;
+	ConfigInstance.Aim.MacId = macId;
+	ConfigInstance.Aim.BaudIndex = baudIndex;
+	ConfigInstance.Aim.ManualPort = manualPort;
+	ConfigInstance.Aim.FerrumController = ferrumController;
 }
 
 void DrawMisc()
@@ -1640,23 +1688,120 @@ void DrawSettings(bool attached, const std::string& statusText)
 		EndCard();
 
 		BeginCard("CONFIG", kCardW);
-		if (ButtonRow("", "Save Config", 130.f, true))
+		static std::vector<std::string> configs = ConfigFile::ListConfigs();
+		static int selectedConfigIdx = 0;
+		static char newConfigName[64] = "";
+		static char renameConfigName[64] = "";
+		static bool configListInitialized = false;
+
+		if (!configListInitialized) {
+			configs = ConfigFile::ListConfigs();
+			std::string active = ConfigFile::GetActiveConfigName();
+			selectedConfigIdx = 0;
+			for (size_t i = 0; i < configs.size(); ++i) {
+				if (configs[i] == active) {
+					selectedConfigIdx = (int)i;
+					break;
+				}
+			}
+			if (selectedConfigIdx < (int)configs.size()) {
+				std::strncpy(renameConfigName, configs[selectedConfigIdx].c_str(), sizeof(renameConfigName) - 1);
+			}
+			configListInitialized = true;
+		}
+
+		if (!configs.empty())
 		{
-			const bool ok = ConfigFile::Save();
+			std::vector<const char*> configItems;
+			configItems.reserve(configs.size());
+			for (const auto& c : configs) configItems.push_back(c.c_str());
+
+			int sel = ImClamp(selectedConfigIdx, 0, (int)configs.size() - 1);
+			if (ComboRow("Select Config", &sel, configItems.data(), (int)configItems.size()))
+			{
+				selectedConfigIdx = sel;
+				std::strncpy(renameConfigName, configs[sel].c_str(), sizeof(renameConfigName) - 1);
+				renameConfigName[sizeof(renameConfigName) - 1] = 0;
+			}
+		}
+
+		if (ButtonRow("", "Save Active Config", 140.f, true))
+		{
+			const std::string name = (selectedConfigIdx >= 0 && selectedConfigIdx < (int)configs.size())
+				? configs[selectedConfigIdx] : ConfigFile::GetActiveConfigName();
+			const bool ok = ConfigFile::Save(name);
+			configs = ConfigFile::ListConfigs();
 			Overlay::Notify(ok ? "Config saved" : "Config save failed",
 				ok ? IM_COL32(74, 201, 126, 255) : IM_COL32(255, 75, 75, 255), 2.f);
 		}
-		if (ButtonRow("", "Load Config", 130.f))
+
+		if (ButtonRow("", "Load Active Config", 140.f))
 		{
-			const bool ok = ConfigFile::Load();
+			const std::string name = (selectedConfigIdx >= 0 && selectedConfigIdx < (int)configs.size())
+				? configs[selectedConfigIdx] : ConfigFile::GetActiveConfigName();
+			const bool ok = ConfigFile::Load(name);
+			configs = ConfigFile::ListConfigs();
 			Overlay::Notify(ok ? "Config loaded" : "Config load failed",
 				ok ? IM_COL32(74, 201, 126, 255) : IM_COL32(255, 75, 75, 255), 2.f);
 		}
-		const wchar_t* configPath = ConfigFile::Path();
-		char configPathUtf8[1024];
-		WideCharToMultiByte(CP_UTF8, 0, configPath, -1, configPathUtf8, _countof(configPathUtf8), nullptr, nullptr);
-		Note("%s", configPathUtf8);
-		Note("Saved automatically when the overlay closes.");
+
+		SectionLabel("RENAME CONFIG");
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+		ImGui::InputTextWithHint("##rename_cfg", "New name...", renameConfigName, sizeof(renameConfigName));
+		if (ButtonRow("", "Rename Config", 110.f))
+		{
+			if (renameConfigName[0] && selectedConfigIdx >= 0 && selectedConfigIdx < (int)configs.size())
+			{
+				const std::string oldName = configs[selectedConfigIdx];
+				const std::string newName = renameConfigName;
+				if (ConfigFile::RenameConfig(oldName, newName))
+				{
+					configs = ConfigFile::ListConfigs();
+					for (size_t i = 0; i < configs.size(); ++i) {
+						if (configs[i] == newName) {
+							selectedConfigIdx = (int)i;
+							break;
+						}
+					}
+					Overlay::Notify("Config renamed", IM_COL32(74, 201, 126, 255), 2.f);
+				}
+				else
+				{
+					Overlay::Notify("Rename failed", IM_COL32(255, 75, 75, 255), 2.f);
+				}
+			}
+		}
+
+		SectionLabel("NEW CONFIG");
+		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+		ImGui::InputTextWithHint("##new_cfg", "Config name...", newConfigName, sizeof(newConfigName));
+		if (ButtonRow("", "Create Config", 110.f))
+		{
+			if (newConfigName[0])
+			{
+				if (ConfigFile::CreateConfig(newConfigName))
+				{
+					configs = ConfigFile::ListConfigs();
+					for (size_t i = 0; i < configs.size(); ++i) {
+						if (configs[i] == newConfigName) {
+							selectedConfigIdx = (int)i;
+							break;
+						}
+					}
+					std::strncpy(renameConfigName, newConfigName, sizeof(renameConfigName) - 1);
+					newConfigName[0] = 0;
+					Overlay::Notify("Config created", IM_COL32(74, 201, 126, 255), 2.f);
+				}
+				else
+				{
+					Overlay::Notify("Create failed", IM_COL32(255, 75, 75, 255), 2.f);
+				}
+			}
+		}
+
+		Note("Directory: %s", ConfigFile::GetConfigDirectory().c_str());
+		Note("Active: %s.json", ConfigFile::GetActiveConfigName().c_str());
+		Note("Saved automatically on menu close.");
 		EndCard();
 
 		BeginCard("ABOUT", kCardW);

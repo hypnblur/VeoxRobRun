@@ -50,12 +50,17 @@ public:
 
 	int MonitorIndex = 0;            // display the overlay is pinned to
 	bool FPSEnabled = false;         // small FPS readout in the top-left
-	int FrameCap = 0;                // 0 = uncapped, otherwise 1..1000
+	int FrameCap = 144;              // default 144 fps, 0 = uncapped
 	std::string FontName = "Maven Pro";
 	bool Transparent = true;         // per-pixel alpha over the game
 	bool HighContrastMenu = false;   // solid menu fills for bright scenes
 	bool ClickThroughWhenClosed = true;
 	bool AlwaysOnTop = true;
+	bool BackdropVisible = false;
+	bool BackdropFullscreen = true;
+	bool BackdropCustomRes = false;
+	int BackdropWidth = 1920;
+	int BackdropHeight = 1080;
 	// When enabled, only player ESP is drawn (world ESP, radar and the money
 	// HUD are suppressed). Toggled by BattleModeKey.
 	bool BattleMode = false;
@@ -96,6 +101,11 @@ public:
 		j[ConfigName][LIT("HighContrastMenu")] = HighContrastMenu;
 		j[ConfigName][LIT("ClickThroughWhenClosed")] = ClickThroughWhenClosed;
 		j[ConfigName][LIT("AlwaysOnTop")] = AlwaysOnTop;
+		j[ConfigName][LIT("BackdropVisible")] = BackdropVisible;
+		j[ConfigName][LIT("BackdropFullscreen")] = BackdropFullscreen;
+		j[ConfigName][LIT("BackdropCustomRes")] = BackdropCustomRes;
+		j[ConfigName][LIT("BackdropWidth")] = BackdropWidth;
+		j[ConfigName][LIT("BackdropHeight")] = BackdropHeight;
 		j[ConfigName][LIT("BattleMode")] = BattleMode;
 		j[ConfigName][LIT("BattleModeKey")] = BattleModeKey;
 		j[ConfigName][LIT("FontName")] = FontName;
@@ -117,6 +127,11 @@ public:
 		HighContrastMenu = s.value(LIT("HighContrastMenu"), HighContrastMenu);
 		ClickThroughWhenClosed = s.value(LIT("ClickThroughWhenClosed"), ClickThroughWhenClosed);
 		AlwaysOnTop = s.value(LIT("AlwaysOnTop"), AlwaysOnTop);
+		BackdropVisible = s.value(LIT("BackdropVisible"), BackdropVisible);
+		BackdropFullscreen = s.value(LIT("BackdropFullscreen"), BackdropFullscreen);
+		BackdropCustomRes = s.value(LIT("BackdropCustomRes"), BackdropCustomRes);
+		BackdropWidth = s.value(LIT("BackdropWidth"), BackdropWidth);
+		BackdropHeight = s.value(LIT("BackdropHeight"), BackdropHeight);
 		BattleMode = s.value(LIT("BattleMode"), BattleMode);
 		BattleModeKey = s.value(LIT("BattleModeKey"), BattleModeKey);
 		FontName = s.value(LIT("FontName"), FontName);

@@ -195,7 +195,9 @@ struct BvhStatus {
     bool loaded = false;
     uint32_t nodeCount = 0;
     uint32_t triCount = 0;
+    std::string path;
 };
 BvhStatus GetBvhStatus();
+void ReloadBvh();
 
 } // namespace RobRunReader

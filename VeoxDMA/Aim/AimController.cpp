@@ -504,7 +504,46 @@ bool IsKeyHeld(int keyIndex)
     const char* source = nullptr;
     return Held(keyIndex, &source);
 }
-DebugInfo GetDebug() { return g_debug; }
+static std::atomic<float> g_displayWidth{ 1920.f };
+static std::atomic<float> g_displayHeight{ 1080.f };
+static std::mutex g_debugMutex;
+static std::atomic<bool> g_aimWorkerStop{ false };
+static std::thread g_aimWorkerThread;
+
+void SetDisplaySize(float width, float height)
+{
+    if (width > 0.f && height > 0.f) {
+        g_displayWidth.store(width, std::memory_order_relaxed);
+        g_displayHeight.store(height, std::memory_order_relaxed);
+    }
+}
+
+DebugInfo GetDebug()
+{
+    std::lock_guard<std::mutex> lock(g_debugMutex);
+    return g_debug;
+}
+
+void StartAimWorker()
+{
+    StopAimWorker();
+    g_aimWorkerStop.store(false, std::memory_order_relaxed);
+    g_aimWorkerThread = std::thread([] {
+        while (!g_aimWorkerStop.load(std::memory_order_relaxed)) {
+            RobRunReader::RefreshCamera();
+            Tick();
+            TickRecoilSpread();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+}
+
+void StopAimWorker()
+{
+    g_aimWorkerStop.store(true, std::memory_order_relaxed);
+    if (g_aimWorkerThread.joinable())
+        g_aimWorkerThread.join();
+}
 
 // The reference memory aim also writes the local input model, the player
 // rotation-input model and the local look-direction model. Those offsets are
@@ -703,9 +742,10 @@ void Tick()
     // input/rotation offsets can be taken from real metadata.
     DumpAimFieldsOnce();
 
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const int width = static_cast<int>(display.x);
-    const int height = static_cast<int>(display.y);
+    const float dispX = g_displayWidth.load(std::memory_order_relaxed);
+    const float dispY = g_displayHeight.load(std::memory_order_relaxed);
+    const int width = static_cast<int>(dispX);
+    const int height = static_cast<int>(dispY);
     if (width <= 0 || height <= 0) {
         g_debug.reason = "no display size";
         return;
@@ -718,8 +758,8 @@ void Tick()
         return;
     }
 
-    const float centerX = display.x * 0.5f;
-    const float centerY = display.y * 0.5f;
+    const float centerX = dispX * 0.5f;
+    const float centerY = dispY * 0.5f;
     const float fovDeg = std::clamp(static_cast<float>(cfg.Fov), 5.f, 180.f);
     // Screen-space cone, exactly like the FOV circle and the ESP projection.
     // The previous angular dot-product gate used the worker's camera sample
@@ -727,7 +767,7 @@ void Tick()
     // reject every target while the ESP drew them on screen.
     const float verticalFov = snapshot->camera.valid
         ? snapshot->camera.verticalFov : 60.f;
-    const float radiusPixels = ConeRadiusPixels(viewProjection, fovDeg, verticalFov, display.y);
+    const float radiusPixels = ConeRadiusPixels(viewProjection, fovDeg, verticalFov, dispY);
 
     bool found = false;
     int bestId = -1;
@@ -954,7 +994,10 @@ void Tick()
         return;
     }
 
-    const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.001f, 0.05f);
+    static auto s_lastTickTime = std::chrono::steady_clock::now();
+    const auto nowTime = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(nowTime - s_lastTickTime).count(), 0.001f, 0.05f);
+    s_lastTickTime = nowTime;
 
     Base::AimMotion::Settings settings;
     settings.smoothX = settings.smoothY = std::clamp(cfg.Smoothness, 1, 100);

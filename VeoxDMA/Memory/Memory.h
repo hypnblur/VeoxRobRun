@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include <mutex>
 
 class Memory
 {
@@ -20,6 +21,7 @@ private:
 		size_t base_size = 0;
 		std::string process_name = "";
 	};
+	mutable std::mutex modules_mutex;
 	std::unordered_map<std::wstring, ULONG64> Modules;
 	static inline CurrentProcessInformation current_process{ };
 

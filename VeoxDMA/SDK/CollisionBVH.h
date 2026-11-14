@@ -5,6 +5,8 @@
 #include <string>
 #include <fstream>
 #include <algorithm>
+#include <filesystem>
+#include <windows.h>
 
 namespace CollisionBVH {
 
@@ -45,11 +47,61 @@ struct BVHNode {
 struct Scene {
     std::vector<BVHNode> nodes;
     std::vector<Triangle> tris;
+    std::string loadedPath;
     bool valid = false;
 };
 
+inline std::string ResolvePath(const std::string& requestedPath)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    // 1. Explicit path check
+    if (!requestedPath.empty() && fs::exists(requestedPath, ec))
+        return fs::absolute(requestedPath, ec).string();
+
+    std::string filename = fs::path(requestedPath).filename().string();
+    if (filename.empty()) filename = "city_colliders.bvh";
+
+    // 2. Relative working directory probes
+    const std::vector<std::string> relativeProbes = {
+        requestedPath,
+        filename,
+        "tools/" + filename,
+        "../tools/" + filename,
+        "../../tools/" + filename,
+        "../../../tools/" + filename
+    };
+
+    for (const auto& probe : relativeProbes) {
+        if (!probe.empty() && fs::exists(probe, ec))
+            return fs::absolute(probe, ec).string();
+    }
+
+    // 3. Executable-relative directory probes via GetModuleFileNameA
+    char exeBuf[MAX_PATH] = { 0 };
+    if (GetModuleFileNameA(nullptr, exeBuf, MAX_PATH) > 0) {
+        fs::path exeDir = fs::path(exeBuf).parent_path();
+        const std::vector<fs::path> exeProbes = {
+            exeDir / filename,
+            exeDir / "tools" / filename,
+            exeDir.parent_path() / "tools" / filename,
+            exeDir.parent_path().parent_path() / "tools" / filename,
+            exeDir.parent_path().parent_path().parent_path() / "tools" / filename
+        };
+
+        for (const auto& probe : exeProbes) {
+            if (fs::exists(probe, ec))
+                return fs::absolute(probe, ec).string();
+        }
+    }
+
+    return requestedPath;
+}
+
 inline bool Load(const std::string& path, Scene& scene) {
-    std::ifstream f(path, std::ios::binary);
+    const std::string resolved = ResolvePath(path);
+    std::ifstream f(resolved, std::ios::binary);
     if (!f) return false;
 
     char magic[4];
@@ -70,6 +122,8 @@ inline bool Load(const std::string& path, Scene& scene) {
            numTris * sizeof(Triangle));
 
     scene.valid = f.good() && numNodes > 0;
+    if (scene.valid)
+        scene.loadedPath = resolved;
     return scene.valid;
 }
 
@@ -133,9 +187,9 @@ inline bool IsOccluded(const Scene& scene,
     const float invLen = 1.0f / len;
     const Float3 d = dir * invLen;
     const Float3 invDir = {
-        std::abs(d.x) > 1e-8f ? 1.0f / d.x : 1e8f,
-        std::abs(d.y) > 1e-8f ? 1.0f / d.y : 1e8f,
-        std::abs(d.z) > 1e-8f ? 1.0f / d.z : 1e8f,
+        std::abs(d.x) > 1e-8f ? 1.0f / d.x : std::copysign(1e8f, d.x),
+        std::abs(d.y) > 1e-8f ? 1.0f / d.y : std::copysign(1e8f, d.y),
+        std::abs(d.z) > 1e-8f ? 1.0f / d.z : std::copysign(1e8f, d.z),
     };
 
     const float tMax = len - 0.05f;
