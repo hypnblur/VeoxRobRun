@@ -38,10 +38,15 @@ const char* KindName(Kind kind)
     case Kind::PlotLoot:        return "Plot Loot";
     case Kind::FurnitureLoot:   return "Furniture Loot";
     case Kind::BuildingLoot:    return "Building Loot";
-    case Kind::CashLootNode:    return "Cash Node";
-    case Kind::SettlementCash:  return "Settlement Cash";
-    case Kind::MoneyWorkbench:  return "Money Workbench";
-    case Kind::PointOfInterest: return "Point of Interest";
+    case Kind::CashLootNode:           return "Cash Node";
+    case Kind::SettlementCash:         return "Settlement Cash";
+    case Kind::MoneyWorkbench:         return "Money Workbench";
+    case Kind::SecurityAlarm:          return "Security Alarm";
+    case Kind::LocationSecurityAlarm:  return "Security Alarm";
+    case Kind::FirstAidCabinet:        return "First Aid";
+    case Kind::CryptoWorkbench:        return "Crypto Bench";
+    case Kind::VehicleTrunk:           return "Vehicle Trunk";
+    case Kind::PointOfInterest:        return "Point of Interest";
     }
     return "World";
 }
@@ -619,6 +624,37 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadDescriptionPosition(model, rr::PointOfInterestModel::Description,
                 rr::PointOfInterestModel::DescriptionPosition, position);
         }, out, out.pointsOfInterest);
+
+    // --- Security, First Aid, Crypto & Trunks -------------------------
+    AddDictionary(world, rr::WorldEntitiesModel::SecurityAlarms, Kind::SecurityAlarm,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.alarms);
+
+    AddDictionary(world, rr::WorldEntitiesModel::LocationSecurityAlarms, Kind::LocationSecurityAlarm,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.alarms);
+
+    AddDictionary(world, rr::WorldEntitiesModel::FirstAidCabinetModels, Kind::FirstAidCabinet,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.firstAid);
+
+    AddDictionary(world, rr::WorldEntitiesModel::CryptoWorkbenchesPublic, Kind::CryptoWorkbench,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.workbenches);
+
+    AddDictionary(world, rr::WorldEntitiesModel::VehicleTrunks, Kind::VehicleTrunk,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.containers);
 
     return out.valid;
 }

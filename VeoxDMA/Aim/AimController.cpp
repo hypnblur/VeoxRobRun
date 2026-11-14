@@ -1064,7 +1064,7 @@ static std::uint64_t g_lastRecoilGen = 0;
 void TickRecoilSpread()
 {
     const auto& cfg = ConfigInstance.Aim;
-    if (!cfg.NoRecoil && !cfg.NoSpread) return;
+    if (!cfg.NoRecoil && !cfg.NoSpread && !cfg.DynamicRecoilCompensation) return;
 
     const auto snapshot = RobRunReader::GetSnapshot();
     if (!snapshot || snapshot->battleModel <= 0x10000) return;
@@ -1097,6 +1097,20 @@ void TickRecoilSpread()
         if (recoilModel > 0x10000)
             TargetProcess.AddScatterWriteRequest(scatter,
                 recoilModel + rr::RecoilModel::OffsetVec, &zero3, sizeof(zero3));
+    } else if (cfg.DynamicRecoilCompensation) {
+        const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
+            g_cachedPlayerClient + rr::PlayerClient::Recoil);
+        if (recoilModel > 0x10000) {
+            Vector3 curOffset{};
+            if (RobRunMemory::ReadVector3(recoilModel + rr::RecoilModel::OffsetVec, curOffset)) {
+                const float factor = std::clamp(1.f - cfg.RecoilStrength, 0.f, 1.f);
+                curOffset.x *= factor;
+                curOffset.y *= factor;
+                curOffset.z *= factor;
+                TargetProcess.AddScatterWriteRequest(scatter,
+                    recoilModel + rr::RecoilModel::OffsetVec, &curOffset, sizeof(curOffset));
+            }
+        }
     }
 
     if (cfg.NoSpread) {

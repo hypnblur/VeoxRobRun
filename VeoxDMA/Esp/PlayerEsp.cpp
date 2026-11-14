@@ -279,8 +279,20 @@ void DrawPlayers()
 			stateSegs.push_back({ "[FIRE]", fireCol });
 		if (pcfg.ShowReloading && ent.isReloading)
 			stateSegs.push_back({ "[RLD]", reloadCol });
-		if (pcfg.ShowArmor && ent.hasArmor)
-			stateSegs.push_back({ "[ARM]", armorCol });
+		if (pcfg.ShowArmor && (ent.hasArmor || ent.armor > 0.f))
+		{
+			if (pcfg.ShowArmorValue && ent.armor > 0.f)
+				stateSegs.push_back({ "[ARM:" + std::to_string((int)ent.armor) + "]", armorCol });
+			else
+				stateSegs.push_back({ "[ARM]", armorCol });
+		}
+		if (pcfg.ShowStamina && ent.stamina >= 0.f)
+		{
+			const ImU32 stmCol = Esp::D2DColorToImU32(pcfg.StaminaColour);
+			stateSegs.push_back({ "[STM:" + std::to_string((int)ent.stamina) + "]", stmCol });
+		}
+		if (ent.isAimingAtLocal)
+			stateSegs.push_back({ "[AIMING]", lookCol });
 		if (ent.isKnockedDown) stateSegs.push_back({ "[KD]", stateCol });
 		if (ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
 		if (ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });

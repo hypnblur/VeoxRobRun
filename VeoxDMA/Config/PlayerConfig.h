@@ -44,6 +44,9 @@ public:
 	bool ShowFiring = true;
 	bool ShowReloading = true;
 	bool ShowArmor = true;
+	bool ShowArmorValue = true;
+	bool ShowStamina = true;
+	bool SpectatorAlert = true;
 	bool WeaponSprite = true;
 
 	D2D1::ColorF NameColour = Colour(255, 255, 255);
@@ -57,6 +60,7 @@ public:
 	D2D1::ColorF FiringColour = Colour(255, 80, 80);
 	D2D1::ColorF ReloadColour = Colour(255, 200, 50);
 	D2D1::ColorF ArmorColour = Colour(100, 180, 255);
+	D2D1::ColorF StaminaColour = Colour(60, 220, 100);
 
 	// Worker-side pose smoothing. The reader blends every new pose sample into
 	// the previous one before publishing, so the overlay draws the smoothed
@@ -109,6 +113,9 @@ public:
         j[ConfigName][LIT("ShowFiring")] = ShowFiring;
         j[ConfigName][LIT("ShowReloading")] = ShowReloading;
         j[ConfigName][LIT("ShowArmor")] = ShowArmor;
+        j[ConfigName][LIT("ShowArmorValue")] = ShowArmorValue;
+        j[ConfigName][LIT("ShowStamina")] = ShowStamina;
+        j[ConfigName][LIT("SpectatorAlert")] = SpectatorAlert;
         j[ConfigName][LIT("WeaponSprite")] = WeaponSprite;
         ToJsonColour(&j, LIT("NameColour"), &NameColour);
         ToJsonColour(&j, LIT("DistanceColour"), &DistanceColour);
@@ -121,6 +128,7 @@ public:
         ToJsonColour(&j, LIT("FiringColour"), &FiringColour);
         ToJsonColour(&j, LIT("ReloadColour"), &ReloadColour);
         ToJsonColour(&j, LIT("ArmorColour"), &ArmorColour);
+        ToJsonColour(&j, LIT("StaminaColour"), &StaminaColour);
         j[ConfigName][LIT("PoseSmoothing")] = PoseSmoothing;
         j[ConfigName][LIT("PoseSmoothAlpha")] = PoseSmoothAlpha;
 
@@ -153,6 +161,9 @@ public:
         ShowFiring = j[ConfigName].value(LIT("ShowFiring"), ShowFiring);
         ShowReloading = j[ConfigName].value(LIT("ShowReloading"), ShowReloading);
         ShowArmor = j[ConfigName].value(LIT("ShowArmor"), ShowArmor);
+        ShowArmorValue = j[ConfigName].value(LIT("ShowArmorValue"), ShowArmorValue);
+        ShowStamina = j[ConfigName].value(LIT("ShowStamina"), ShowStamina);
+        SpectatorAlert = j[ConfigName].value(LIT("SpectatorAlert"), SpectatorAlert);
         WeaponSprite = j[ConfigName].value(LIT("WeaponSprite"), WeaponSprite);
         FromJsonColour(j, LIT("NameColour"), &NameColour);
         FromJsonColour(j, LIT("DistanceColour"), &DistanceColour);
@@ -165,6 +176,7 @@ public:
         FromJsonColour(j, LIT("FiringColour"), &FiringColour);
         FromJsonColour(j, LIT("ReloadColour"), &ReloadColour);
         FromJsonColour(j, LIT("ArmorColour"), &ArmorColour);
+        FromJsonColour(j, LIT("StaminaColour"), &StaminaColour);
         PoseSmoothing = j[ConfigName].value(LIT("PoseSmoothing"), PoseSmoothing);
         PoseSmoothAlpha = j[ConfigName].value(LIT("PoseSmoothAlpha"), PoseSmoothAlpha);
     }

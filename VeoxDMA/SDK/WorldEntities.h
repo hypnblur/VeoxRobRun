@@ -30,6 +30,11 @@ enum class Kind {
     CashLootNode,
     SettlementCash,
     MoneyWorkbench,
+    SecurityAlarm,
+    LocationSecurityAlarm,
+    FirstAidCabinet,
+    CryptoWorkbench,
+    VehicleTrunk,
     PointOfInterest
 };
 
@@ -52,6 +57,9 @@ struct State {
     int vehicles = 0;
     int grenades = 0;
     int valuables = 0;
+    int alarms = 0;
+    int workbenches = 0;
+    int firstAid = 0;
     int pointsOfInterest = 0;
     std::uintptr_t worldPtr = 0;
 };

@@ -65,6 +65,15 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.Valuables && world.SettlementCash;
 	case RobRunWorld::Kind::MoneyWorkbench:
 		return world.Valuables && world.MoneyWorkbenches;
+	case RobRunWorld::Kind::CryptoWorkbench:
+		return world.Valuables && world.CryptoWorkbenches;
+	case RobRunWorld::Kind::SecurityAlarm:
+	case RobRunWorld::Kind::LocationSecurityAlarm:
+		return world.SecurityAlarms;
+	case RobRunWorld::Kind::FirstAidCabinet:
+		return world.FirstAidCabinets;
+	case RobRunWorld::Kind::VehicleTrunk:
+		return world.Containers && world.VehicleTrunks;
 	case RobRunWorld::Kind::PointOfInterest:
 		return world.PointsOfInterest;
 	}
@@ -118,6 +127,15 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.SettlementCashColour);
 	case RobRunWorld::Kind::MoneyWorkbench:
 		return Esp::D2DColorToImU32(world.MoneyWorkbenchColour);
+	case RobRunWorld::Kind::CryptoWorkbench:
+		return Esp::D2DColorToImU32(world.CryptoWorkbenchColour);
+	case RobRunWorld::Kind::SecurityAlarm:
+	case RobRunWorld::Kind::LocationSecurityAlarm:
+		return Esp::D2DColorToImU32(world.SecurityAlarmColour);
+	case RobRunWorld::Kind::FirstAidCabinet:
+		return Esp::D2DColorToImU32(world.FirstAidColour);
+	case RobRunWorld::Kind::VehicleTrunk:
+		return Esp::D2DColorToImU32(world.VehicleTrunkColour);
 	case RobRunWorld::Kind::PointOfInterest:
 		return Esp::D2DColorToImU32(world.PointOfInterestColour);
 	}

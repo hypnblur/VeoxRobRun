@@ -44,6 +44,9 @@ struct EntityData {
     bool isFiring = false;
     bool isReloading = false;
     bool hasArmor = false;
+    float armor = 0.f;
+    float stamina = -1.f;
+    bool isAimingAtLocal = false;
     bool isKnockedDown = false;
     bool isKnockedOut = false;
     bool isSurrendered = false;
@@ -76,6 +79,8 @@ struct Snapshot {
     RobRunCamera::CameraState camera;
     std::int32_t localEntityId = -1;
     Vector3 localPosition{};
+    int observerCount = 0;
+    bool spectatorAlert = false;
     std::uintptr_t game = 0;
     std::uintptr_t battleModel = 0;
     std::uintptr_t localCharacter = 0;

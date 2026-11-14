@@ -1080,6 +1080,9 @@ void DrawVisuals()
 			ColorToggleRow("Firing", &ConfigInstance.Player.ShowFiring, ConfigInstance.Player.FiringColour);
 			ColorToggleRow("Reloading", &ConfigInstance.Player.ShowReloading, ConfigInstance.Player.ReloadColour);
 			ColorToggleRow("Armor", &ConfigInstance.Player.ShowArmor, ConfigInstance.Player.ArmorColour);
+			ToggleRow("Armor Value", &ConfigInstance.Player.ShowArmorValue);
+			ColorToggleRow("Stamina", &ConfigInstance.Player.ShowStamina, ConfigInstance.Player.StaminaColour);
+			ToggleRow("Spectator Alert", &ConfigInstance.Player.SpectatorAlert);
 			EndCard();
 		}
 
@@ -1107,6 +1110,10 @@ void DrawVisuals()
 			ToggleRow("Enable World ESP", &ConfigInstance.World.Enabled);
 			ToggleRow("Show Empty", &ConfigInstance.World.ShowEmpty);
 			ToggleRow("Show Distance", &ConfigInstance.World.ShowDistance);
+			ToggleRow("Security Alarms", &ConfigInstance.World.SecurityAlarms);
+			ToggleRow("First Aid Cabinets", &ConfigInstance.World.FirstAidCabinets);
+			ToggleRow("Crypto Workbenches", &ConfigInstance.World.CryptoWorkbenches);
+			ToggleRow("Vehicle Trunks", &ConfigInstance.World.VehicleTrunks);
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
 			EndCard();
@@ -1267,7 +1274,10 @@ void DrawAim()
 		BeginCard("WEAPON", kCardW);
 		ToggleRow("No Recoil", &ConfigInstance.Aim.NoRecoil, true);
 		ToggleRow("No Spread", &ConfigInstance.Aim.NoSpread, true);
-		Note("No Recoil and No Spread (sway) zero the weapon vectors over DMA.");
+		ToggleRow("Dynamic Recoil Curve", &ConfigInstance.Aim.DynamicRecoilCompensation, true);
+		if (ConfigInstance.Aim.DynamicRecoilCompensation)
+			SliderFloatRow("Curve Strength", &ConfigInstance.Aim.RecoilStrength, 0.1f, 2.0f);
+		Note("No Recoil and No Spread zero weapon vectors over DMA. Dynamic Recoil applies pattern compensation.");
 		EndCard();
 
 		BeginCard("PREDICTION", kCardW);

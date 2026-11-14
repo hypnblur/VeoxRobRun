@@ -62,6 +62,8 @@ public:
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
 	bool NoSpread = false;
+	bool DynamicRecoilCompensation = true;
+	float RecoilStrength = 1.0f;
 
 	// --- Role filters ---------------------------------------------------
 	// Entity roles are resolved by name through reflection, so these match the
@@ -108,6 +110,8 @@ public:
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
 		j[ConfigName][LIT("NoSpread")] = NoSpread;
+		j[ConfigName][LIT("DynamicRecoilCompensation")] = DynamicRecoilCompensation;
+		j[ConfigName][LIT("RecoilStrength")] = RecoilStrength;
 		j[ConfigName][LIT("ExpIgnorePolice")] = ExpIgnorePolice;
 		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
@@ -147,6 +151,8 @@ public:
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
 		NoSpread = j[ConfigName].value(LIT("NoSpread"), NoSpread);
+		DynamicRecoilCompensation = j[ConfigName].value(LIT("DynamicRecoilCompensation"), DynamicRecoilCompensation);
+		RecoilStrength = j[ConfigName].value(LIT("RecoilStrength"), RecoilStrength);
 		ExpIgnorePolice = j[ConfigName].value(LIT("ExpIgnorePolice"), ExpIgnorePolice);
 		ExpIgnoreCriminal = j[ConfigName].value(LIT("ExpIgnoreCriminal"), ExpIgnoreCriminal);
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);

@@ -525,7 +525,23 @@ static void PublishSnapshot()
     snapshot->stampUs = SteadyMicros();
     snapshot->sessionGeneration = sessionGeneration;
     snapshot->sessionChangedMs = sessionChangedMs;
-    for (const auto& entity : entities) {
+    for (auto& entity : snapshot->entities) {
+        if (entity.entityId != localEntityId && !entity.isDead &&
+            RobRunMemory::Finite(localPosition) && !localPosition.IsZero()) {
+            const float dx = localPosition.x - entity.position.x;
+            const float dy = localPosition.y - entity.position.y;
+            const float dz = localPosition.z - entity.position.z;
+            const float distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq > 0.01f) {
+                const float invDist = 1.f / std::sqrt(distSq);
+                const float dot = entity.lookDirection.x * dx * invDist +
+                                  entity.lookDirection.y * dy * invDist +
+                                  entity.lookDirection.z * dz * invDist;
+                if (dot > 0.90f) {
+                    entity.isAimingAtLocal = true;
+                }
+            }
+        }
         if (!entity.bones.empty()) ++snapshot->skeletonCount;
         if (entity.bonePoints.valid) ++snapshot->poseCount;
     }
@@ -854,6 +870,31 @@ static void ReadHealth(std::uintptr_t characterModel, EntityData& entity)
         healthModel + rr::HealthModel::CriticalHealth);
     if (critical >= 0 && critical <= 100000)
         entity.criticalHealth = static_cast<float>(critical);
+
+    const std::uintptr_t staminaModel = ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::Stamina);
+    if (staminaModel > 0x10000) {
+        const std::uintptr_t staminaAmountWrapper = ReadPtr(
+            staminaModel + rr::StaminaModel::Amount);
+        int staminaVal = 0;
+        if (staminaAmountWrapper > 0x10000 &&
+            Il2Cpp::ReadPrimitiveInt(staminaAmountWrapper, staminaVal)) {
+            entity.stamina = static_cast<float>(staminaVal);
+        }
+    }
+
+    const std::uintptr_t initArmorModel = ReadPtr(
+        privateModel + rr::BattleCharacterPrivateModel::InitArmorModel);
+    if (initArmorModel > 0x10000) {
+        const std::uintptr_t armorAmountWrapper = ReadPtr(
+            initArmorModel + rr::InitArmorModel::Amount);
+        int armorVal = 0;
+        if (armorAmountWrapper > 0x10000 &&
+            Il2Cpp::ReadPrimitiveInt(armorAmountWrapper, armorVal)) {
+            entity.armor = static_cast<float>(armorVal);
+            if (armorVal > 0) entity.hasArmor = true;
+        }
+    }
 }
 
 static std::string NormalizeRoleName(const std::string& raw)
