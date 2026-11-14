@@ -790,14 +790,28 @@ void Tick()
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
         if (ShouldSkipByRole(ent, cfg)) continue;
-        // Animator/cull gate: skip characters whose pose has frozen, which is
-        // the closest read-only equivalent of "not visible". This is not wall
-        // occlusion.
+        // Visibility and wall occlusion gate
         if (cfg.VisibleBonesOnly && !ent.visible) continue;
         if (haveLocalPosition &&
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 
         Vector3 point = BonePoint(ent, cfg.TargetBone);
+        if (cfg.VisibleBonesOnly && RobRunReader::GetBvhStatus().loaded) {
+            if (RobRunReader::IsCameraOccluded(point)) {
+                bool altFound = false;
+                static const int altBones[] = { 0, 1, 2, 3 }; // Head, Neck, Chest, Pelvis
+                for (int b : altBones) {
+                    if (b == cfg.TargetBone) continue;
+                    Vector3 altPoint = BonePoint(ent, b);
+                    if (!RobRunReader::IsCameraOccluded(altPoint)) {
+                        point = altPoint;
+                        altFound = true;
+                        break;
+                    }
+                }
+                if (!altFound) continue;
+            }
+        }
         int leadMs = 0;
 
         // Leading uses the previous feet sample. Update the sample after the

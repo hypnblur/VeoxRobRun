@@ -2528,7 +2528,7 @@ static void UpdateInternal()
             // the aim gate when every bone is occluded. Both need the BVH, so
             // without it the animator fallback above stays in effect and the
             // menu says the occluder file is missing.
-            if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck) &&
+            if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
                 g_bvhScene.valid && visCamera.valid &&
                 entity.entityId != localEntityId)
             {
@@ -2845,6 +2845,28 @@ BvhStatus GetBvhStatus()
 void ReloadBvh()
 {
     TryLoadBvh(true);
+}
+
+bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin)
+{
+    if (!g_bvhScene.valid) return false;
+    const CollisionBVH::Float3 o{ origin.x, origin.y, origin.z };
+    const CollisionBVH::Float3 t{ target.x, target.y, target.z };
+    return CollisionBVH::IsOccluded(g_bvhScene, o, t, tMin);
+}
+
+bool IsCameraOccluded(const Vector3& target, float tMin)
+{
+    if (!g_bvhScene.valid) return false;
+    RobRunCamera::CameraState cam = cameraState;
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        if (g_freshCamera.valid) cam = g_freshCamera;
+    }
+    if (!cam.valid) return false;
+    const CollisionBVH::Float3 o{ cam.position.x, cam.position.y, cam.position.z };
+    const CollisionBVH::Float3 t{ target.x, target.y, target.z };
+    return CollisionBVH::IsOccluded(g_bvhScene, o, t, tMin);
 }
 
 } // namespace RobRunReader

@@ -129,7 +129,7 @@ inline bool Load(const std::string& path, Scene& scene) {
 
 inline bool RayTriangle(
     const Float3& orig, const Float3& dir,
-    const Triangle& tri, float tMax, float& tOut)
+    const Triangle& tri, float tMax, float& tOut, float tMin = 0.20f)
 {
     const Float3 e1 = tri.v1 - tri.v0;
     const Float3 e2 = tri.v2 - tri.v0;
@@ -147,7 +147,7 @@ inline bool RayTriangle(
     if (v < 0.f || u + v > 1.f) return false;
 
     const float t = inv * dot(e2, q);
-    if (t < 1e-4f || t > tMax) return false;
+    if (t < tMin || t > tMax) return false;
 
     tOut = t;
     return true;
@@ -176,7 +176,7 @@ inline bool RayAABB(
 }
 
 inline bool IsOccluded(const Scene& scene,
-    const Float3& origin, const Float3& target)
+    const Float3& origin, const Float3& target, float tMin = 0.20f)
 {
     if (!scene.valid || scene.nodes.empty()) return false;
 
@@ -193,9 +193,9 @@ inline bool IsOccluded(const Scene& scene,
     };
 
     const float tMax = len - 0.05f;
-    if (tMax <= 0.f) return false;
+    if (tMax <= tMin) return false;
 
-    uint32_t stack[64];
+    uint32_t stack[128];
     int sp = 0;
     stack[sp++] = 0;
 
@@ -210,11 +210,11 @@ inline bool IsOccluded(const Scene& scene,
             const uint32_t count = node.triCount();
             float t;
             for (uint32_t i = start; i < start + count; ++i) {
-                if (RayTriangle(origin, d, scene.tris[i], tMax, t))
+                if (RayTriangle(origin, d, scene.tris[i], tMax, t, tMin))
                     return true;
             }
         } else {
-            if (sp < 62) {
+            if (sp < 126) {
                 stack[sp++] = node.right();
                 stack[sp++] = node.left();
             }

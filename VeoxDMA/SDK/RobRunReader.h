@@ -205,4 +205,7 @@ struct BvhStatus {
 BvhStatus GetBvhStatus();
 void ReloadBvh();
 
+bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f);
+bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f);
+
 } // namespace RobRunReader
