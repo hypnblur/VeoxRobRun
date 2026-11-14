@@ -23,6 +23,8 @@ public:
 	int MaxDistance = 600;
 	int FontSize = 10;
 
+	bool InstantLoot = false;
+
 	// Per-collection toggles for the new metadata dump. The group flags above
 	// stay as master switches: turning "Containers" off hides every container
 	// subtype regardless of the individual checkbox.
@@ -117,6 +119,7 @@ public:
 		j[ConfigName][LIT("ShowDistance")] = ShowDistance;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
 		j[ConfigName][LIT("FontSize")] = FontSize;
+		j[ConfigName][LIT("InstantLoot")] = InstantLoot;
 
 		ToJsonBool(&j, LIT("LootNodes"), LootNodes);
 		ToJsonBool(&j, LIT("SafeDoors"), SafeDoors);
@@ -182,6 +185,7 @@ public:
 		ShowDistance = j[ConfigName].value(LIT("ShowDistance"), ShowDistance);
 		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
 		FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
+		InstantLoot = j[ConfigName].value(LIT("InstantLoot"), InstantLoot);
 
 		FromJsonBool(j, LIT("LootNodes"), &LootNodes);
 		FromJsonBool(j, LIT("SafeDoors"), &SafeDoors);

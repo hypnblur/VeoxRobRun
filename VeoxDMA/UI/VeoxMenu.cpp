@@ -1116,6 +1116,7 @@ void DrawVisuals()
 			ToggleRow("Vehicle Trunks", &ConfigInstance.World.VehicleTrunks);
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
+			ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot);
 			EndCard();
 		}
 	}

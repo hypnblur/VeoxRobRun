@@ -524,6 +524,53 @@ DebugInfo GetDebug()
     return g_debug;
 }
 
+static void TickInstantLoot()
+{
+    if (!ConfigInstance.World.InstantLoot) return;
+    const auto snap = RobRunReader::GetSnapshot();
+    if (!snap || snap->battleModel <= 0x10000) return;
+
+    const auto bm = snap->battleModel;
+
+    // ProlongedInteractionDialog -> Progress (float at +0x18).
+    // When the progress bar is moving (0 < p < 1), pin it to 1.0.
+    const std::uintptr_t dialog = RobRunMemory::ReadPtr(
+        bm + rr::BattleModel::ProlongedInteractionDialog);
+    if (dialog > 0x10000) {
+        const float progress = RobRunMemory::ReadFloat(
+            dialog + rr::ProlongedInteractionDialogModel::Progress);
+        if (progress > 0.01f && progress < 0.99f) {
+            float done = 1.0f;
+            Memory::ScopedScatter sc(TargetProcess);
+            if (sc.handle) {
+                TargetProcess.AddScatterWriteRequest(sc,
+                    dialog + rr::ProlongedInteractionDialogModel::Progress,
+                    &done, sizeof(done));
+                TargetProcess.ExecuteWriteScatter(sc);
+            }
+        }
+    }
+
+    // DelayedUseAction -> set EndTs = StartTs so it completes this tick.
+    const std::uintptr_t delayed = RobRunMemory::ReadPtr(
+        bm + rr::BattleModel::DelayedUseAction);
+    if (delayed > 0x10000) {
+        float startTs = RobRunMemory::ReadFloat(
+            delayed + rr::DelayedUseActionModel::StartTs);
+        const float endTs = RobRunMemory::ReadFloat(
+            delayed + rr::DelayedUseActionModel::EndTs);
+        if (endTs > startTs && startTs > 0.f) {
+            Memory::ScopedScatter sc(TargetProcess);
+            if (sc.handle) {
+                TargetProcess.AddScatterWriteRequest(sc,
+                    delayed + rr::DelayedUseActionModel::EndTs,
+                    &startTs, sizeof(startTs));
+                TargetProcess.ExecuteWriteScatter(sc);
+            }
+        }
+    }
+}
+
 void StartAimWorker()
 {
     StopAimWorker();
@@ -533,6 +580,7 @@ void StartAimWorker()
             RobRunReader::RefreshCamera();
             Tick();
             TickRecoilSpread();
+            TickInstantLoot();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
