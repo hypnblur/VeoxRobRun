@@ -2822,7 +2822,10 @@ static void UpdateInternal()
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
             }
-            } catch (...) {}
+            } catch (...) {
+                static int catchCount = 0;
+                if (catchCount++ < 10) DLOG("UpdateInternal: skeleton catch(...) fired for entity %d", entity.entityId);
+            }
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=E (bones done)", uiCount);
             if (!rig.worldMatrices.empty() &&
                 rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
