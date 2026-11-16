@@ -593,7 +593,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
             if (facial[b] || !rh.reachable[b]) continue;
             const int p = out.parent[b];
             if (p < 0 || p >= count || facial[p] || !rh.reachable[p]) continue;
-            if (out.selected[b] && out.selected[p]) continue;
+            if (out.selected[b] || !out.selected[p]) continue;
             if (selChildCount[p] > 0) continue;
             const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
             const float distSq = dx*dx + dy*dy + dz*dz;
