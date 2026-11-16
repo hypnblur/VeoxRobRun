@@ -583,11 +583,18 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                 }
             }
         }
+        // Only extend from leaf bones (no selected children) so we get
+        // fingers/toes but not random chest/spine helper branches.
+        std::vector<int> selChildCount(count, 0);
+        for (int b = 0; b < count; ++b)
+            if (out.selected[b] && out.parent[b] >= 0 && out.selected[out.parent[b]])
+                ++selChildCount[out.parent[b]];
         for (int b = 0; b < count; ++b) {
             if (facial[b] || !rh.reachable[b]) continue;
             const int p = out.parent[b];
             if (p < 0 || p >= count || facial[p] || !rh.reachable[p]) continue;
             if (out.selected[b] && out.selected[p]) continue;
+            if (selChildCount[p] > 0) continue;
             const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
             const float distSq = dx*dx + dy*dy + dz*dz;
             if (distSq > 0.0004f && distSq < 1.44f) {
