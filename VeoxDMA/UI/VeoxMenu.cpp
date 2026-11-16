@@ -1022,6 +1022,7 @@ void DrawVisuals()
 		{
 			BeginCard("SKELETON & CHAMS", kCardW);
 			ToggleRow("Draw Skeleton", &ConfigInstance.Player.Skeleton);
+			SliderFloatRow("Bone Thickness", &ConfigInstance.Player.SkeletonThickness, 0.5f, 6.0f, "px");
 			ToggleRow("Head Circle", &ConfigInstance.Player.HeadCircle);
 			ColorToggleRow("Character Chams", &ConfigInstance.Player.Chams, ConfigInstance.Player.ChamsColour);
 			if (ConfigInstance.Player.Chams)

@@ -589,7 +589,7 @@ void DrawPlayers()
 						? Esp::D2DColorToImU32(pcfg.VisibleColour)
 						: Esp::D2DColorToImU32(pcfg.HiddenColour);
 				}
-				dl->AddLine(a, b, segCol, 2.f);
+				dl->AddLine(a, b, segCol, pcfg.SkeletonThickness);
 			}
 			minX = std::min(minX, std::min(a.x, b.x));
 			maxX = std::max(maxX, std::max(a.x, b.x));

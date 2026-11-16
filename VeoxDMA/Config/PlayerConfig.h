@@ -80,6 +80,7 @@ public:
 	D2D1::ColorF ChamsOutlineColour = Colour(200, 180, 255);
 	float ChamsScale = 1.0f;
 	bool Skeleton = true;
+	float SkeletonThickness = 2.0f;
 	bool HeadCircle = true;
 
 	// Target Tracers / Snaplines
@@ -169,6 +170,7 @@ public:
         ToJsonColour(&j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
         j[ConfigName][LIT("ChamsScale")] = ChamsScale;
         j[ConfigName][LIT("Skeleton")] = Skeleton;
+        j[ConfigName][LIT("SkeletonThickness")] = SkeletonThickness;
         j[ConfigName][LIT("HeadCircle")] = HeadCircle;
         j[ConfigName][LIT("Snaplines")] = Snaplines;
         j[ConfigName][LIT("SnaplineOrigin")] = SnaplineOrigin;
@@ -237,6 +239,7 @@ public:
         FromJsonColour(j, LIT("ChamsOutlineColour"), &ChamsOutlineColour);
         ChamsScale = j[ConfigName].value(LIT("ChamsScale"), ChamsScale);
         Skeleton = j[ConfigName].value(LIT("Skeleton"), Skeleton);
+        SkeletonThickness = j[ConfigName].value(LIT("SkeletonThickness"), SkeletonThickness);
         HeadCircle = j[ConfigName].value(LIT("HeadCircle"), HeadCircle);
         Snaplines = j[ConfigName].value(LIT("Snaplines"), Snaplines);
         SnaplineOrigin = j[ConfigName].value(LIT("SnaplineOrigin"), SnaplineOrigin);
