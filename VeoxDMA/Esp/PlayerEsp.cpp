@@ -466,8 +466,12 @@ static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
 
 void DrawPlayers()
 {
-	static bool loggedEntry = false;
-	if (!loggedEntry) { DLOG("DrawPlayers: first call"); loggedEntry = true; }
+	static int drawCount = 0;
+	++drawCount;
+	if (drawCount <= 3 || (drawCount % 500) == 0)
+		DLOG("DrawPlayers #%d", drawCount);
+
+	try {
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	const int screenW = (int)display.x;
@@ -982,5 +986,11 @@ void DrawPlayers()
 		ImGui::End();
 		ImGui::PopStyleVar(3);
 		ImGui::PopStyleColor(2);
+	}
+
+	} catch (const std::exception& e) {
+		DLOG("DrawPlayers EXCEPTION #%d: %s", drawCount, e.what());
+	} catch (...) {
+		DLOG("DrawPlayers UNKNOWN EXCEPTION #%d", drawCount);
 	}
 }

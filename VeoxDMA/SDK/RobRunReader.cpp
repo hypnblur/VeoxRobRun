@@ -2899,16 +2899,24 @@ static void UpdateInternal()
 
 void Update()
 {
-    static bool loggedUpdate = false;
-    if (!loggedUpdate) { DLOG("Update: first call"); loggedUpdate = true; }
+    static int updateCount = 0;
+    ++updateCount;
+    if (updateCount <= 3 || (updateCount % 500) == 0)
+        DLOG("Update #%d", updateCount);
 
-    if (!g_bvhScene.valid || ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
-    {
-        TryLoadBvh(false);
+    try {
+        if (!g_bvhScene.valid || ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
+        {
+            TryLoadBvh(false);
+        }
+
+        UpdateInternal();
+        PublishSnapshot();
+    } catch (const std::exception& e) {
+        DLOG("Update EXCEPTION #%d: %s", updateCount, e.what());
+    } catch (...) {
+        DLOG("Update UNKNOWN EXCEPTION #%d", updateCount);
     }
-
-    UpdateInternal();
-    PublishSnapshot();
 }
 
 SnapshotPtr GetSnapshot()

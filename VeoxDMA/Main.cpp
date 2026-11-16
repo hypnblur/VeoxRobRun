@@ -173,18 +173,26 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		TickOverlay();
 	};
 	callbacks.draw = [] {
-		static bool loggedDraw = false;
-		if (!loggedDraw) { DLOG("Draw callback: first frame"); loggedDraw = true; }
-		DrawPlayers();
-		if (!ConfigInstance.Overlay.BattleMode) {
-			DrawWorldEntities();
-			Radar::Draw();
-			Radar::DrawFullMap();
+		static int frameCount = 0;
+		++frameCount;
+		if (frameCount <= 3 || (frameCount % 500) == 0)
+			DLOG("Draw frame #%d", frameCount);
+		try {
+			DrawPlayers();
+			if (!ConfigInstance.Overlay.BattleMode) {
+				DrawWorldEntities();
+				Radar::Draw();
+				Radar::DrawFullMap();
+			}
+			Aim::Draw();
+			Aim::DrawDebug();
+			if (Overlay::MenuOpen())
+				VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
+		} catch (const std::exception& e) {
+			DLOG("Draw EXCEPTION frame #%d: %s", frameCount, e.what());
+		} catch (...) {
+			DLOG("Draw UNKNOWN EXCEPTION frame #%d", frameCount);
 		}
-		Aim::Draw();
-		Aim::DrawDebug();
-		if (Overlay::MenuOpen())
-			VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 	};
 	callbacks.shutdown = [] {
 		Aim::StopAimWorker();
