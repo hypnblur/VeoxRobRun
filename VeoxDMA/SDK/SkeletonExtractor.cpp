@@ -564,12 +564,19 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     }
     // Full rig: include all reachable non-facial bones so the complete
     // joint hierarchy renders, not just the named anchor paths.
+    // NOTE: rh.parent was moved into out.parent above — ancestor() uses
+    // rh.isAncestor which would read a moved-from vector.  Use out.parent.
+    auto isAnc = [&](int a, int b) -> bool {
+        for (int steps = 0; b >= 0 && b < count && steps < count; b = out.parent[b], ++steps)
+            if (a == b) return true;
+        return false;
+    };
     {
         std::vector<bool> facial(count, false);
         if (out.head >= 0) {
             for (int b = 0; b < count; ++b) {
                 if (b == out.head) continue;
-                if (ancestor(out.head, b)) {
+                if (isAnc(out.head, b)) {
                     bool keep = false;
                     for (int a : anchors) if (a == b) { keep = true; break; }
                     if (!keep) facial[b] = true;
