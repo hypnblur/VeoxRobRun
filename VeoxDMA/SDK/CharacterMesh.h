@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <windows.h>
 #include "Matrix4x4.h"
+#include "DebugLog.h"
 
 namespace CharacterMesh {
 
@@ -61,22 +62,38 @@ inline std::string ResolvePath(const std::string& requested)
 
 inline bool Load(const std::string& path, Mesh& mesh)
 {
-    const std::string resolved = ResolvePath(path);
+    DLOG("CharacterMesh::Load('%s')", path.c_str());
+    std::string resolved;
+    try {
+        resolved = ResolvePath(path);
+    } catch (const std::exception& e) {
+        DLOG("  FAIL: ResolvePath threw: %s", e.what());
+        return false;
+    } catch (...) {
+        DLOG("  FAIL: ResolvePath threw unknown exception");
+        return false;
+    }
+    DLOG("  resolved='%s'", resolved.c_str());
     std::ifstream f(resolved, std::ios::binary);
-    if (!f) return false;
+    if (!f) { DLOG("  FAIL: could not open file"); return false; }
 
     char magic[4];
     f.read(magic, 4);
-    if (magic[0] != 'C' || magic[1] != 'H' || magic[2] != 'R' || magic[3] != '1')
+    if (magic[0] != 'C' || magic[1] != 'H' || magic[2] != 'R' || magic[3] != '1') {
+        DLOG("  FAIL: bad magic %02x%02x%02x%02x", (unsigned char)magic[0], (unsigned char)magic[1], (unsigned char)magic[2], (unsigned char)magic[3]);
         return false;
+    }
 
     std::uint32_t numBones, numVerts, numTris;
     f.read(reinterpret_cast<char*>(&numBones), 4);
     f.read(reinterpret_cast<char*>(&numVerts), 4);
     f.read(reinterpret_cast<char*>(&numTris), 4);
+    DLOG("  header: bones=%u verts=%u tris=%u", numBones, numVerts, numTris);
 
-    if (numBones > 256 || numVerts > 100000 || numTris > 100000)
+    if (numBones > 256 || numVerts > 100000 || numTris > 100000) {
+        DLOG("  FAIL: counts out of range");
         return false;
+    }
 
     mesh.numBones = numBones;
 
@@ -95,6 +112,7 @@ inline bool Load(const std::string& path, Mesh& mesh)
     f.read(reinterpret_cast<char*>(mesh.indices.data()), numTris * 3 * 2);
 
     mesh.valid = f.good();
+    DLOG("  Load %s (valid=%d)", mesh.valid ? "OK" : "FAIL: stream error", mesh.valid);
     return mesh.valid;
 }
 

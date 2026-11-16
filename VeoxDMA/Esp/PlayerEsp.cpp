@@ -6,6 +6,7 @@
 #include "EspDraw.h"
 #include "WeaponSprites.h"
 #include "CharacterMesh.h"
+#include "DebugLog.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
 #include <chrono>
@@ -161,11 +162,28 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	// Mesh-based chams: skin the character mesh and draw filled triangles
 	if (!g_charMeshLoadAttempted) {
 		g_charMeshLoadAttempted = true;
-		CharacterMesh::Load("character_mesh.bin", g_charMesh);
+		DLOG("PlayerEsp: attempting CharacterMesh::Load");
+		try {
+			bool loadOk = CharacterMesh::Load("character_mesh.bin", g_charMesh);
+			DLOG("PlayerEsp: CharacterMesh::Load returned %d, valid=%d, bones=%u, verts=%zu, tris=%zu",
+				loadOk, g_charMesh.valid, g_charMesh.numBones,
+				g_charMesh.vertices.size(), g_charMesh.indices.size() / 3);
+		} catch (const std::exception& e) {
+			DLOG("PlayerEsp: CharacterMesh::Load EXCEPTION: %s", e.what());
+			g_charMesh.valid = false;
+		} catch (...) {
+			DLOG("PlayerEsp: CharacterMesh::Load UNKNOWN EXCEPTION");
+			g_charMesh.valid = false;
+		}
 	}
 	if (g_charMesh.valid && ent.boneWorldMatrices.size() >= 2) {
 		static std::vector<int> boneMap;
 		static std::vector<Vector3> skinned;
+		static bool loggedOnce = false;
+		if (!loggedOnce) {
+			DLOG("PlayerEsp: mesh chams path entered, boneWorldMatrices.size=%zu", ent.boneWorldMatrices.size());
+			loggedOnce = true;
+		}
 		if (boneMap.size() != g_charMesh.numBones) {
 			boneMap.resize(g_charMesh.numBones);
 			for (std::uint32_t i = 0; i < g_charMesh.numBones; ++i)
@@ -448,6 +466,9 @@ static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
 
 void DrawPlayers()
 {
+	static bool loggedEntry = false;
+	if (!loggedEntry) { DLOG("DrawPlayers: first call"); loggedEntry = true; }
+
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	const int screenW = (int)display.x;
 	const int screenH = (int)display.y;

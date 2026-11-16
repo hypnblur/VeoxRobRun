@@ -8,6 +8,7 @@
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Esp/Radar.h"
+#include "DebugLog.h"
 #include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
 #include "Input/InputManager.h"
@@ -150,23 +151,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	freopen_s(&fDummy, "CONOUT$", "w", stderr);
 	freopen_s(&fDummy, "CONOUT$", "w", stdout);
 	printf("VeoxDMA - Starting...\n");
+	DLOG("=== WinMain entry ===");
 
 	StartAttachLoop();
+	DLOG("AttachLoop started");
 
 	// Apply saved settings before the menu is first drawn.
 	ConfigFile::Load();
+	DLOG("Config loaded");
 
 	Overlay::Callbacks callbacks;
 	callbacks.init = [] {
+		DLOG("Overlay init callback");
 		VeoxMenu::Init();
 		Radar::Init();
 		WeaponSprites::Init();
 		Aim::StartAimWorker();
+		DLOG("Overlay init callback done");
 	};
 	callbacks.tick = [] {
 		TickOverlay();
 	};
 	callbacks.draw = [] {
+		static bool loggedDraw = false;
+		if (!loggedDraw) { DLOG("Draw callback: first frame"); loggedDraw = true; }
 		DrawPlayers();
 		if (!ConfigInstance.Overlay.BattleMode) {
 			DrawWorldEntities();

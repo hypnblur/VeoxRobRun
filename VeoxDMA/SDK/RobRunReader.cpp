@@ -6,6 +6,7 @@
 #include "CameraFinder.h"
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
+#include "DebugLog.h"
 #include <atomic>
 #include <algorithm>
 #include <cctype>
@@ -617,6 +618,7 @@ void Shutdown()
 
 void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
 {
+    DLOG("RobRunReader::Init(ga=0x%llx, up=0x%llx)", (unsigned long long)gameAssemblyBase, (unsigned long long)unityPlayerBase);
     Shutdown();
 
     gaBase = gameAssemblyBase;
@@ -2611,8 +2613,13 @@ static void UpdateInternal()
             auto& rig = rigCache[w.entityId];
 
             if (w.needsPose) {
+                static bool loggedPose = false;
                 rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
                 rig.worldMatrices.resize(static_cast<std::size_t>(rig.layout.count));
+                if (!loggedPose) {
+                    DLOG("RobRunReader: needsPose, layout.count=%d, poseOffset=%zu, poseSize=%zu",
+                        rig.layout.count, (size_t)w.poseOffset, (size_t)w.poseSize);
+                }
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
                     rig.bones, &rig.points, rig.curLocal.data(),
@@ -2622,6 +2629,11 @@ static void UpdateInternal()
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
                         rig.bones, &rig.points, rig.curLocal.data(),
                         rig.worldMatrices.data());
+                }
+                if (!loggedPose) {
+                    DLOG("RobRunReader: pose sampled=%d, worldMatrices.size=%zu",
+                        sampled, rig.worldMatrices.size());
+                    loggedPose = true;
                 }
 
                 if (!sampled) {
@@ -2781,6 +2793,11 @@ static void UpdateInternal()
                 rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
                 entity.boneWorldMatrices = rig.worldMatrices;
                 entity.boneCount = rig.layout.count;
+                static bool loggedCopy = false;
+                if (!loggedCopy) {
+                    DLOG("RobRunReader: copied %zu worldMatrices to entity", rig.worldMatrices.size());
+                    loggedCopy = true;
+                }
             }
             entity.visible = rig.animatorActive;
 
