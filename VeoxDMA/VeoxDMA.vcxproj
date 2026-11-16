@@ -168,7 +168,9 @@
     <ClCompile Include="Misc\Vector.cpp" />
     <ClCompile Include="SDK\CameraFinder.cpp" />
     <ClCompile Include="SDK\SkeletonExtractor.cpp" />
-    <ClCompile Include="SDK\RobRunReader.cpp" />
+    <ClCompile Include="SDK\RobRunReader.cpp">
+      <ExceptionHandling>Async</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="SDK\Il2Cpp.cpp" />
     <ClCompile Include="SDK\RobRunMemory.cpp" />
     <ClCompile Include="SDK\RobRunCamera.cpp" />

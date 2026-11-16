@@ -2801,11 +2801,13 @@ static void UpdateInternal()
                 }
             } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D2 (pre-BuildSkeleton)", uiCount);
                 // Never replace good bones with an empty result: this fallback
                 // runs on a timer, so a single failed read used to blank the
                 // skeleton for a full second (a visible strobe).
                 auto fallback = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
                     entity.entityId, DmaRead);
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D3 (post-BuildSkeleton, %zu bones)", uiCount, fallback.size());
                 if (!fallback.empty()) {
                     rig.bones = std::move(fallback);
                     rig.points = Skeleton::BonePoints{};
@@ -2941,7 +2943,7 @@ void Update()
     } catch (const std::exception& e) {
         DLOG("Update EXCEPTION #%d: %s", updateCount, e.what());
     } catch (...) {
-        DLOG("Update UNKNOWN EXCEPTION #%d", updateCount);
+        DLOG("Update SEH/UNKNOWN EXCEPTION #%d (AV caught by /EHa)", updateCount);
     }
 }
 
