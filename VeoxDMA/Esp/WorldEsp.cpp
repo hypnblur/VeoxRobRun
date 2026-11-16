@@ -77,6 +77,8 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.Containers || world.VehicleTrunks;
 	case RobRunWorld::Kind::PointOfInterest:
 		return world.PointsOfInterest;
+	case RobRunWorld::Kind::DrugWorkbench:
+		return world.DrugWorkbenches;
 	}
 	return true;
 }
@@ -139,6 +141,8 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.VehicleTrunkColour);
 	case RobRunWorld::Kind::PointOfInterest:
 		return Esp::D2DColorToImU32(world.PointOfInterestColour);
+	case RobRunWorld::Kind::DrugWorkbench:
+		return Esp::D2DColorToImU32(world.DrugWorkbenchColour);
 	}
 	return IM_COL32(255, 255, 255, 255);
 }

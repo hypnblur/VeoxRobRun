@@ -547,13 +547,13 @@ void Draw()
 
 static const char* MapFileForLocation(const std::string& id)
 {
-	if (id == "shootercity")   return "looty_bay.png";
+	if (id == "shootercity")   return "city_colliders_map.png";
 	if (id == "settlement")    return "settlement.png";
 	if (id == "settlement2")   return "settlement_2.png";
 	if (id == "prison")        return "prison.png";
 	if (id == "hub")           return "hangar.png";
-	if (id == "sectorcenter")  return "looty_bay.png";
-	if (id == "clanbattle")    return "looty_bay.png";
+	if (id == "sectorcenter")  return "city_colliders_map.png";
+	if (id == "clanbattle")    return "city_colliders_map.png";
 	return nullptr;
 }
 
@@ -715,6 +715,11 @@ void DrawFullMap()
 				show = cfg.ShowContainers;
 				dotCol = IM_COL32(255, 230, 120, 200);
 				dotSize = 3.5f;
+				break;
+			case RobRunWorld::Kind::DrugWorkbench:
+				show = true;
+				dotCol = IM_COL32(0, 220, 100, 230);
+				dotSize = 4.5f;
 				break;
 			default:
 				show = cfg.ShowLoot;

@@ -1307,6 +1307,44 @@ static void ReadReloadAndKnockdownState(std::uintptr_t characterModel,
     }
 }
 
+static std::wstring CleanWeaponName(const std::wstring& name)
+{
+    static constexpr std::pair<std::wstring_view, std::wstring_view> table[] = {
+        { L"kl",        L"AK"           },
+        { L"srreaper",  L"AS VAL"       },
+        { L"jp7",       L"MP7"          },
+        { L"mc10",      L"Mac10"        },
+        { L"harris500", L"Pump Shotgun" },
+        { L"cb45",      L"UMP45"        },
+        { L"dp9",       L"Pistol"       },
+        { L"ordr12",    L"SPAZ-12"      },
+        { L"tag12k",    L"TAG-12K"      },
+        { L"lbr44",     L"Revolver"     },
+        { L"rc556",     L"R4C"          },
+        { L"vulture50", L"Deagle"       },
+        { L"apscalar",  L"Vector"       },
+        { L"starh",     L"Scar-H"      },
+        { L"pdw90",     L"P90"          },
+    };
+
+    const size_t pos = name.find(L'_');
+    const std::wstring_view weapName = std::wstring_view(name).substr(0, pos);
+    const std::wstring_view weapTier = (pos != std::wstring::npos)
+        ? std::wstring_view(name).substr(pos + 1) : std::wstring_view{};
+
+    for (const auto& [key, clean] : table) {
+        if (weapName.find(key) != std::wstring_view::npos) {
+            std::wstring result(clean);
+            if (!weapTier.empty()) {
+                result += L" | MK";
+                result += weapTier.substr(1);
+            }
+            return result;
+        }
+    }
+    return {};
+}
+
 static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out, int& weaponIndex)
 {
     out.clear();
@@ -1335,6 +1373,10 @@ static void ReadWeaponName(std::uintptr_t characterModel, std::wstring& out, int
         description + rr::Description::Name);
     if (nameStr > 0x10000)
         RobRunMemory::ReadString(nameStr, out);
+    if (!out.empty()) {
+        std::wstring cleaned = CleanWeaponName(out);
+        if (!cleaned.empty()) out = std::move(cleaned);
+    }
     const std::int32_t idx = RobRunMemory::ReadInt32(
         description + rr::InventoryItemDescription::Index);
     if (idx >= 0) weaponIndex = idx;

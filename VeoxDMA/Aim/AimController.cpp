@@ -613,6 +613,54 @@ static void TickInstantLoot()
             }
         }
     }
+
+    // Patch InventoryRevealViewDescriptions so loot slots appear instantly
+    // after a container is opened (skip scan/shine/icon animation phases).
+    {
+        static std::uintptr_t cachedRevealDescs = 0;
+        static std::uint64_t revealStamp = 0;
+        const std::uint64_t now = GetTickCount64();
+        if (now - revealStamp < 2000) return;
+        revealStamp = now;
+
+        if (!cachedRevealDescs) {
+            const std::uintptr_t klass =
+                Il2Cpp::FindClassByName("InventoryRevealViewDescriptions");
+            if (klass) {
+                const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
+                if (statics)
+                    cachedRevealDescs = RobRunMemory::ReadPtr(statics);
+            }
+        }
+        if (cachedRevealDescs <= 0x10000) { cachedRevealDescs = 0; return; }
+
+        namespace rv = rr::InventoryRevealViewDescriptions;
+        const std::uintptr_t items = RobRunMemory::ReadPtr(
+            cachedRevealDescs + rv::Items);
+        if (items <= 0x10000) { cachedRevealDescs = 0; return; }
+        const int count = RobRunMemory::ReadInt32(items + rv::Size);
+        if (count <= 0 || count > 64) { cachedRevealDescs = 0; return; }
+        const std::uintptr_t data = RobRunMemory::ReadPtr(items + rv::Data);
+        if (data <= 0x10000) { cachedRevealDescs = 0; return; }
+
+        const float nearZero = 0.0001f;
+        const float zero = 0.0f;
+        for (int i = 0; i < count; i++) {
+            const std::uintptr_t pair = data + 0x20 + (std::uintptr_t)i * rv::Stride;
+            const std::uintptr_t desc = RobRunMemory::ReadPtr(pair + rv::PairDesc);
+            if (desc <= 0x10000) continue;
+
+            TargetProcess.Write(desc + rv::ScanTime, nearZero);
+
+            const std::uintptr_t shine = RobRunMemory::ReadPtr(desc + rv::ShineView);
+            if (shine > 0x10000)
+                TargetProcess.Write(shine + rv::ShineDuration, zero);
+
+            const std::uintptr_t icon = RobRunMemory::ReadPtr(desc + rv::IconView);
+            if (icon > 0x10000)
+                TargetProcess.Write(icon + rv::IconDuration, zero);
+        }
+    }
 }
 
 void StartAimWorker()

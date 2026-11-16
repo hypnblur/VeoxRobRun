@@ -26,10 +26,10 @@ public:
 	bool ShowPlayerNames = true;
 	bool ShowPlayerDistances = true;
 	bool RotateWithCamera = false;
-	bool ShowMap = false;
+	bool ShowMap = true;
 
 	// Pop-out standalone OS window
-	bool PopoutWindow = false;
+	bool PopoutWindow = true;
 	int PopoutX = 80;
 	int PopoutY = 80;
 	int PopoutW = 650;
@@ -40,7 +40,7 @@ public:
 	float WorldMinZ = -400.f;
 	float WorldMaxZ = 400.f;
 
-	std::string SelectedMap = "looty_bay.png";
+	std::string SelectedMap = "city_colliders_map.png";
 
 	json ToJson()
 	{

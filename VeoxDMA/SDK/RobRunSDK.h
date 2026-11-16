@@ -948,6 +948,19 @@ namespace AutoLootAfterBreakModel {
 inline constexpr std::uintptr_t AutoLootEndTs = 0x28; // float
 }
 
+namespace InventoryRevealViewDescriptions {
+inline constexpr std::uintptr_t Items    = 0x10; // List<Pair> _items
+inline constexpr std::uintptr_t Size     = 0x18; // int _size
+inline constexpr std::uintptr_t Data     = 0x20; // array base
+inline constexpr std::uintptr_t Stride   = 0x18;
+inline constexpr std::uintptr_t PairDesc = 0x10; // Pair -> Description
+inline constexpr std::uintptr_t ScanTime = 0x58; // Description.TimeToOneCellBorder (f32)
+inline constexpr std::uintptr_t ShineView     = 0x18; // Description -> ShineView
+inline constexpr std::uintptr_t ShineDuration = 0x28; // ShineView.Duration (f32)
+inline constexpr std::uintptr_t IconView      = 0x50; // Description -> IconView
+inline constexpr std::uintptr_t IconDuration  = 0x18; // IconView.Duration (f32)
+}
+
 namespace RadiusInteractEntityModel {
 inline constexpr std::uintptr_t PositionModel = 0x10; // XYZ at +0x10..+0x18
 }

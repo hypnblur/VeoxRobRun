@@ -47,6 +47,7 @@ const char* KindName(Kind kind)
     case Kind::CryptoWorkbench:        return "Crypto Bench";
     case Kind::VehicleTrunk:           return "Vehicle Trunk";
     case Kind::PointOfInterest:        return "Point of Interest";
+    case Kind::DrugWorkbench:          return "Drug Lab";
     }
     return "World";
 }
@@ -743,6 +744,12 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadInlineField(model, 0x10, position) ||
                    ReadDescriptionPosition(model, 0x18, 0x10, position);
         }, out, out.containers);
+
+    AddDictionary(world, rr::WorldEntitiesModel::CargoChargeWorkbenches, Kind::DrugWorkbench,
+        [](std::uintptr_t model, Vector3& position) {
+            return ReadInlineField(model, 0x10, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+        }, out, out.drugWorkbenches);
 
     return out.valid;
 }

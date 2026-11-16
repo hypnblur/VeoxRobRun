@@ -71,7 +71,7 @@ public:
 	bool ExpIgnorePolice = false;
 	bool ExpIgnoreCriminal = false;
 	bool ExpIgnoreCivilian = false;
-	bool ExpIgnoreTeammates = false;
+	bool ExpIgnoreTeammates = true;
 
 	// Hardware Device connection settings
 	int DeviceIndex = 0;
