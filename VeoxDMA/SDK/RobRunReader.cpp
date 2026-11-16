@@ -2777,8 +2777,11 @@ static void UpdateInternal()
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
             }
-            entity.boneWorldMatrices = rig.worldMatrices;
-            entity.boneCount = rig.layout.count;
+            if (!rig.worldMatrices.empty() &&
+                rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
+                entity.boneWorldMatrices = rig.worldMatrices;
+                entity.boneCount = rig.layout.count;
+            }
             entity.visible = rig.animatorActive;
 
             // Camera-occlusion pass. VisCheck colours each bone by whether the

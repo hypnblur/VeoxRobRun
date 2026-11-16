@@ -163,15 +163,19 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		g_charMeshLoadAttempted = true;
 		CharacterMesh::Load("character_mesh.bin", g_charMesh);
 	}
-	if (g_charMesh.valid && !ent.boneWorldMatrices.empty() && ent.boneCount > 0) {
-		// Identity bone mapping: mesh bone i = hierarchy bone i
-		std::vector<int> boneMap(g_charMesh.numBones);
-		for (std::uint32_t i = 0; i < g_charMesh.numBones; ++i)
-			boneMap[i] = static_cast<int>(i);
+	if (g_charMesh.valid && ent.boneWorldMatrices.size() >= 2) {
+		static std::vector<int> boneMap;
+		static std::vector<Vector3> skinned;
+		if (boneMap.size() != g_charMesh.numBones) {
+			boneMap.resize(g_charMesh.numBones);
+			for (std::uint32_t i = 0; i < g_charMesh.numBones; ++i)
+				boneMap[i] = static_cast<int>(i);
+		}
+		skinned.resize(g_charMesh.vertices.size());
 
-		std::vector<Vector3> skinned(g_charMesh.vertices.size());
+		const int safeBoneCount = static_cast<int>(ent.boneWorldMatrices.size());
 		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
-			ent.boneCount, boneMap.data(), skinned.data());
+			safeBoneCount, boneMap.data(), skinned.data());
 
 		if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
 			screenW, screenH, chamsCol))
