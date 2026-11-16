@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include <set>
 
 // Aim settings for the Device Connections tab.
 //
@@ -73,6 +74,10 @@ public:
 	bool ExpIgnoreCivilian = false;
 	bool ExpIgnoreTeammates = true;
 
+	// Manually trusted players (by publicId / account id). Aimbot skips these
+	// the same way it skips party members when ExpIgnoreTeammates is on.
+	std::set<std::uint64_t> TrustedPlayers;
+
 	// Hardware Device connection settings
 	int DeviceIndex = 0;
 	std::string ComPort = "";
@@ -114,6 +119,11 @@ public:
 		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
+		{
+			json arr = json::array();
+			for (auto id : TrustedPlayers) arr.push_back(std::to_string(id));
+			j[ConfigName][LIT("TrustedPlayers")] = arr;
+		}
 		j[ConfigName][LIT("DeviceIndex")] = DeviceIndex;
 		j[ConfigName][LIT("ComPort")] = ComPort;
 		j[ConfigName][LIT("IpAddr")] = IpAddr;
@@ -157,6 +167,11 @@ public:
 		ExpIgnoreCriminal = j[ConfigName].value(LIT("ExpIgnoreCriminal"), ExpIgnoreCriminal);
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
 		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
+		if (j[ConfigName].contains(LIT("TrustedPlayers"))) {
+			TrustedPlayers.clear();
+			for (const auto& v : j[ConfigName][LIT("TrustedPlayers")])
+				TrustedPlayers.insert(std::stoull(v.get<std::string>()));
+		}
 		DeviceIndex = j[ConfigName].value(LIT("DeviceIndex"), DeviceIndex);
 		ComPort = j[ConfigName].value(LIT("ComPort"), ComPort);
 		IpAddr = j[ConfigName].value(LIT("IpAddr"), IpAddr);

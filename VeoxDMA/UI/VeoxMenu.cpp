@@ -1339,6 +1339,16 @@ void DrawAim()
 		ToggleRow("Ignore Teammates", &ConfigInstance.Aim.ExpIgnoreTeammates);
 		if (ConfigInstance.Aim.ExpIgnoreTeammates)
 			Note("Uses party membership, not role: same-role players outside your party stay targetable.");
+		{
+			const int tc = (int)ConfigInstance.Aim.TrustedPlayers.size();
+			if (tc > 0) {
+				char buf[64];
+				std::snprintf(buf, sizeof(buf), "Trusted Players: %d", tc);
+				Note("%s  (also skipped by aimbot; manage in Server tab)", buf);
+			} else {
+				Note("No trusted players. Add them in the Server tab.");
+			}
+		}
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
 		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
 		EndCard();
@@ -1789,7 +1799,19 @@ void DrawServer()
 				curX += tw + 4.f;
 			}
 
-			// Line 1 Right: Distance
+			const bool isTrusted = ent.publicId && ConfigInstance.Aim.TrustedPlayers.count(ent.publicId);
+			if (isTrusted)
+			{
+				const char* tag = "TRUSTED";
+				const ImVec4 tealCol(0.f, 0.8f, 0.65f, 1.f);
+				const float tw = TextW(font::inter_medium_small, tag) + 6.f;
+				dl->AddRectFilled(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(tealCol, 0.22f), 3.f);
+				dl->AddRect(ImVec2(curX, line1Y), ImVec2(curX + tw, line1Y + 16.f), C(tealCol, 0.5f), 3.f);
+				dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize, ImVec2(curX + 3.f, line1Y + 1.f), C(tealCol), tag);
+				curX += tw + 4.f;
+			}
+
+			// Line 1 Right: Trust button + Distance
 			std::string distStr = item.isLocal ? "0 m" : FormatDistance(item.distance);
 			const float distW = TextW(font::inter_medium_widget, distStr.c_str());
 			ImU32 distCol = C(kTextDim);
@@ -1800,6 +1822,38 @@ void DrawServer()
 			}
 			dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
 				ImVec2(rightX - distW, line1Y - 1.f), distCol, distStr.c_str());
+
+			// Trust / Untrust button (to the left of distance)
+			if (!item.isLocal && ent.publicId)
+			{
+				const char* btnLabel = isTrusted ? "Untrust" : "Trust";
+				const float btnW = TextW(font::inter_medium_small, btnLabel) + 10.f;
+				const float btnH = 16.f;
+				const float btnX = rightX - distW - btnW - 8.f;
+				const ImRect btnRect(ImVec2(btnX, line1Y), ImVec2(btnX + btnW, line1Y + btnH));
+				const bool btnHov = ImGui::IsMouseHoveringRect(btnRect.Min, btnRect.Max);
+
+				const ImVec4 tealCol(0.f, 0.8f, 0.65f, 1.f);
+				if (isTrusted) {
+					dl->AddRectFilled(btnRect.Min, btnRect.Max, C(tealCol, btnHov ? 0.35f : 0.18f), 3.f);
+					dl->AddRect(btnRect.Min, btnRect.Max, C(tealCol, 0.5f), 3.f);
+					dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+						ImVec2(btnRect.Min.x + 5.f, btnRect.Min.y + 1.f), C(tealCol), btnLabel);
+				} else {
+					dl->AddRectFilled(btnRect.Min, btnRect.Max, C(kTextDim, btnHov ? 0.30f : 0.12f), 3.f);
+					dl->AddRect(btnRect.Min, btnRect.Max, C(kTextDim, 0.4f), 3.f);
+					dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+						ImVec2(btnRect.Min.x + 5.f, btnRect.Min.y + 1.f), C(kTextDim), btnLabel);
+				}
+
+				if (btnHov && ImGui::IsMouseClicked(0))
+				{
+					if (isTrusted)
+						ConfigInstance.Aim.TrustedPlayers.erase(ent.publicId);
+					else
+						ConfigInstance.Aim.TrustedPlayers.insert(ent.publicId);
+				}
+			}
 
 			// Line 2 Left: Health, Armor, Weapon
 			float l2X = leftX;

@@ -168,6 +168,7 @@ bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
     if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return true;
+    if (ent.publicId && cfg.TrustedPlayers.count(ent.publicId)) return true;
     return false;
 }
 
