@@ -620,6 +620,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
 {
     DLOG("RobRunReader::Init(ga=0x%llx, up=0x%llx)", (unsigned long long)gameAssemblyBase, (unsigned long long)unityPlayerBase);
     Shutdown();
+    DLOG("RobRunReader::Init: Shutdown done");
 
     gaBase = gameAssemblyBase;
     upBase = unityPlayerBase;
@@ -627,6 +628,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     RobRunCamera::Init(gameAssemblyBase);
     RobRunInventory::Init(gameAssemblyBase);
     RobRunWorld::Init(gameAssemblyBase);
+    DLOG("RobRunReader::Init: sub-inits done");
     cachedGame = 0;
     cachedBattleModel = 0;
     cachedBattleEntities = 0;
@@ -684,15 +686,19 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         g_freshCamera = RobRunCamera::CameraState{};
     }
 
+    DLOG("RobRunReader::Init: TryLoadBvh");
     TryLoadBvh(true);
+    DLOG("RobRunReader::Init: BVH done, valid=%d", g_bvhScene.valid);
 
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
         g_snapshot = std::make_shared<Snapshot>();
     }
 
+    DLOG("RobRunReader::Init: starting worker threads");
     g_workerStop.store(false, std::memory_order_relaxed);
     g_workerThread = std::thread([] {
+        DLOG("Worker thread started");
         while (!g_workerStop.load(std::memory_order_relaxed)) {
             Update();
             // Adaptive sleep: 1 ms when entities are active to keep snapshots fresh (50-60 Hz),
@@ -703,8 +709,10 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         }
     });
 
+    DLOG("RobRunReader::Init: main worker launched");
     g_worldWorkerStop.store(false, std::memory_order_relaxed);
     g_worldWorkerThread = std::thread([] {
+        DLOG("World worker thread started");
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
             const std::uintptr_t bm = cachedBattleModel;
             const std::uintptr_t be = cachedBattleEntities;
@@ -728,6 +736,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         }
     });
 
+    DLOG("RobRunReader::Init: complete, both workers launched");
 }
 
 static std::uintptr_t ReadPtr(std::uintptr_t address)
@@ -2890,6 +2899,9 @@ static void UpdateInternal()
 
 void Update()
 {
+    static bool loggedUpdate = false;
+    if (!loggedUpdate) { DLOG("Update: first call"); loggedUpdate = true; }
+
     if (!g_bvhScene.valid || ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
     {
         TryLoadBvh(false);
