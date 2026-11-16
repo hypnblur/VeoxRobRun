@@ -5,11 +5,15 @@
 #include "RobRunMemory.h"
 #include "EspDraw.h"
 #include "WeaponSprites.h"
+#include "CharacterMesh.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <unordered_map>
+
+static CharacterMesh::Mesh g_charMesh;
+static bool g_charMeshLoadAttempted = false;
 
 static ImVec2 MeasureText(const char* text, float size)
 {
@@ -153,6 +157,26 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	const ImU32 outlineCol = Esp::ShadeColour(pcfg.ChamsOutlineColour, std::min(1.0f, pcfg.ChamsAlpha * 1.5f));
 	const float outlineThick = 1.0f;
 	const float scale = std::clamp(pcfg.ChamsScale, 0.4f, 2.5f);
+
+	// Mesh-based chams: skin the character mesh and draw filled triangles
+	if (!g_charMeshLoadAttempted) {
+		g_charMeshLoadAttempted = true;
+		CharacterMesh::Load("character_mesh.bin", g_charMesh);
+	}
+	if (g_charMesh.valid && !ent.boneWorldMatrices.empty() && ent.boneCount > 0) {
+		// Identity bone mapping: mesh bone i = hierarchy bone i
+		std::vector<int> boneMap(g_charMesh.numBones);
+		for (std::uint32_t i = 0; i < g_charMesh.numBones; ++i)
+			boneMap[i] = static_cast<int>(i);
+
+		std::vector<Vector3> skinned(g_charMesh.vertices.size());
+		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
+			ent.boneCount, boneMap.data(), skinned.data());
+
+		if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
+			screenW, screenH, chamsCol))
+			return;
+	}
 
 	const auto& bp = ent.bonePoints;
 

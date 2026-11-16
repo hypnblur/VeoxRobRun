@@ -593,7 +593,8 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 }
 
 static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
-    std::vector<BoneSegment>& out, BonePoints* points, BoneLocal* localOut)
+    std::vector<BoneSegment>& out, BonePoints* points, BoneLocal* localOut,
+    Matrix4x4* worldMatricesOut = nullptr)
 {
     const int count = layout.count;
     std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
@@ -640,6 +641,25 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
                 world[b] = v;
                 worldValid[b] = 1;
             }
+        }
+    }
+
+    if (worldMatricesOut) {
+        for (int b = 0; b < count; ++b) {
+            auto& mat = worldMatricesOut[b];
+            if (!worldValid[b]) {
+                std::memset(&mat, 0, sizeof(Matrix4x4));
+                mat.matrix[0][0] = mat.matrix[1][1] = mat.matrix[2][2] = mat.matrix[3][3] = 1.0f;
+                continue;
+            }
+            const auto& q = worldRot[b];
+            const float xx = q.x*q.x, yy = q.y*q.y, zz = q.z*q.z;
+            const float xy = q.x*q.y, xz = q.x*q.z, yz = q.y*q.z;
+            const float wx = q.w*q.x, wy = q.w*q.y, wz = q.w*q.z;
+            mat.matrix[0][0] = 1-2*(yy+zz); mat.matrix[0][1] = 2*(xy+wz);   mat.matrix[0][2] = 2*(xz-wy);   mat.matrix[0][3] = 0;
+            mat.matrix[1][0] = 2*(xy-wz);   mat.matrix[1][1] = 1-2*(xx+zz); mat.matrix[1][2] = 2*(yz+wx);   mat.matrix[1][3] = 0;
+            mat.matrix[2][0] = 2*(xz+wy);   mat.matrix[2][1] = 2*(yz-wx);   mat.matrix[2][2] = 1-2*(xx+yy); mat.matrix[2][3] = 0;
+            mat.matrix[3][0] = world[b].x;   mat.matrix[3][1] = world[b].y;  mat.matrix[3][2] = world[b].z;  mat.matrix[3][3] = 1;
         }
     }
 
@@ -723,7 +743,7 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
 
 bool SampleLayout(const RigLayout& layout, const Read& read,
     std::vector<BoneSegment>& out, BonePoints* points,
-    BoneLocal* localOut)
+    BoneLocal* localOut, Matrix4x4* worldMatricesOut)
 {
     const int count = layout.count;
     if (!read || layout.matrices <= 0x10000 || count < 2 ||
@@ -740,12 +760,13 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         if (!read(layout.matrices + offset, poseBytes + offset, chunk))
             return false;
     }
-    return BuildPoseOutput(layout, local, out, points, localOut);
+    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut);
 }
 
 bool ProcessPoseData(const RigLayout& layout, const void* poseData,
     std::size_t poseSize, std::vector<BoneSegment>& out,
-    BonePoints* points, BoneLocal* localOut)
+    BonePoints* points, BoneLocal* localOut,
+    Matrix4x4* worldMatricesOut)
 {
     const int count = layout.count;
     if (!poseData || count < 2 ||
@@ -757,7 +778,7 @@ bool ProcessPoseData(const RigLayout& layout, const void* poseData,
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::memcpy(local.data(), poseData, static_cast<std::size_t>(count) * sizeof(TRS));
-    return BuildPoseOutput(layout, local, out, points, localOut);
+    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut);
 }
 
 std::vector<BoneSegment> BuildFromView(U view, const Read& read)

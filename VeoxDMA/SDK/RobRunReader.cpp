@@ -256,6 +256,7 @@ struct RigCacheEntry {
     Skeleton::BonePoints smoothedPoints;
     bool smoothedValid = false;
     Vector3 lastSampledPos{};
+    std::vector<Matrix4x4> worldMatrices;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -2611,13 +2612,16 @@ static void UpdateInternal()
 
             if (w.needsPose) {
                 rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
+                rig.worldMatrices.resize(static_cast<std::size_t>(rig.layout.count));
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
-                    rig.bones, &rig.points, rig.curLocal.data());
+                    rig.bones, &rig.points, rig.curLocal.data(),
+                    rig.worldMatrices.data());
 
                 if (!sampled) {
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                        rig.bones, &rig.points, rig.curLocal.data());
+                        rig.bones, &rig.points, rig.curLocal.data(),
+                        rig.worldMatrices.data());
                 }
 
                 if (!sampled) {
@@ -2773,6 +2777,8 @@ static void UpdateInternal()
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
             }
+            entity.boneWorldMatrices = rig.worldMatrices;
+            entity.boneCount = rig.layout.count;
             entity.visible = rig.animatorActive;
 
             // Camera-occlusion pass. VisCheck colours each bone by whether the

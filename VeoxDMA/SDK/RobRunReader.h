@@ -68,6 +68,9 @@ struct EntityData {
     std::vector<Skeleton::BoneSegment> bones;
     // Named aim points sampled from the same pose as the skeleton.
     Skeleton::BonePoints bonePoints;
+    // Per-bone world-space 4x4 matrices for mesh-based chams skinning.
+    std::vector<Matrix4x4> boneWorldMatrices;
+    int boneCount = 0;
 };
 
 // Immutable view of the last completed read pass. The worker publishes a new

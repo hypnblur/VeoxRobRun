@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../Misc/Vector.h"
+#include "Matrix4x4.h"
 
 namespace Skeleton {
 
@@ -105,13 +106,14 @@ bool BuildLayoutByName(std::uint64_t view, const ReadFn& read, RigLayout& out);
 // corrupt pose), in which case the caller should rebuild it.
 bool SampleLayout(const RigLayout& layout, const ReadFn& read,
     std::vector<BoneSegment>& out, BonePoints* points = nullptr,
-    BoneLocal* localOut = nullptr);
+    BoneLocal* localOut = nullptr, Matrix4x4* worldMatricesOut = nullptr);
 
 // Processes pre-read pose data (from a scatter read) instead of issuing its
 // own DMA read. The buffer must hold layout.count * 48 bytes (one TRS per bone).
 bool ProcessPoseData(const RigLayout& layout, const void* poseData,
     std::size_t poseSize, std::vector<BoneSegment>& out,
-    BonePoints* points = nullptr, BoneLocal* localOut = nullptr);
+    BonePoints* points = nullptr, BoneLocal* localOut = nullptr,
+    Matrix4x4* worldMatricesOut = nullptr);
 
 // Returns the byte size of the pose buffer needed for a layout.
 inline std::size_t PoseDataSize(const RigLayout& layout) {
