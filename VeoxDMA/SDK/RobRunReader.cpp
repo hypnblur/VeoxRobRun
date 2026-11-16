@@ -2413,10 +2413,10 @@ static void UpdateInternal()
                 rig.animatorActive = true;
             }
 
-            // Cheap liveness check every 1.5 s: three pointer reads instead of
-            // a full rebuild. Only a failed check forces the expensive path,
-            // so a healthy rig keeps the exact same bone indices (and the
-            // smoothed pose that goes with them) for as long as it exists.
+            // Skeleton layout rebuild is wrapped in try/catch because the
+            // DMA reads through the entity view hierarchy can trigger AVs
+            // on some hardware setups. With /EHa this catch handles SEH.
+            try {
             if (rig.layoutValid && now - rig.layoutStamp >= 1500) {
                 rig.layoutStamp = now;
                 if (viewPtr <= 0x10000 ||
@@ -2438,8 +2438,6 @@ static void UpdateInternal()
                     rig.layoutValid = true;
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
-                    // New indices mean the old smoothed segments describe a
-                    // different bone set; restart from the fresh sample.
                     rig.smoothedValid = false;
                 } else {
                     if (rig.poseFailureSince == 0)
@@ -2451,6 +2449,7 @@ static void UpdateInternal()
                     }
                 }
             }
+            } catch (...) {}
 
             if (rig.layoutValid && !w.needsPose) {
                 const std::size_t sz = Skeleton::PoseDataSize(rig.layout);
@@ -2643,6 +2642,7 @@ static void UpdateInternal()
 
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D (rig, needsPose=%d, layoutValid=%d)", uiCount, (int)w.needsPose, (int)rig.layoutValid);
 
+            try {
             if (w.needsPose) {
                 static bool loggedPose = false;
                 rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
@@ -2822,6 +2822,7 @@ static void UpdateInternal()
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
             }
+            } catch (...) {}
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=E (bones done)", uiCount);
             if (!rig.worldMatrices.empty() &&
                 rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
