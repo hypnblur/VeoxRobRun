@@ -1798,6 +1798,9 @@ static void RevalidateSession()
 
 static void UpdateInternal()
 {
+    static int uiCount = 0;
+    ++uiCount;
+
     entities.clear();
     localEntityId = -1;
     localPosition = Vector3{};
@@ -1805,7 +1808,7 @@ static void UpdateInternal()
     fallbackViewProjectionValid = false;
     poseFailureCount = 0;
 
-    if (!gaBase) return;
+    if (!gaBase) { if (uiCount <= 3) DLOG("UpdateInternal #%d: no gaBase", uiCount); return; }
 
     ++updateCounter;
     if ((updateCounter % 120) == 0)
@@ -1835,6 +1838,8 @@ static void UpdateInternal()
     } else {
         gameResolveFails = 0;
     }
+
+    if (uiCount <= 3) DLOG("UpdateInternal #%d: game=0x%llx", uiCount, (unsigned long long)cachedGame);
 
     if (!cachedBattleModel)
         cachedBattleModel = ResolveBattleModel(cachedGame);
@@ -2134,6 +2139,9 @@ static void UpdateInternal()
         RefreshParty(cachedGame, localEntityId, localPublicId);
     }
 
+    if (uiCount <= 3) DLOG("UpdateInternal #%d: pre-entity, battleModel=0x%llx, battleEntities=0x%llx",
+        uiCount, (unsigned long long)cachedBattleModel, (unsigned long long)cachedBattleEntities);
+
     const std::uintptr_t entityDictionary = ReadPtr(
         cachedBattleEntities + rr::BattleEntitiesModel::EntityDict);
     std::vector<RobRunMemory::DictEntry> entityEntries;
@@ -2373,6 +2381,8 @@ static void UpdateInternal()
             w.positionValid = RobRunMemory::Finite(w.block.position);
         }
 
+        if (uiCount <= 3) DLOG("UpdateInternal #%d: phase2 done, %zu work items", uiCount, work.size());
+
         // ---------------------------------------------------------------
         // Phase 3: Rig layout rebuilds and late pose collection.
         // Layouts already valid had their pose read above; newly
@@ -2481,6 +2491,7 @@ static void UpdateInternal()
             std::lock_guard<std::mutex> lock(g_freshCameraMutex);
             if (g_freshCamera.valid) visCamera = g_freshCamera;
         }
+        if (uiCount <= 3) DLOG("UpdateInternal #%d: entering entity detail loop", uiCount);
         int detailBudget = 8;
         const std::int64_t battleNowMs = ReadBattleNowMs(cachedBattleEntities);
         for (auto& w : work) {
@@ -2867,6 +2878,7 @@ static void UpdateInternal()
 
             entities.push_back(std::move(entity));
         }
+        if (uiCount <= 3) DLOG("UpdateInternal #%d: entity loop done, %zu entities", uiCount, entities.size());
     } else {
         if (++entityDictFailures >= 50) {
             cachedBattleEntities = 0;
