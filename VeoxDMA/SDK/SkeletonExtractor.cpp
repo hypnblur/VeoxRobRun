@@ -561,21 +561,31 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         if (out.selected[b] && p >= 0 && out.selected[p])
             out.segments.push_back({p, b});
     }
-    // Direct parent-link fallback: if IK views didn't resolve segments,
-    // connect all valid bone pairs to guarantee skeletal completeness
-    if (out.segments.empty()) {
-        for (int b = 0; b < count; ++b) {
-            const int p = out.parent[b];
-            if (p >= 0 && p < count) {
-                const float dx = local[b].p.x;
-                const float dy = local[b].p.y;
-                const float dz = local[b].p.z;
-                const float distSq = dx*dx + dy*dy + dz*dz;
-                if (distSq > 0.0004f && distSq < 1.44f) {
-                    out.segments.push_back({p, b});
-                    out.selected[b] = 1;
-                    out.selected[p] = 1;
+    // Full rig: include all reachable non-facial bones so the complete
+    // joint hierarchy renders, not just the named anchor paths.
+    {
+        std::vector<bool> facial(count, false);
+        if (out.head >= 0) {
+            for (int b = 0; b < count; ++b) {
+                if (b == out.head) continue;
+                if (ancestor(out.head, b)) {
+                    bool keep = false;
+                    for (int a : anchors) if (a == b) { keep = true; break; }
+                    if (!keep) facial[b] = true;
                 }
+            }
+        }
+        for (int b = 0; b < count; ++b) {
+            if (facial[b] || !rh.reachable[b]) continue;
+            const int p = parent[b];
+            if (p < 0 || p >= count || facial[p] || !rh.reachable[p]) continue;
+            if (selected[b] && selected[p]) continue;
+            const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
+            const float distSq = dx*dx + dy*dy + dz*dz;
+            if (distSq > 0.0004f && distSq < 1.44f) {
+                out.segments.push_back({p, b});
+                selected[b] = 1;
+                selected[p] = 1;
             }
         }
     }
@@ -932,7 +942,11 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     };
 
     auto nameContains = [](const std::string& haystack, const char* needle) {
-        return haystack.find(needle) != std::string::npos;
+        const auto pos = haystack.find(needle);
+        if (pos == std::string::npos) return false;
+        const auto end = pos + std::strlen(needle);
+        return end >= haystack.size() ||
+            !std::isalpha(static_cast<unsigned char>(haystack[end]));
     };
 
     for (const auto& bone : namedBones) {

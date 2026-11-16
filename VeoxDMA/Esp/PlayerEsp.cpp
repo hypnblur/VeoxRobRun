@@ -545,6 +545,33 @@ void DrawPlayers()
 			boxValid = true;
 		}
 
+		if (pcfg.HeadCircle && pcfg.Skeleton &&
+			ent.bonePoints.hasHead && ent.bonePoints.hasNeck &&
+			IsValidBone(ent.bonePoints.head, entPos) &&
+			IsValidBone(ent.bonePoints.neck, entPos))
+		{
+			const Vector3& head = ent.bonePoints.head;
+			const Vector3& neck = ent.bonePoints.neck;
+			const float headRadius = Distance(head, neck) * 0.5f;
+			const Vector3 center(
+				(head.x + neck.x) * 0.5f,
+				(head.y + neck.y) * 0.5f,
+				(head.z + neck.z) * 0.5f);
+			ImVec2 sc{}; float sr = 0.f;
+			if (headRadius > 0.02f &&
+				ProjectWithRadius(viewProjection, center, headRadius,
+					screenW, screenH, sc, sr))
+			{
+				ImU32 headCol = espCol;
+				if (pcfg.VisCheck || pcfg.WallCheck) {
+					headCol = ent.visible
+						? Esp::D2DColorToImU32(pcfg.VisibleColour)
+						: Esp::D2DColorToImU32(pcfg.HiddenColour);
+				}
+				dl->AddCircle(sc, sr, headCol, 0, 2.f);
+			}
+		}
+
 		if (!boxValid)
 		{
 			auto projector = [&](const Vector3& world, float& sx, float& sy) {
