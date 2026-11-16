@@ -2496,6 +2496,7 @@ static void UpdateInternal()
         const std::int64_t battleNowMs = ReadBattleNowMs(cachedBattleEntities);
         for (auto& w : work) {
             if (!w.positionValid) continue;
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: entity id=%d, cp=A (init)", uiCount, w.entityId);
 
             EntityData entity{};
             entity.entityId = w.entityId;
@@ -2511,6 +2512,7 @@ static void UpdateInternal()
                     std::cos(w.block.yaw) * cosPitch);
             }
 
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B (detail cache)", uiCount);
             auto& detail = detailCache[entity.entityId];
             const bool detailModelChanged =
                 detail.characterModel != w.characterModel;
@@ -2535,6 +2537,7 @@ static void UpdateInternal()
                 if (Il2Cpp::ReadPrimitiveBool(deadWrapper, dead))
                     detail.isDead = dead;
 
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B1 (isDead done)", uiCount);
                 ReadHealth(w.characterModel, scratch);
                 detail.health = scratch.health;
                 detail.maxHealth = scratch.maxHealth;
@@ -2543,9 +2546,11 @@ static void UpdateInternal()
                 detail.armor = scratch.armor;
                 detail.stamina = scratch.stamina;
 
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B2 (health done)", uiCount);
                 scratch.isDead = detail.isDead;
                 ReadRoleAndVehicle(w.characterModel, scratch);
                 ReadCommonState(w.characterModel, scratch);
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B3 (role+common done)", uiCount);
                 ReadReloadAndKnockdownState(w.characterModel, battleNowMs, scratch);
                 detail.isReloading = scratch.isReloading;
                 detail.isKnockedDown = scratch.isKnockedDown;
@@ -2563,8 +2568,10 @@ static void UpdateInternal()
                 detail.inVehicle = scratch.inVehicle;
                 detail.vehicleId = scratch.vehicleId;
 
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B4 (reload+knockdown done)", uiCount);
                 ReadWeaponName(w.characterModel, detail.weaponName, detail.weaponIndex);
 
+                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B5 (weapon done)", uiCount);
                 if (detail.publicId == 0 || detail.nickname.empty()) {
                     const auto slotIt = slots.find(w.entityId);
                     if (slotIt != slots.end()) {
@@ -2626,11 +2633,15 @@ static void UpdateInternal()
             entity.isHandcuffed = detail.isHandcuffed;
             entity.reloadPhase = detail.reloadPhase;
 
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=C (detail done)", uiCount);
+
             const auto viewIt = views.find(w.entityId);
             if (viewIt != views.end())
                 entity.viewPtr = viewIt->second;
 
             auto& rig = rigCache[w.entityId];
+
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D (rig, needsPose=%d, layoutValid=%d)", uiCount, (int)w.needsPose, (int)rig.layoutValid);
 
             if (w.needsPose) {
                 static bool loggedPose = false;
@@ -2809,6 +2820,7 @@ static void UpdateInternal()
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
             }
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=E (bones done)", uiCount);
             if (!rig.worldMatrices.empty() &&
                 rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
                 entity.boneWorldMatrices = rig.worldMatrices;
@@ -2876,7 +2888,9 @@ static void UpdateInternal()
                 }
             }
 
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=F (pre-push)", uiCount);
             entities.push_back(std::move(entity));
+            if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=G (entity done)", uiCount);
         }
         if (uiCount <= 3) DLOG("UpdateInternal #%d: entity loop done, %zu entities", uiCount, entities.size());
     } else {
