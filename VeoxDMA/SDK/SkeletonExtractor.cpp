@@ -577,15 +577,15 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         }
         for (int b = 0; b < count; ++b) {
             if (facial[b] || !rh.reachable[b]) continue;
-            const int p = parent[b];
+            const int p = out.parent[b];
             if (p < 0 || p >= count || facial[p] || !rh.reachable[p]) continue;
-            if (selected[b] && selected[p]) continue;
+            if (out.selected[b] && out.selected[p]) continue;
             const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
             const float distSq = dx*dx + dy*dy + dz*dz;
             if (distSq > 0.0004f && distSq < 1.44f) {
                 out.segments.push_back({p, b});
-                selected[b] = 1;
-                selected[p] = 1;
+                out.selected[b] = 1;
+                out.selected[p] = 1;
             }
         }
     }
