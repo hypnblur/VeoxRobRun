@@ -757,8 +757,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
     int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
         read, out.boneMap);
-    if (nameMatched == 0)
-        for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
+    for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
     return !out.segments.empty();
 }
 
@@ -1227,9 +1226,7 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
     int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
         read, out.boneMap);
-    if (nameMatched == 0)
-        for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
-
+    for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
     return !out.segments.empty();
 }
 
