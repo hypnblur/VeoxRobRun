@@ -46,7 +46,6 @@ const char* KindName(Kind kind)
     case Kind::FirstAidCabinet:        return "First Aid";
     case Kind::CryptoWorkbench:        return "Crypto Bench";
     case Kind::VehicleTrunk:           return "Vehicle Trunk";
-    case Kind::PointOfInterest:        return "Point of Interest";
     case Kind::DrugWorkbench:          return "Drug Lab";
     case Kind::DefenseBlock:           return "Defense Block";
     }
@@ -207,7 +206,7 @@ bool WorldLooksValid(std::uintptr_t world)
         CollectionLooksValid(world, rr::WorldEntitiesModel::LootNodes) ||
         CollectionLooksValid(world, rr::WorldEntitiesModel::CashLootNodes) ||
         CollectionLooksValid(world, rr::WorldEntitiesModel::SettlementCash) ||
-        CollectionLooksValid(world, rr::WorldEntitiesModel::PointOfInterest);
+        CollectionLooksValid(world, rr::WorldEntitiesModel::SettlementCash);
 }
 
 void AddDictionary(std::uintptr_t world, std::uintptr_t dictionaryOffset, Kind kind,
@@ -711,10 +710,6 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    // --- New dump: points of interest (scatter-accelerated) ------------
-    AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::PointOfInterest, Kind::PointOfInterest,
-        rr::PointOfInterestModel::Description, rr::PointOfInterestModel::DescriptionPosition, out, out.pointsOfInterest);
-
     // --- Security, First Aid, Crypto & Trunks -------------------------
     AddDictionary(world, rr::WorldEntitiesModel::SecurityAlarms, Kind::SecurityAlarm,
         [](std::uintptr_t model, Vector3& position) {
@@ -772,7 +767,8 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 // LocationDefenseBlockDescription.Position at +0x28
                 Vector3 position{};
                 if (!RobRunMemory::ReadVector3(desc + 0x28, position) ||
-                    !ValidPosition(position))
+                    !ValidPosition(position) ||
+                    (position.x == 0.f && position.y == 0.f && position.z == 0.f))
                     continue;
 
                 bool isRaided = false;
@@ -800,6 +796,188 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
+    // --- Hidden players (cupboards / trash cans) ----------------------------
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::HideObjects, entries)) {
+            for (const auto& entry : entries) {
+                if (entry.value <= 0x10000) continue;
+                const int eid = RobRunMemory::ReadInt32(
+                    entry.value + rr::HideObjectModel::EntityId);
+                if (eid >= 0)
+                    out.hiddenEntityIds.insert(eid);
+            }
+        }
+    }
+
+    return out.valid;
+}
+
+// --- Plot / house reader --------------------------------------------------
+
+static std::string ReadBuildingName(std::uintptr_t descModelPtr)
+{
+    if (descModelPtr <= 0x10000) return {};
+    const std::uintptr_t descValue = RobRunMemory::ReadPtr(descModelPtr + rr::DescriptionModelT::Value);
+    if (descValue <= 0x10000) return {};
+    const std::uintptr_t strObj = RobRunMemory::ReadPtr(descValue + rr::IdentifiedBase::Id);
+    if (strObj <= 0x10000) return {};
+    std::wstring wide;
+    if (!RobRunMemory::ReadString(strObj, wide, 128)) return {};
+    return RobRunMemory::WideToUtf8(wide);
+}
+
+static void ReadDefenseBlock(std::uintptr_t defPtr, BuildingInfo& info)
+{
+    if (defPtr <= 0x10000) return;
+    info.hasDefense = true;
+
+    const std::uintptr_t raidedW = RobRunMemory::ReadPtr(defPtr + rr::DefenseBlockPublicModel::IsRaided);
+    if (raidedW > 0x10000) Il2Cpp::ReadPrimitiveBool(raidedW, info.isRaided);
+
+    const std::uintptr_t emptyW = RobRunMemory::ReadPtr(defPtr + rr::DefenseBlockPublicModel::IsSlotsEmpty);
+    if (emptyW > 0x10000) Il2Cpp::ReadPrimitiveBool(emptyW, info.isFusesEmpty);
+
+    const std::uintptr_t lockW = RobRunMemory::ReadPtr(defPtr + rr::DefenseBlockPublicModel::RaidLockTs);
+    if (lockW > 0x10000) Il2Cpp::ReadPrimitiveInt64(lockW, info.raidLockTs);
+}
+
+static int CountDoors(std::uintptr_t doorsDict, int& openCount)
+{
+    openCount = 0;
+    if (doorsDict <= 0x10000) return 0;
+
+    std::vector<RobRunMemory::DictEntry> doorEntries;
+    if (!RobRunMemory::ReadDictInt(doorsDict, doorEntries, false))
+        return 0;
+
+    int total = 0;
+    for (const auto& de : doorEntries) {
+        if (de.value <= 0x10000) continue;
+        ++total;
+        const std::uintptr_t doorModel = RobRunMemory::ReadPtr(
+            de.value + 0x28); // BuilderDoorModel.DoorModel at 0x28
+        if (doorModel <= 0x10000) continue;
+        const std::uintptr_t stateModel = RobRunMemory::ReadPtr(
+            doorModel + rr::DoorModelOffset::State);
+        if (stateModel <= 0x10000) continue;
+        const std::uintptr_t stateW = RobRunMemory::ReadPtr(
+            stateModel + rr::DoorStateModelOffset::_state);
+        if (stateW <= 0x10000) continue;
+        // Index 2 = Closed, anything else = opened
+        const std::uintptr_t descPtr = RobRunMemory::ReadPtr(stateW + 0x18);
+        if (descPtr > 0x10000) {
+            const int idx = RobRunMemory::ReadInt32(descPtr + rr::IdentifiedBase::Index);
+            if (idx != 2) ++openCount;
+        }
+    }
+    return total;
+}
+
+bool ReadPlots(std::uintptr_t battleEntities, PlotState& out)
+{
+    out = PlotState{};
+    if (battleEntities <= 0x10000) return false;
+
+    // BattleEntitiesModel + 0x58 → _plotsModels: Dictionary<int, PlotModel>
+    const std::uintptr_t plotsDict = RobRunMemory::ReadPtr(battleEntities + 0x58);
+    if (plotsDict <= 0x10000) return false;
+
+    std::vector<RobRunMemory::DictEntry> plotEntries;
+    if (!RobRunMemory::ReadDictInt(plotsDict, plotEntries, false) || plotEntries.empty())
+        return false;
+
+    for (const auto& pe : plotEntries) {
+        const std::uintptr_t pm = pe.value;
+        if (pm <= 0x10000) continue;
+
+        PlotInfo plot{};
+        plot.plotId = pe.key;
+
+        // Position: PlotModel + 0x28 → PlotDescription → Position (inline V3 at +0x10)
+        const std::uintptr_t plotDesc = RobRunMemory::ReadPtr(pm + rr::PlotModel::PlotDescription);
+        if (plotDesc <= 0x10000) continue;
+        if (!RobRunMemory::ReadVector3(plotDesc + rr::PlotDescription::Position, plot.position))
+            continue;
+        if (!ValidPosition(plot.position)) continue;
+
+        // Slot index: PlotSlotDescription at PM + 0x20 → Index at +0x18
+        const std::uintptr_t slotDesc = RobRunMemory::ReadPtr(pm + rr::PlotModel::PlotSlotDescription);
+        if (slotDesc > 0x10000)
+            plot.slotIndex = RobRunMemory::ReadInt32(slotDesc + rr::IdentifiedBase::Index);
+
+        // Owner: PlotData at PM + 0x10 → OwnerPublicId wrapper at +0x28
+        const std::uintptr_t plotData = RobRunMemory::ReadPtr(pm + rr::PlotModel::_data);
+        std::uint64_t ownerPubId = 0;
+        if (plotData > 0x10000) {
+            const std::uintptr_t pubIdW = RobRunMemory::ReadPtr(plotData + rr::PlotData::OwnerPublicId);
+            if (pubIdW > 0x10000)
+                Il2Cpp::ReadPrimitiveInt64(pubIdW, reinterpret_cast<std::int64_t&>(ownerPubId));
+        }
+        if (ownerPubId > 0)
+            plot.ownerName = std::to_string(ownerPubId);
+
+        // --- Main building ---
+        const std::uintptr_t mainBld = RobRunMemory::ReadPtr(pm + rr::PlotModel::MainBuilding);
+        if (mainBld > 0x10000) {
+            plot.mainBuilding.name = ReadBuildingName(
+                RobRunMemory::ReadPtr(mainBld + rr::MainBuildingModel::DescriptionModel));
+            if (plot.mainBuilding.name.empty()) plot.mainBuilding.name = "House";
+
+            ReadDefenseBlock(
+                RobRunMemory::ReadPtr(mainBld + rr::MainBuildingModel::DefenseBlockPublicModel),
+                plot.mainBuilding);
+
+            const std::uintptr_t doorsD = RobRunMemory::ReadPtr(mainBld + rr::MainBuildingModel::Doors);
+            plot.mainBuilding.doorCount = CountDoors(doorsD, plot.mainBuilding.doorsOpen);
+        }
+
+        // --- Compound wall ---
+        const std::uintptr_t wallBld = RobRunMemory::ReadPtr(pm + rr::PlotModel::CompoundWall);
+        if (wallBld > 0x10000) {
+            plot.compoundWall.name = ReadBuildingName(
+                RobRunMemory::ReadPtr(wallBld + rr::CompoundWallModel::DescriptionModel));
+            if (plot.compoundWall.name.empty()) plot.compoundWall.name = "Wall";
+
+            ReadDefenseBlock(
+                RobRunMemory::ReadPtr(wallBld + rr::CompoundWallModel::DefenseBlockPublicModel),
+                plot.compoundWall);
+
+            const std::uintptr_t doorsD = RobRunMemory::ReadPtr(wallBld + rr::CompoundWallModel::Doors);
+            plot.compoundWall.doorCount = CountDoors(doorsD, plot.compoundWall.doorsOpen);
+        }
+
+        // --- Outbuildings ---
+        const std::uintptr_t outDict = RobRunMemory::ReadPtr(pm + rr::PlotModel::Outbuildings);
+        if (outDict > 0x10000) {
+            std::vector<RobRunMemory::DictEntry> outEntries;
+            if (RobRunMemory::ReadDictInt(outDict, outEntries, false)) {
+                for (const auto& oe : outEntries) {
+                    if (oe.value <= 0x10000) continue;
+                    BuildingInfo ob{};
+                    ob.name = ReadBuildingName(
+                        RobRunMemory::ReadPtr(oe.value + rr::OutbuildingModel::DescriptionModel));
+                    if (ob.name.empty()) ob.name = "Outbuilding";
+
+                    ReadDefenseBlock(
+                        RobRunMemory::ReadPtr(oe.value + rr::OutbuildingModel::DefenseBlockPublicModel),
+                        ob);
+
+                    const std::uintptr_t doorsD = RobRunMemory::ReadPtr(
+                        oe.value + rr::OutbuildingModel::Doors);
+                    ob.doorCount = CountDoors(doorsD, ob.doorsOpen);
+
+                    plot.outbuildings.push_back(std::move(ob));
+                    if (plot.outbuildings.size() >= 16) break;
+                }
+            }
+        }
+
+        out.plots.push_back(std::move(plot));
+        if (out.plots.size() >= 256) break;
+    }
+
+    out.valid = !out.plots.empty();
     return out.valid;
 }
 

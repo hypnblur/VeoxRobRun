@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include "../Misc/Vector.h"
 
 namespace RobRunWorld {
@@ -35,7 +36,6 @@ enum class Kind {
     FirstAidCabinet,
     CryptoWorkbench,
     VehicleTrunk,
-    PointOfInterest,
     DrugWorkbench,
     DefenseBlock
 };
@@ -66,10 +66,38 @@ struct State {
     int alarms = 0;
     int workbenches = 0;
     int firstAid = 0;
-    int pointsOfInterest = 0;
     int drugWorkbenches = 0;
     int defenseBlocks = 0;
+    std::unordered_set<int> hiddenEntityIds;
     std::uintptr_t worldPtr = 0;
+};
+
+// House / plot info for the ESP info panel
+struct BuildingInfo {
+    std::string name;
+    bool hasDefense = false;
+    bool isRaided = false;
+    bool isFusesEmpty = false;
+    std::int64_t raidLockTs = 0;
+    int doorCount = 0;
+    int doorsOpen = 0;
+};
+
+struct PlotInfo {
+    int plotId = 0;
+    Vector3 position{};
+    std::string ownerName;
+    std::string ownerClan;
+    std::string ownerClanTag;
+    int slotIndex = -1;
+    BuildingInfo mainBuilding;
+    BuildingInfo compoundWall;
+    std::vector<BuildingInfo> outbuildings;
+};
+
+struct PlotState {
+    bool valid = false;
+    std::vector<PlotInfo> plots;
 };
 
 struct ProbeField {
@@ -95,5 +123,7 @@ void Init(std::uintptr_t gameAssemblyBase);
 bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out);
 
 const char* KindName(Kind kind);
+
+bool ReadPlots(std::uintptr_t battleEntities, PlotState& out);
 
 } // namespace RobRunWorld

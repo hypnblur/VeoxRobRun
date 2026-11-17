@@ -17,7 +17,6 @@ public:
 	bool Vehicles = true;
 	bool Grenades = true;
 	bool Valuables = true;
-	bool PointsOfInterest = true;
 	bool ShowEmpty = true;
 	bool ShowDistance = true;
 	int MaxDistance = 600;
@@ -49,15 +48,16 @@ public:
 	bool CryptoWorkbenches = true;
 	bool VehicleTrunks = true;
 	bool DrugWorkbenches = true;
+	bool Weed = true;
 	bool DefenseBlocks = true;
+	bool HouseEsp = true;
+	int HouseMaxDistance = 300;
 
 	D2D1::ColorF ContainerColour = Colour(255, 190, 80);
 	D2D1::ColorF LootColour = Colour(120, 255, 140);
 	D2D1::ColorF VehicleColour = Colour(120, 190, 255);
 	D2D1::ColorF GrenadeColour = Colour(255, 90, 90);
 	D2D1::ColorF ValuableColour = Colour(255, 215, 0);
-	D2D1::ColorF PointOfInterestColour = Colour(200, 150, 255);
-
 	D2D1::ColorF LootNodeColour = Colour(255, 190, 80);
 	D2D1::ColorF SafeDoorColour = Colour(255, 215, 0);
 	D2D1::ColorF StorageBoxColour = Colour(255, 170, 60);
@@ -119,7 +119,6 @@ public:
 		j[ConfigName][LIT("Vehicles")] = Vehicles;
 		j[ConfigName][LIT("Grenades")] = Grenades;
 		j[ConfigName][LIT("Valuables")] = Valuables;
-		j[ConfigName][LIT("PointsOfInterest")] = PointsOfInterest;
 		j[ConfigName][LIT("ShowEmpty")] = ShowEmpty;
 		j[ConfigName][LIT("ShowDistance")] = ShowDistance;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
@@ -147,15 +146,16 @@ public:
 		ToJsonBool(&j, LIT("CryptoWorkbenches"), CryptoWorkbenches);
 		ToJsonBool(&j, LIT("VehicleTrunks"), VehicleTrunks);
 		ToJsonBool(&j, LIT("DrugWorkbenches"), DrugWorkbenches);
+		ToJsonBool(&j, LIT("Weed"), Weed);
 		ToJsonBool(&j, LIT("DefenseBlocks"), DefenseBlocks);
+		ToJsonBool(&j, LIT("HouseEsp"), HouseEsp);
+		j[ConfigName][LIT("HouseMaxDistance")] = HouseMaxDistance;
 
 		ToJsonColour(&j, LIT("ContainerColour"), &ContainerColour);
 		ToJsonColour(&j, LIT("LootColour"), &LootColour);
 		ToJsonColour(&j, LIT("VehicleColour"), &VehicleColour);
 		ToJsonColour(&j, LIT("GrenadeColour"), &GrenadeColour);
 		ToJsonColour(&j, LIT("ValuableColour"), &ValuableColour);
-		ToJsonColour(&j, LIT("PointOfInterestColour"), &PointOfInterestColour);
-
 		ToJsonColour(&j, LIT("LootNodeColour"), &LootNodeColour);
 		ToJsonColour(&j, LIT("SafeDoorColour"), &SafeDoorColour);
 		ToJsonColour(&j, LIT("StorageBoxColour"), &StorageBoxColour);
@@ -190,7 +190,6 @@ public:
 		Vehicles = j[ConfigName].value(LIT("Vehicles"), Vehicles);
 		Grenades = j[ConfigName].value(LIT("Grenades"), Grenades);
 		Valuables = j[ConfigName].value(LIT("Valuables"), Valuables);
-		PointsOfInterest = j[ConfigName].value(LIT("PointsOfInterest"), PointsOfInterest);
 		ShowEmpty = j[ConfigName].value(LIT("ShowEmpty"), ShowEmpty);
 		ShowDistance = j[ConfigName].value(LIT("ShowDistance"), ShowDistance);
 		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
@@ -218,15 +217,16 @@ public:
 		FromJsonBool(j, LIT("CryptoWorkbenches"), &CryptoWorkbenches);
 		FromJsonBool(j, LIT("VehicleTrunks"), &VehicleTrunks);
 		FromJsonBool(j, LIT("DrugWorkbenches"), &DrugWorkbenches);
+		FromJsonBool(j, LIT("Weed"), &Weed);
 		FromJsonBool(j, LIT("DefenseBlocks"), &DefenseBlocks);
+		FromJsonBool(j, LIT("HouseEsp"), &HouseEsp);
+		HouseMaxDistance = j[ConfigName].value(LIT("HouseMaxDistance"), HouseMaxDistance);
 
 		FromJsonColour(j, LIT("ContainerColour"), &ContainerColour);
 		FromJsonColour(j, LIT("LootColour"), &LootColour);
 		FromJsonColour(j, LIT("VehicleColour"), &VehicleColour);
 		FromJsonColour(j, LIT("GrenadeColour"), &GrenadeColour);
 		FromJsonColour(j, LIT("ValuableColour"), &ValuableColour);
-		FromJsonColour(j, LIT("PointOfInterestColour"), &PointOfInterestColour);
-
 		FromJsonColour(j, LIT("LootNodeColour"), &LootNodeColour);
 		FromJsonColour(j, LIT("SafeDoorColour"), &SafeDoorColour);
 		FromJsonColour(j, LIT("StorageBoxColour"), &StorageBoxColour);

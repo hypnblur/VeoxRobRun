@@ -261,11 +261,9 @@ bool VerifyFingerprint()
     std::uint32_t signature = 0;
     if (!ReadBytes(nt, &signature, sizeof(signature)) || signature != 0x00004550u)
         return false;
-    std::uint32_t timestamp = 0;
     std::uint32_t sizeOfImage = 0;
-    if (!ReadBytes(nt + 0x08, &timestamp, sizeof(timestamp))) return false;
     if (!ReadBytes(nt + 0x50, &sizeOfImage, sizeof(sizeOfImage))) return false;
-    return timestamp == rr::kPeTimestamp && sizeOfImage == rr::kPeSizeOfImage;
+    return sizeOfImage == rr::kPeSizeOfImage;
 }
 
 namespace {

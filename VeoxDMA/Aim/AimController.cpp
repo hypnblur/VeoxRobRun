@@ -75,6 +75,7 @@ constexpr std::uint64_t kWriteIntervalMs = 16;
 
 std::uint64_t g_observation = 0;
 int g_lastTarget = -1;
+std::uint64_t g_lastTargetSwitchMs = 0;
 bool g_wasAiming = false;
 DebugInfo g_debug{};
 
@@ -923,6 +924,10 @@ void Tick()
     Vector2 bestScreen{};
     float bestScore = 0.f;
     int bestLeadMs = 0;
+    bool lastValid = false;
+    Vector3 lastPoint{};
+    Vector2 lastScreen{};
+    int lastLeadMs = 0;
     // If the local transform could not be resolved the origin would reject
     // every target on distance, so only apply the range filter when we have a
     // real local position.
@@ -937,6 +942,7 @@ void Tick()
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
+        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
         if (ShouldSkipByRole(ent, cfg)) continue;
         // Visibility and wall occlusion gate
         if (cfg.VisibleBonesOnly && !ent.visible) continue;
@@ -994,6 +1000,13 @@ void Tick()
         if (!RobRunReader::ProjectWorld(viewProjection, point, width, height, screen))
             continue;
 
+        if (ent.entityId == g_lastTarget) {
+            lastValid = true;
+            lastScreen = screen;
+            lastPoint = point;
+            lastLeadMs = leadMs;
+        }
+
         const float dx = screen.x - centerX;
         const float dy = screen.y - centerY;
         const float distance = std::hypot(dx, dy);
@@ -1040,6 +1053,16 @@ void Tick()
         g_lastTarget = -1;
         return;
     }
+    if (bestId != g_lastTarget && g_lastTarget >= 0 && cfg.TargetSwitchDelay > 0 &&
+        lastValid &&
+        (nowMs - g_lastTargetSwitchMs) < static_cast<std::uint64_t>(cfg.TargetSwitchDelay)) {
+        bestId = g_lastTarget;
+        bestScreen = lastScreen;
+        bestPoint = lastPoint;
+        bestLeadMs = lastLeadMs;
+    }
+    if (bestId != g_lastTarget)
+        g_lastTargetSwitchMs = nowMs;
     g_lastTarget = bestId;
     g_debug.target = bestId;
     g_debug.leadMs = bestLeadMs;

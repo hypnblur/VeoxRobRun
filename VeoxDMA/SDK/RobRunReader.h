@@ -84,6 +84,7 @@ struct Snapshot {
     // of milliseconds. They run on their own thread and publish immutable
     // states, so the player/pose pass never waits for them.
     std::shared_ptr<const RobRunWorld::State> world;
+    std::shared_ptr<const RobRunWorld::PlotState> plots;
     std::shared_ptr<const RobRunInventory::State> inventory;
     RobRunCamera::CameraState camera;
     std::int32_t localEntityId = -1;

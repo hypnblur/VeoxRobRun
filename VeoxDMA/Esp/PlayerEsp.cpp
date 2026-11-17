@@ -528,6 +528,8 @@ void DrawPlayers()
 			continue;
 		if (ent.isDead)
 			continue;
+		if (pcfg.HideTeammates && ent.isPartyMember)
+			continue;
 
 		const Vector3 entPos = ent.position;
 
@@ -866,6 +868,9 @@ void DrawPlayers()
 		if (ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
 		if (ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });
 		if (ent.isHandcuffed) stateSegs.push_back({ "[HC]", stateCol });
+		if (pcfg.HiddenPlayerEsp && snapshot->world &&
+			snapshot->world->hiddenEntityIds.count(ent.entityId))
+			stateSegs.push_back({ "[HIDING]", IM_COL32(255, 165, 0, 255) });
 		if (pcfg.ShowRole)
 		{
 			ImU32 roleTextCol = roleCol;

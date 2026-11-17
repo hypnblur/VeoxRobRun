@@ -17,7 +17,7 @@ namespace rr {
 
 inline constexpr const char* kBuild = "26549963";
 inline constexpr std::uint32_t kPeTimestamp = 0x6AF2C76Fu;
-inline constexpr std::uint32_t kPeSizeOfImage = 0x08FC9000u;
+inline constexpr std::uint32_t kPeSizeOfImage = 0x08FF3000u;
 inline constexpr const char* kGameAssemblySha256 =
     "ecd0a4275325fce38c9794576c541891cb8dfaa0b0ac3a38fdd2dc9711ecb81e";
 inline constexpr std::uint32_t kUnityPlayerPeTimestamp = 0x6A28669Fu;
@@ -658,7 +658,6 @@ inline constexpr std::uintptr_t SettlementCash             = 0x650;
 inline constexpr std::uintptr_t FurnitureLoots             = 0x6A0;
 inline constexpr std::uintptr_t BuildingLoots              = 0x6B8;
 inline constexpr std::uintptr_t CashLootNodes              = 0x6E8;
-inline constexpr std::uintptr_t PointOfInterest            = 0x6F0;
 inline constexpr std::uintptr_t CargoSellers               = 0x858;
 inline constexpr std::uintptr_t BarterTraders              = 0x8A8;
 inline constexpr std::uintptr_t FirstAidCabinetModels      = 0x710;
@@ -682,12 +681,123 @@ inline constexpr std::uintptr_t BreachEntities             = 0x5A8;
 inline constexpr std::uintptr_t LocationDoors              = 0x690; // direct 0x210
 inline constexpr std::uintptr_t SafeDoorsRO                = 0x5C8;
 inline constexpr std::uintptr_t DefenseBlockPublicModels   = 0x6F8;
+inline constexpr std::uintptr_t HideObjects               = 0x588;
+}
+
+namespace HideObjectModel {
+inline constexpr std::uintptr_t EntityId    = 0x10; // int, -1 if empty
+inline constexpr std::uintptr_t Description = 0x18; // LocationHideObjectDescription
 }
 
 namespace DefenseBlockPublicModel {
 inline constexpr std::uintptr_t DescriptionModel = 0x10;
+inline constexpr std::uintptr_t RaidLockTs       = 0x18; // IPrimitiveModel<long>
 inline constexpr std::uintptr_t IsRaided         = 0x20; // IPrimitiveModel<bool>
 inline constexpr std::uintptr_t IsSlotsEmpty     = 0x28; // IPrimitiveModel<bool>
+}
+
+// ------------------------------------------------------------------
+// Plot / house models
+// ------------------------------------------------------------------
+namespace PlotModel {
+inline constexpr std::uintptr_t _data              = 0x10;
+inline constexpr std::uintptr_t Id                 = 0x18;
+inline constexpr std::uintptr_t PlotSlotDescription = 0x20;
+inline constexpr std::uintptr_t PlotDescription    = 0x28;
+inline constexpr std::uintptr_t MainBuilding       = 0x58;
+inline constexpr std::uintptr_t CompoundWall       = 0x68;
+inline constexpr std::uintptr_t Outbuildings       = 0x78; // Dictionary<OutbuildingDescription, OutbuildingModel>
+}
+
+namespace PlotDescription {
+inline constexpr std::uintptr_t Position    = 0x10; // inline Vector3
+inline constexpr std::uintptr_t Orientation = 0x1C; // inline Quaternion
+}
+
+namespace PlotData {
+inline constexpr std::uintptr_t OwnerPublicId     = 0x28;
+inline constexpr std::uintptr_t MainBuildingSlot  = 0x40;
+inline constexpr std::uintptr_t CompoundWallSlot  = 0x48;
+inline constexpr std::uintptr_t OutbuildingSlots  = 0x50;
+inline constexpr std::uintptr_t MainBuilding      = 0x58;
+inline constexpr std::uintptr_t Outbuildings      = 0x60;
+inline constexpr std::uintptr_t CompoundWall      = 0x68;
+}
+
+namespace SettlementPlotCommonPartData {
+inline constexpr std::uintptr_t SpotIndex       = 0x20;
+inline constexpr std::uintptr_t IsLocked        = 0x28;
+inline constexpr std::uintptr_t OwnerPublicId   = 0x38;
+inline constexpr std::uintptr_t OwnerNickname   = 0x40; // wrapper string
+inline constexpr std::uintptr_t OwnerClanId     = 0x48;
+inline constexpr std::uintptr_t OwnerClanName   = 0x50; // wrapper string
+inline constexpr std::uintptr_t OwnerClanTag    = 0x58; // wrapper string
+}
+
+namespace PlotSlotModel {
+inline constexpr std::uintptr_t MainBuildingSlot   = 0x10;
+inline constexpr std::uintptr_t CompoundWallSlot   = 0x18;
+inline constexpr std::uintptr_t OutbuildingSlots   = 0x20;
+inline constexpr std::uintptr_t _commonPartData    = 0x30;
+inline constexpr std::uintptr_t _clientPartData    = 0x38;
+inline constexpr std::uintptr_t PlotSlotDescription = 0x40;
+}
+
+namespace PlotEntityModel {
+inline constexpr std::uintptr_t ServerModel         = 0x18; // PlotModel
+inline constexpr std::uintptr_t PlotSlotModel       = 0x20;
+}
+
+namespace MainBuildingModel {
+inline constexpr std::uintptr_t DescriptionModel         = 0x10;
+inline constexpr std::uintptr_t StorageSlots             = 0x38;
+inline constexpr std::uintptr_t Storages                 = 0x40;
+inline constexpr std::uintptr_t ShelvingSlots            = 0x48;
+inline constexpr std::uintptr_t Shelvings                = 0x50;
+inline constexpr std::uintptr_t MoneyWorkbench           = 0x60;
+inline constexpr std::uintptr_t Doors                    = 0x80; // Dict<slot, BuilderDoorModel>
+inline constexpr std::uintptr_t DefenseBlockPublicModel  = 0xA8;
+inline constexpr std::uintptr_t CargoOpenWorkbenches     = 0xC0;
+inline constexpr std::uintptr_t CargoExchangeWorkbenches = 0xC8;
+inline constexpr std::uintptr_t LaunderingCableModel     = 0xD0;
+}
+
+namespace OutbuildingModel {
+inline constexpr std::uintptr_t DescriptionModel         = 0x10;
+inline constexpr std::uintptr_t StorageSlots             = 0x48;
+inline constexpr std::uintptr_t Storages                 = 0x50;
+inline constexpr std::uintptr_t ShelvingSlots            = 0x58;
+inline constexpr std::uintptr_t Shelvings                = 0x60;
+inline constexpr std::uintptr_t Doors                    = 0x80; // Dict<slot, BuilderDoorModel>
+inline constexpr std::uintptr_t DefenseBlockPublicModel  = 0x98;
+inline constexpr std::uintptr_t CargoOpenWorkbenches     = 0xB0;
+inline constexpr std::uintptr_t CargoExchangeWorkbenches = 0xB8;
+inline constexpr std::uintptr_t CryptoWorkbenchModels    = 0xC0;
+inline constexpr std::uintptr_t CargoProductionWorkbenches = 0xC8;
+inline constexpr std::uintptr_t CargoChargeWorkbenches   = 0xD0;
+}
+
+namespace CompoundWallModel {
+inline constexpr std::uintptr_t DescriptionModel        = 0x10;
+inline constexpr std::uintptr_t Doors                   = 0x28; // Dict<slot, BuilderDoorModel>
+inline constexpr std::uintptr_t DefenseBlockPublicModel = 0x58;
+}
+
+namespace DescriptionModelT {
+inline constexpr std::uintptr_t Value = 0x10; // T* (the description ref)
+}
+
+namespace IdentifiedBase {
+inline constexpr std::uintptr_t Id    = 0x10; // System.String
+inline constexpr std::uintptr_t Index = 0x18; // int32
+}
+
+namespace DoorModelOffset {
+inline constexpr std::uintptr_t State = 0x30; // DoorStateModel
+}
+
+namespace DoorStateModelOffset {
+inline constexpr std::uintptr_t _state = 0x10; // IPrimitiveData<DoorStateDescription>
 }
 
 namespace ContainerModel {
@@ -849,11 +959,6 @@ inline constexpr std::uintptr_t Position = 0x18;
 
 namespace BuildingLootModel {
 inline constexpr std::uintptr_t Position = 0x18;
-}
-
-namespace PointOfInterestModel {
-inline constexpr std::uintptr_t Description         = 0x38;
-inline constexpr std::uintptr_t DescriptionPosition = 0x30;
 }
 
 // ------------------------------------------------------------------

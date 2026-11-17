@@ -12,6 +12,7 @@
 #include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
 #include "Input/InputManager.h"
+#include "Input/DeviceSession.h"
 #include "UI/VeoxMenu.h"
 #include "ImGUI/imgui.h"
 #include "Overlay/Overlay.h"
@@ -160,6 +161,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	ConfigFile::Load();
 	DLOG("Config loaded");
 
+	// Auto-connect saved aim device so it's ready before the first frame.
+	{
+		using Base::Hardware::DeviceKind;
+		constexpr DeviceKind deviceKinds[] = { DeviceKind::Off, DeviceKind::KmboxUsb, DeviceKind::KmboxNet,
+			DeviceKind::Makcu, DeviceKind::Controller, DeviceKind::Ferrum, DeviceKind::Medius,
+			DeviceKind::KmboxNbPro };
+		constexpr int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
+		const auto& saved = ConfigInstance.Aim;
+		if (saved.DeviceIndex > 0 && static_cast<unsigned>(saved.DeviceIndex) < std::size(deviceKinds)
+			&& static_cast<unsigned>(saved.BaudIndex) < std::size(baudRates)) {
+			Base::Hardware::DeviceConfig cfg;
+			cfg.kind = deviceKinds[saved.DeviceIndex];
+			cfg.port = saved.ComPort;
+			cfg.ip = saved.IpAddr;
+			cfg.networkPort = saved.NetPort;
+			cfg.mac = saved.MacId;
+			cfg.baud = baudRates[saved.BaudIndex];
+			cfg.manualPort = saved.ManualPort || cfg.kind == DeviceKind::Ferrum;
+			cfg.ferrumController = saved.FerrumController;
+			Base::Hardware::Session().Connect(cfg);
+		}
+	}
+
 	Overlay::Callbacks callbacks;
 	callbacks.init = [] {
 		DLOG("Overlay init callback");
@@ -182,6 +206,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			DrawBvhDebug();
 			if (!ConfigInstance.Overlay.BattleMode) {
 				DrawWorldEntities();
+				DrawHouseInfo();
 				Radar::Draw();
 				Radar::DrawFullMap();
 			}

@@ -50,6 +50,8 @@ public:
 	bool ShowStamina = true;
 	bool SpectatorAlert = true;
 	bool WeaponSprite = true;
+	bool HideTeammates = false;
+	bool HiddenPlayerEsp = true;
 
 	D2D1::ColorF NameColour = Colour(255, 255, 255);
 	D2D1::ColorF DistanceColour = Colour(200, 200, 200);
@@ -182,6 +184,8 @@ public:
         j[ConfigName][LIT("OffscreenArrows")] = OffscreenArrows;
         j[ConfigName][LIT("OffscreenRadius")] = OffscreenRadius;
         ToJsonColour(&j, LIT("OffscreenColour"), &OffscreenColour);
+        j[ConfigName][LIT("HideTeammates")] = HideTeammates;
+        j[ConfigName][LIT("HiddenPlayerEsp")] = HiddenPlayerEsp;
         j[ConfigName][LIT("HeadDot")] = HeadDot;
         j[ConfigName][LIT("HeadDotRadius")] = HeadDotRadius;
         ToJsonColour(&j, LIT("HeadDotColour"), &HeadDotColour);
@@ -253,6 +257,8 @@ public:
         OffscreenArrows = j[ConfigName].value(LIT("OffscreenArrows"), OffscreenArrows);
         OffscreenRadius = j[ConfigName].value(LIT("OffscreenRadius"), OffscreenRadius);
         FromJsonColour(j, LIT("OffscreenColour"), &OffscreenColour);
+        HideTeammates = j[ConfigName].value(LIT("HideTeammates"), HideTeammates);
+        HiddenPlayerEsp = j[ConfigName].value(LIT("HiddenPlayerEsp"), HiddenPlayerEsp);
         HeadDot = j[ConfigName].value(LIT("HeadDot"), HeadDot);
         HeadDotRadius = j[ConfigName].value(LIT("HeadDotRadius"), HeadDotRadius);
         FromJsonColour(j, LIT("HeadDotColour"), &HeadDotColour);

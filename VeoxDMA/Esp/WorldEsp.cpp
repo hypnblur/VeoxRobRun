@@ -3,6 +3,7 @@
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "EspDraw.h"
+#include "../SDK/RobRunMemory.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
 #include <cmath>
@@ -64,8 +65,6 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.FirstAidCabinets;
 	case RobRunWorld::Kind::VehicleTrunk:
 		return world.Containers || world.VehicleTrunks;
-	case RobRunWorld::Kind::PointOfInterest:
-		return world.PointsOfInterest;
 	case RobRunWorld::Kind::DrugWorkbench:
 		return world.DrugWorkbenches;
 	case RobRunWorld::Kind::DefenseBlock:
@@ -130,8 +129,6 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.FirstAidColour);
 	case RobRunWorld::Kind::VehicleTrunk:
 		return Esp::D2DColorToImU32(world.VehicleTrunkColour);
-	case RobRunWorld::Kind::PointOfInterest:
-		return Esp::D2DColorToImU32(world.PointOfInterestColour);
 	case RobRunWorld::Kind::DrugWorkbench:
 		return Esp::D2DColorToImU32(world.DrugWorkbenchColour);
 	case RobRunWorld::Kind::DefenseBlock:
@@ -204,6 +201,18 @@ void DrawWorldEntities()
 		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
 
 		std::string label = entity.label;
+
+		// Rename "Bush" → "Weed" in display labels + optional hide
+		{
+			bool isBush = false;
+			for (std::size_t p = 0; (p = label.find("Bush", p)) != std::string::npos; p += 4) {
+				label.replace(p, 4, "Weed");
+				isBush = true;
+			}
+			if (isBush && !ConfigInstance.World.Weed)
+				continue;
+		}
+
 		if (entity.hasCashAmount) {
 			label += " | $" + FormatCash(entity.cashAmount);
 			if (entity.kind == RobRunWorld::Kind::MoneyWorkbench && entity.cleanCash > 0 && entity.dirtyCash > 0) {
@@ -226,5 +235,175 @@ void DrawWorldEntities()
 		Esp::DrawOutlinedText(dl,
 			ImVec2(screen.x - textSize.x * 0.5f, screen.y - textSize.y - 4.f),
 			colour, useFont, fontSize, label.c_str());
+	}
+}
+
+// --- House info popup panel -----------------------------------------------
+
+static void DrawBuildingLine(ImDrawList* dl, ImVec2& cursor, float indent,
+	const RobRunWorld::BuildingInfo& b, ImFont* font, float fs)
+{
+	if (b.name.empty()) return;
+	std::string line = b.name;
+	if (b.hasDefense) {
+		line += b.isFusesEmpty ? "  [no fuses]" : "  [armed]";
+		if (b.isRaided) line += "  RAIDED";
+	}
+	if (b.doorCount > 0)
+		line += "  doors:" + std::to_string(b.doorsOpen) + "/" + std::to_string(b.doorCount);
+
+	const ImU32 col = b.isRaided ? IM_COL32(255, 80, 80, 255) :
+		(b.isFusesEmpty ? IM_COL32(255, 200, 60, 255) : IM_COL32(200, 255, 200, 255));
+	Esp::DrawOutlinedText(dl, ImVec2(cursor.x + indent, cursor.y), col, font, fs, line.c_str());
+	cursor.y += fs + 2.f;
+}
+
+void DrawHouseInfo()
+{
+	const auto& cfg = ConfigInstance.World;
+	if (!cfg.Enabled || !cfg.HouseEsp)
+		return;
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	const int screenW = (int)display.x;
+	const int screenH = (int)display.y;
+	if (screenW <= 0 || screenH <= 0) return;
+
+	const auto snapshot = RobRunReader::GetSnapshot();
+	if (!snapshot || !snapshot->plots || !snapshot->plots->valid) return;
+
+	Matrix4x4 viewProjection{};
+	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
+		return;
+
+	const Vector3 localPos = snapshot->localPosition;
+	const bool haveLocal = !localPos.IsZero();
+	const float cx = display.x * 0.5f;
+	const float cy = display.y * 0.5f;
+	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	ImFont* font = ImGui::GetFont();
+	const float fs = (float)cfg.FontSize;
+
+	// Find the house closest to screen center within range
+	const RobRunWorld::PlotInfo* best = nullptr;
+	float bestDist2 = FLT_MAX;
+	Vector2 bestScreen{};
+	int bestMetres = 0;
+
+	for (const auto& plot : snapshot->plots->plots) {
+		const float dx = plot.position.x - localPos.x;
+		const float dy = plot.position.y - localPos.y;
+		const float dz = plot.position.z - localPos.z;
+		const int metres = (int)std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (haveLocal && metres > cfg.HouseMaxDistance) continue;
+
+		Vector2 screen;
+		if (!RobRunReader::ProjectWorld(viewProjection, plot.position, screenW, screenH, screen))
+			continue;
+
+		const float sx = screen.x - cx;
+		const float sy = screen.y - cy;
+		const float d2 = sx * sx + sy * sy;
+		if (d2 < bestDist2) {
+			bestDist2 = d2;
+			best = &plot;
+			bestScreen = screen;
+			bestMetres = metres;
+		}
+	}
+
+	if (!best) return;
+	// Only show when looking roughly at the house (within 15% of screen)
+	const float threshold = display.x * 0.15f;
+	if (bestDist2 > threshold * threshold) return;
+
+	// Resolve owner name from player list
+	std::string ownerLabel;
+	if (!best->ownerName.empty() && best->ownerName[0] >= '0' && best->ownerName[0] <= '9') {
+		const std::uint64_t pubId = std::stoull(best->ownerName);
+		for (const auto& e : snapshot->entities) {
+			if (e.publicId == pubId && !e.nickname.empty()) {
+				ownerLabel = RobRunMemory::WideToUtf8(e.nickname);
+				break;
+			}
+		}
+	} else if (!best->ownerName.empty()) {
+		ownerLabel = best->ownerName;
+	}
+	if (ownerLabel.empty()) ownerLabel = "No owner";
+
+	// --- Draw the panel ---
+	const float panelX = bestScreen.x + 20.f;
+	float panelY = bestScreen.y - 20.f;
+	const float lineH = fs + 2.f;
+	const float indent = 10.f;
+	ImVec2 cursor(panelX, panelY);
+
+	// Header: slot / owner / distance
+	{
+		std::string header = "Slot " + std::to_string(best->slotIndex);
+		if (!ownerLabel.empty()) header += " | " + ownerLabel;
+		header += " [" + std::to_string(bestMetres) + "m]";
+		Esp::DrawOutlinedText(dl, cursor, IM_COL32(255, 255, 255, 255), font, fs + 2.f, header.c_str());
+		cursor.y += fs + 6.f;
+	}
+
+	// DEFENCE
+	{
+		bool anyRaided = false;
+		bool allEmpty = true;
+		int totalDoors = 0, totalOpen = 0;
+
+		auto accum = [&](const RobRunWorld::BuildingInfo& b) {
+			if (b.hasDefense) {
+				if (b.isRaided) anyRaided = true;
+				if (!b.isFusesEmpty) allEmpty = false;
+			}
+			totalDoors += b.doorCount;
+			totalOpen += b.doorsOpen;
+		};
+		accum(best->mainBuilding);
+		accum(best->compoundWall);
+		for (const auto& ob : best->outbuildings) accum(ob);
+
+		Esp::DrawOutlinedText(dl, cursor, IM_COL32(255, 160, 60, 255), font, fs, "DEFENCE");
+		cursor.y += lineH;
+
+		std::string raidStatus = anyRaided ? "Raided" : "Not raided";
+		std::string fuseStatus = allEmpty ? "No fuses" : "Fuses armed";
+		std::string doorStatus = "Doors: " + std::to_string(totalOpen) + "/" + std::to_string(totalDoors) + " open";
+
+		Esp::DrawOutlinedText(dl, ImVec2(cursor.x + indent, cursor.y),
+			anyRaided ? IM_COL32(255, 80, 80, 255) : IM_COL32(200, 255, 200, 255),
+			font, fs, raidStatus.c_str());
+		cursor.y += lineH;
+
+		Esp::DrawOutlinedText(dl, ImVec2(cursor.x + indent, cursor.y),
+			allEmpty ? IM_COL32(255, 200, 60, 255) : IM_COL32(200, 255, 200, 255),
+			font, fs, fuseStatus.c_str());
+		cursor.y += lineH;
+
+		if (best->mainBuilding.hasDefense && best->mainBuilding.raidLockTs > 0) {
+			Esp::DrawOutlinedText(dl, ImVec2(cursor.x + indent, cursor.y),
+				IM_COL32(255, 120, 120, 255), font, fs, "Raid locked");
+			cursor.y += lineH;
+		}
+
+		Esp::DrawOutlinedText(dl, ImVec2(cursor.x + indent, cursor.y),
+			IM_COL32(220, 220, 220, 255), font, fs, doorStatus.c_str());
+		cursor.y += lineH + 2.f;
+	}
+
+	// BUILDINGS
+	{
+		Esp::DrawOutlinedText(dl, cursor, IM_COL32(100, 200, 255, 255), font, fs, "BUILDINGS");
+		cursor.y += lineH;
+
+		DrawBuildingLine(dl, cursor, indent, best->mainBuilding, font, fs);
+		if (!best->compoundWall.name.empty())
+			DrawBuildingLine(dl, cursor, indent, best->compoundWall, font, fs);
+		for (const auto& ob : best->outbuildings)
+			DrawBuildingLine(dl, cursor, indent, ob, font, fs);
+		cursor.y += 2.f;
 	}
 }

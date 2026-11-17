@@ -161,6 +161,8 @@ static std::shared_ptr<const RobRunWorld::State> g_worldState =
     std::make_shared<RobRunWorld::State>();
 static std::shared_ptr<const RobRunInventory::State> g_inventoryState =
     std::make_shared<RobRunInventory::State>();
+static std::shared_ptr<const RobRunWorld::PlotState> g_plotState =
+    std::make_shared<RobRunWorld::PlotState>();
 static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
@@ -560,6 +562,7 @@ static void PublishSnapshot()
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
         snapshot->world = g_worldState;
+        snapshot->plots = g_plotState;
         snapshot->inventory = g_inventoryState;
     }
     snapshot->camera = cameraState;
@@ -669,6 +672,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
         g_worldState = std::make_shared<RobRunWorld::State>();
+        g_plotState = std::make_shared<RobRunWorld::PlotState>();
         g_inventoryState = std::make_shared<RobRunInventory::State>();
     }
     worldRefreshStamp = 0;
@@ -723,6 +727,13 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 if (RobRunWorld::Read(bm, be, *state)) {
                     std::lock_guard<std::mutex> lock(g_worldMutex);
                     g_worldState = std::move(state);
+                }
+                if (be > 0x10000) {
+                    auto plots = std::make_shared<RobRunWorld::PlotState>();
+                    if (RobRunWorld::ReadPlots(be, *plots)) {
+                        std::lock_guard<std::mutex> lock(g_worldMutex);
+                        g_plotState = std::move(plots);
+                    }
                 }
             }
             if (lc > 0x10000) {
@@ -994,6 +1005,7 @@ static std::string NormalizeRoleName(const std::string& raw)
         return "Police Officer";
     if (lower.find("civil") != std::string::npos ||
         lower.find("citizen") != std::string::npos ||
+        lower.find("settler") != std::string::npos ||
         lower.find("bystander") != std::string::npos ||
         lower.find("npc") != std::string::npos)
         return "Civilian";
@@ -1850,6 +1862,7 @@ static void UpdateInternal()
         {
             std::lock_guard<std::mutex> lock(g_worldMutex);
             g_worldState = std::make_shared<RobRunWorld::State>();
+            g_plotState = std::make_shared<RobRunWorld::PlotState>();
             g_inventoryState = std::make_shared<RobRunInventory::State>();
         }
         worldRefreshStamp = 0;

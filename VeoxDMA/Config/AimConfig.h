@@ -61,6 +61,7 @@ public:
 	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
 	bool HardLock = false;        // keep the current target outside the FOV
+	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
@@ -73,6 +74,7 @@ public:
 	bool ExpIgnoreCriminal = false;
 	bool ExpIgnoreCivilian = false;
 	bool ExpIgnoreTeammates = true;
+	bool SkipKnocked = true;
 
 	// Manually trusted players (by publicId / account id). Aimbot skips these
 	// the same way it skips party members when ExpIgnoreTeammates is on.
@@ -111,6 +113,7 @@ public:
 		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
 		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
 		j[ConfigName][LIT("HardLock")] = HardLock;
+		j[ConfigName][LIT("TargetSwitchDelay")] = TargetSwitchDelay;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
 		j[ConfigName][LIT("NoSpread")] = NoSpread;
 		j[ConfigName][LIT("DynamicRecoilCompensation")] = DynamicRecoilCompensation;
@@ -119,6 +122,7 @@ public:
 		j[ConfigName][LIT("ExpIgnoreCriminal")] = ExpIgnoreCriminal;
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
+		j[ConfigName][LIT("SkipKnocked")] = SkipKnocked;
 		{
 			json arr = json::array();
 			for (auto id : TrustedPlayers) arr.push_back(std::to_string(id));
@@ -159,6 +163,7 @@ public:
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
+		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
 		NoSpread = j[ConfigName].value(LIT("NoSpread"), NoSpread);
 		DynamicRecoilCompensation = j[ConfigName].value(LIT("DynamicRecoilCompensation"), DynamicRecoilCompensation);
@@ -167,6 +172,7 @@ public:
 		ExpIgnoreCriminal = j[ConfigName].value(LIT("ExpIgnoreCriminal"), ExpIgnoreCriminal);
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
 		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
+		SkipKnocked = j[ConfigName].value(LIT("SkipKnocked"), SkipKnocked);
 		if (j[ConfigName].contains(LIT("TrustedPlayers"))) {
 			TrustedPlayers.clear();
 			for (const auto& v : j[ConfigName][LIT("TrustedPlayers")])

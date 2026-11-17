@@ -970,9 +970,11 @@ void DrawVisuals()
 
 	ImGui::BeginGroup();
 	{
-		if (MatchAny({ "Box ESP", "Health", "Distance", "Snaplines", "Off-Screen Indicators", "Head Dot" }))
+		if (MatchAny({ "Box ESP", "Health", "Distance", "Snaplines", "Off-Screen Indicators", "Head Dot", "Hide Teammates", "Hidden Player ESP" }))
 		{
 			BeginCard("PLAYER ESP", kCardW);
+			ToggleRow("Hide Teammates", &ConfigInstance.Player.HideTeammates);
+			ToggleRow("Hidden Player ESP", &ConfigInstance.Player.HiddenPlayerEsp);
 			ColorToggleRow("Box ESP", &ConfigInstance.Player.BoxEsp, ConfigInstance.Player.BoxColour);
 			ColorToggleRow("Health", &ConfigInstance.Player.Health, ConfigInstance.Player.HealthTextColour);
 			ColorToggleRow("Distance", &ConfigInstance.Player.Distance, ConfigInstance.Player.DistanceColour);
@@ -1152,7 +1154,10 @@ void DrawVisuals()
 			ToggleRow("Crypto Workbenches", &ConfigInstance.World.CryptoWorkbenches);
 			ToggleRow("Vehicle Trunks", &ConfigInstance.World.VehicleTrunks);
 			ToggleRow("Drug Labs", &ConfigInstance.World.DrugWorkbenches);
+			ToggleRow("Weed", &ConfigInstance.World.Weed);
 			ToggleRow("Defense Blocks", &ConfigInstance.World.DefenseBlocks);
+			ToggleRow("House Info", &ConfigInstance.World.HouseEsp);
+			SliderIntRow("House Range", &ConfigInstance.World.HouseMaxDistance, 50, 1000, "m");
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
 			SliderIntRow("Min Cash / Value", &ConfigInstance.World.MinValueFilter, 0, 50000, " $");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
@@ -1512,6 +1517,7 @@ void DrawAim()
 			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
 		}
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
+		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, "ms");
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -1537,6 +1543,7 @@ void DrawAim()
 		ToggleRow("Skip Police Officer targets", &ConfigInstance.Aim.ExpIgnorePolice);
 		ToggleRow("Skip Criminal targets", &ConfigInstance.Aim.ExpIgnoreCriminal);
 		ToggleRow("Skip Civilian targets", &ConfigInstance.Aim.ExpIgnoreCivilian);
+		ToggleRow("Skip Knocked Players", &ConfigInstance.Aim.SkipKnocked);
 		ToggleRow("Ignore Teammates", &ConfigInstance.Aim.ExpIgnoreTeammates);
 		if (ConfigInstance.Aim.ExpIgnoreTeammates)
 			Note("Uses party membership, not role: same-role players outside your party stay targetable.");
