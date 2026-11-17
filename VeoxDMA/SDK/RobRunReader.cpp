@@ -3256,6 +3256,11 @@ void ReloadBvh()
     TryLoadBvh(true);
 }
 
+const CollisionBVH::Scene& GetBvhScene()
+{
+    return g_bvhScene;
+}
+
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin)
 {
     if (!g_bvhScene.valid) return false;

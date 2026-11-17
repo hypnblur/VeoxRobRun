@@ -179,6 +179,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			DLOG("Draw frame #%d", frameCount);
 		try {
 			DrawPlayers();
+			DrawBvhDebug();
 			if (!ConfigInstance.Overlay.BattleMode) {
 				DrawWorldEntities();
 				Radar::Draw();

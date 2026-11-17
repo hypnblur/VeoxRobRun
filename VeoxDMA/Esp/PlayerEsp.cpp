@@ -1001,3 +1001,67 @@ void DrawPlayers()
 		DLOG("DrawPlayers UNKNOWN EXCEPTION #%d", drawCount);
 	}
 }
+
+void DrawBvhDebug()
+{
+	if (!ConfigInstance.Player.ShowBvh) return;
+
+	const auto& scene = RobRunReader::GetBvhScene();
+	if (!scene.valid || scene.nodes.empty()) return;
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	const int screenW = (int)display.x;
+	const int screenH = (int)display.y;
+	if (screenW <= 0 || screenH <= 0) return;
+
+	Matrix4x4 vp{};
+	if (!RobRunReader::ResolveViewProjection(vp, screenW, screenH)) return;
+
+	const auto snapshot = RobRunReader::GetSnapshot();
+	if (!snapshot) return;
+	const Vector3 cam = snapshot->localPosition;
+	const float maxDist = (float)ConfigInstance.Player.BvhDrawDist;
+	const float maxDistSq = maxDist * maxDist;
+
+	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	const ImU32 col = IM_COL32(0, 255, 255, 80);
+
+	for (const auto& node : scene.nodes) {
+		if (!node.isLeaf()) continue;
+
+		const float cx = (node.aabbMin.x + node.aabbMax.x) * 0.5f;
+		const float cy = (node.aabbMin.y + node.aabbMax.y) * 0.5f;
+		const float cz = (node.aabbMin.z + node.aabbMax.z) * 0.5f;
+		const float dx = cx - cam.x, dy = cy - cam.y, dz = cz - cam.z;
+		if (dx*dx + dy*dy + dz*dz > maxDistSq) continue;
+
+		Vector3 corners[8] = {
+			{node.aabbMin.x, node.aabbMin.y, node.aabbMin.z},
+			{node.aabbMax.x, node.aabbMin.y, node.aabbMin.z},
+			{node.aabbMax.x, node.aabbMax.y, node.aabbMin.z},
+			{node.aabbMin.x, node.aabbMax.y, node.aabbMin.z},
+			{node.aabbMin.x, node.aabbMin.y, node.aabbMax.z},
+			{node.aabbMax.x, node.aabbMin.y, node.aabbMax.z},
+			{node.aabbMax.x, node.aabbMax.y, node.aabbMax.z},
+			{node.aabbMin.x, node.aabbMax.y, node.aabbMax.z},
+		};
+
+		Vector2 sc[8];
+		bool allOk = true;
+		for (int i = 0; i < 8; ++i) {
+			if (!RobRunReader::ProjectWorld(vp, corners[i], screenW, screenH, sc[i])) {
+				allOk = false; break;
+			}
+		}
+		if (!allOk) continue;
+
+		static const int edges[12][2] = {
+			{0,1},{1,2},{2,3},{3,0},
+			{4,5},{5,6},{6,7},{7,4},
+			{0,4},{1,5},{2,6},{3,7},
+		};
+		for (const auto& e : edges)
+			dl->AddLine(ImVec2(sc[e[0]].x, sc[e[0]].y),
+			            ImVec2(sc[e[1]].x, sc[e[1]].y), col, 1.0f);
+	}
+}

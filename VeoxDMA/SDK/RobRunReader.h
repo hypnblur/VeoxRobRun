@@ -9,6 +9,7 @@
 #include "Inventory.h"
 #include "WorldEntities.h"
 #include "SkeletonExtractor.h"
+#include "CollisionBVH.h"
 
 namespace RobRunReader {
 
@@ -216,6 +217,7 @@ struct BvhStatus {
 };
 BvhStatus GetBvhStatus();
 void ReloadBvh();
+const CollisionBVH::Scene& GetBvhScene();
 
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f);
 bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f);

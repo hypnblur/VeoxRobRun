@@ -1018,7 +1018,7 @@ void DrawVisuals()
 		}
 
 		if (MatchAny({ "Skeleton", "Draw Skeleton", "Chams", "Character Chams", "Limb Thickness",
-			"VisCheck", "WallCheck", "Interpolate", "Lead", "Native Camera" }))
+			"VisCheck", "WallCheck", "BVH", "Interpolate", "Lead", "Native Camera" }))
 		{
 			BeginCard("SKELETON & CHAMS", kCardW);
 			ToggleRow("Draw Skeleton", &ConfigInstance.Player.Skeleton);
@@ -1066,6 +1066,9 @@ void DrawVisuals()
 				{
 					RobRunReader::ReloadBvh();
 				}
+				ToggleRow("Show BVH", &ConfigInstance.Player.ShowBvh);
+				if (ConfigInstance.Player.ShowBvh)
+					SliderIntRow("Draw Dist", &ConfigInstance.Player.BvhDrawDist, 10, 500, "m");
 			}
 
 			ToggleRow("Pose Smoothing", &ConfigInstance.Player.PoseSmoothing);

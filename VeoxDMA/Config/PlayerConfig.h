@@ -26,6 +26,8 @@ public:
 	D2D1::ColorF HiddenColour = Colour(255, 255, 255); // occluded / culled
 	bool WallCheck = false;
 	std::string BvhPath = "city_colliders.bvh";
+	bool ShowBvh = false;
+	int BvhDrawDist = 100;
 	// Project the ESP with the Unity render camera instead of the managed
 	// BattleCameraModel block. The managed block is read *after* memory aim
 	// writes its angles, so it already matches the frame being rendered; the
@@ -132,6 +134,8 @@ public:
         ToJsonColour(&j, LIT("HiddenColour"), &HiddenColour);
         j[ConfigName][LIT("WallCheck")] = WallCheck;
         j[ConfigName][LIT("BvhPath")] = BvhPath;
+        j[ConfigName][LIT("ShowBvh")] = ShowBvh;
+        j[ConfigName][LIT("BvhDrawDist")] = BvhDrawDist;
         j[ConfigName][LIT("NativeEspCameraV2")] = NativeEspCamera;
         j[ConfigName][LIT("WeaponEsp")] = WeaponEsp;
         j[ConfigName][LIT("LookingAtYou")] = LookingAtYou;
@@ -201,6 +205,8 @@ public:
         FromJsonColour(j, LIT("HiddenColour"), &HiddenColour);
         WallCheck = j[ConfigName].value(LIT("WallCheck"), WallCheck);
         BvhPath = j[ConfigName].value(LIT("BvhPath"), BvhPath);
+        ShowBvh = j[ConfigName].value(LIT("ShowBvh"), ShowBvh);
+        BvhDrawDist = j[ConfigName].value(LIT("BvhDrawDist"), BvhDrawDist);
         NativeEspCamera = j[ConfigName].value(LIT("NativeEspCameraV2"), NativeEspCamera);
         WeaponEsp = j[ConfigName].value(LIT("WeaponEsp"), WeaponEsp);
         LookingAtYou = j[ConfigName].value(LIT("LookingAtYou"), LookingAtYou);
