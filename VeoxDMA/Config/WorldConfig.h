@@ -49,6 +49,7 @@ public:
 	bool CryptoWorkbenches = true;
 	bool VehicleTrunks = true;
 	bool DrugWorkbenches = true;
+	bool DefenseBlocks = true;
 
 	D2D1::ColorF ContainerColour = Colour(255, 190, 80);
 	D2D1::ColorF LootColour = Colour(120, 255, 140);
@@ -79,6 +80,7 @@ public:
 	D2D1::ColorF CryptoWorkbenchColour = Colour(255, 170, 0);
 	D2D1::ColorF VehicleTrunkColour = Colour(140, 180, 255);
 	D2D1::ColorF DrugWorkbenchColour = Colour(0, 220, 100);
+	D2D1::ColorF DefenseBlockColour = Colour(255, 80, 80);
 
 	void ToJsonColour(json* j, const std::string& name, D2D1::ColorF* colour)
 	{
@@ -145,6 +147,7 @@ public:
 		ToJsonBool(&j, LIT("CryptoWorkbenches"), CryptoWorkbenches);
 		ToJsonBool(&j, LIT("VehicleTrunks"), VehicleTrunks);
 		ToJsonBool(&j, LIT("DrugWorkbenches"), DrugWorkbenches);
+		ToJsonBool(&j, LIT("DefenseBlocks"), DefenseBlocks);
 
 		ToJsonColour(&j, LIT("ContainerColour"), &ContainerColour);
 		ToJsonColour(&j, LIT("LootColour"), &LootColour);
@@ -173,6 +176,7 @@ public:
 		ToJsonColour(&j, LIT("CryptoWorkbenchColour"), &CryptoWorkbenchColour);
 		ToJsonColour(&j, LIT("VehicleTrunkColour"), &VehicleTrunkColour);
 		ToJsonColour(&j, LIT("DrugWorkbenchColour"), &DrugWorkbenchColour);
+		ToJsonColour(&j, LIT("DefenseBlockColour"), &DefenseBlockColour);
 		return j;
 	}
 
@@ -214,6 +218,7 @@ public:
 		FromJsonBool(j, LIT("CryptoWorkbenches"), &CryptoWorkbenches);
 		FromJsonBool(j, LIT("VehicleTrunks"), &VehicleTrunks);
 		FromJsonBool(j, LIT("DrugWorkbenches"), &DrugWorkbenches);
+		FromJsonBool(j, LIT("DefenseBlocks"), &DefenseBlocks);
 
 		FromJsonColour(j, LIT("ContainerColour"), &ContainerColour);
 		FromJsonColour(j, LIT("LootColour"), &LootColour);
@@ -242,5 +247,6 @@ public:
 		FromJsonColour(j, LIT("CryptoWorkbenchColour"), &CryptoWorkbenchColour);
 		FromJsonColour(j, LIT("VehicleTrunkColour"), &VehicleTrunkColour);
 		FromJsonColour(j, LIT("DrugWorkbenchColour"), &DrugWorkbenchColour);
+		FromJsonColour(j, LIT("DefenseBlockColour"), &DefenseBlockColour);
 	}
 };

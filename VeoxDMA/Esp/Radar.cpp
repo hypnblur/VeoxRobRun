@@ -277,6 +277,11 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 			dotCol = IM_COL32(0, 220, 100, 230);
 			dotSize = 4.5f;
 			break;
+		case RobRunWorld::Kind::DefenseBlock:
+			show = ConfigInstance.World.DefenseBlocks;
+			dotCol = IM_COL32(255, 80, 80, 230);
+			dotSize = 4.f;
+			break;
 		default:
 			show = ConfigInstance.Radar.ShowLoot;
 			dotCol = IM_COL32(180, 255, 180, 160);

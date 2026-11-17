@@ -48,6 +48,7 @@ const char* KindName(Kind kind)
     case Kind::VehicleTrunk:           return "Vehicle Trunk";
     case Kind::PointOfInterest:        return "Point of Interest";
     case Kind::DrugWorkbench:          return "Drug Lab";
+    case Kind::DefenseBlock:           return "Defense Block";
     }
     return "World";
 }
@@ -750,6 +751,54 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             return ReadInlineField(model, 0x10, position) ||
                    ReadDescriptionPosition(model, 0x18, 0x10, position);
         }, out, out.drugWorkbenches);
+
+    // --- Defense blocks (fuses) -------------------------------------------
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::DefenseBlockPublicModels, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
+
+                // DescriptionModel<LocationDefenseBlockDescription> wrapper at +0x10
+                const std::uintptr_t descWrapper = RobRunMemory::ReadPtr(
+                    model + rr::DefenseBlockPublicModel::DescriptionModel);
+                if (descWrapper <= 0x10000) continue;
+
+                // DescriptionModel.Value at +0x10 (first field after IL2CPP header)
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(descWrapper + 0x10);
+                if (desc <= 0x10000) continue;
+
+                // LocationDefenseBlockDescription.Position at +0x28
+                Vector3 position{};
+                if (!RobRunMemory::ReadVector3(desc + 0x28, position) ||
+                    !ValidPosition(position))
+                    continue;
+
+                bool isRaided = false;
+                bool isSlotsEmpty = false;
+                const std::uintptr_t raidedWrapper = RobRunMemory::ReadPtr(
+                    model + rr::DefenseBlockPublicModel::IsRaided);
+                if (raidedWrapper > 0x10000)
+                    Il2Cpp::ReadPrimitiveBool(raidedWrapper, isRaided);
+                const std::uintptr_t emptyWrapper = RobRunMemory::ReadPtr(
+                    model + rr::DefenseBlockPublicModel::IsSlotsEmpty);
+                if (emptyWrapper > 0x10000)
+                    Il2Cpp::ReadPrimitiveBool(emptyWrapper, isSlotsEmpty);
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::DefenseBlock;
+                entity.position = position;
+                entity.hasEmptyFlag = true;
+                entity.empty = isSlotsEmpty;
+                entity.label = isRaided ? "Fuse [raided]" : "Fuse";
+                out.entities.push_back(std::move(entity));
+                ++out.defenseBlocks;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
 
     return out.valid;
 }

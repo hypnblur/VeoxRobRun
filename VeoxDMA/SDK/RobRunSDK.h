@@ -681,6 +681,13 @@ inline constexpr std::uintptr_t UnlockEntities             = 0x5A0;
 inline constexpr std::uintptr_t BreachEntities             = 0x5A8;
 inline constexpr std::uintptr_t LocationDoors              = 0x690; // direct 0x210
 inline constexpr std::uintptr_t SafeDoorsRO                = 0x5C8;
+inline constexpr std::uintptr_t DefenseBlockPublicModels   = 0x6F8;
+}
+
+namespace DefenseBlockPublicModel {
+inline constexpr std::uintptr_t DescriptionModel = 0x10;
+inline constexpr std::uintptr_t IsRaided         = 0x20; // IPrimitiveModel<bool>
+inline constexpr std::uintptr_t IsSlotsEmpty     = 0x28; // IPrimitiveModel<bool>
 }
 
 namespace ContainerModel {

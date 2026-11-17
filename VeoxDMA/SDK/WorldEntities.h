@@ -36,7 +36,8 @@ enum class Kind {
     CryptoWorkbench,
     VehicleTrunk,
     PointOfInterest,
-    DrugWorkbench
+    DrugWorkbench,
+    DefenseBlock
 };
 
 struct Entity {
@@ -67,6 +68,7 @@ struct State {
     int firstAid = 0;
     int pointsOfInterest = 0;
     int drugWorkbenches = 0;
+    int defenseBlocks = 0;
     std::uintptr_t worldPtr = 0;
 };
 

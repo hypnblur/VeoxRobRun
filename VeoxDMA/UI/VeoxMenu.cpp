@@ -1149,6 +1149,7 @@ void DrawVisuals()
 			ToggleRow("Crypto Workbenches", &ConfigInstance.World.CryptoWorkbenches);
 			ToggleRow("Vehicle Trunks", &ConfigInstance.World.VehicleTrunks);
 			ToggleRow("Drug Labs", &ConfigInstance.World.DrugWorkbenches);
+			ToggleRow("Defense Blocks", &ConfigInstance.World.DefenseBlocks);
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
 			SliderIntRow("Min Cash / Value", &ConfigInstance.World.MinValueFilter, 0, 50000, " $");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");

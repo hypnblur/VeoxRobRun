@@ -68,6 +68,8 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.PointsOfInterest;
 	case RobRunWorld::Kind::DrugWorkbench:
 		return world.DrugWorkbenches;
+	case RobRunWorld::Kind::DefenseBlock:
+		return world.DefenseBlocks;
 	}
 	return true;
 }
@@ -132,6 +134,8 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.PointOfInterestColour);
 	case RobRunWorld::Kind::DrugWorkbench:
 		return Esp::D2DColorToImU32(world.DrugWorkbenchColour);
+	case RobRunWorld::Kind::DefenseBlock:
+		return Esp::D2DColorToImU32(world.DefenseBlockColour);
 	}
 	return IM_COL32(255, 255, 255, 255);
 }
@@ -208,6 +212,8 @@ void DrawWorldEntities()
 		} else if (entity.kind == RobRunWorld::Kind::Container &&
 			ConfigInstance.World.ShowEmpty && entity.hasEmptyFlag) {
 			label += entity.empty ? " [empty]" : " [loot]";
+		} else if (entity.kind == RobRunWorld::Kind::DefenseBlock && entity.hasEmptyFlag) {
+			label += entity.empty ? " [empty]" : " [armed]";
 		}
 		if (ConfigInstance.World.ShowDistance)
 			label += " [" + std::to_string(distance) + "m]";
