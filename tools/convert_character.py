@@ -68,12 +68,13 @@ def parse_mesh_asset(path: str):
         raise ValueError(f"No vertex data in {path}")
     vdata = bytes.fromhex(m.group(1))
 
-    # stream start offsets (sequential in buffer)
+    # stream start offsets (sequential in buffer, 16-byte aligned per Unity VertexData)
     stream_starts = {}
     off = 0
     for sid in sorted(strides.keys()):
         stream_starts[sid] = off
-        off += strides[sid] * vert_count
+        stream_len = strides[sid] * vert_count
+        off = (off + stream_len + 15) & ~15
 
     # channel roles by index:
     #  0=Position  1=Normal  2=Tangent  3=Color
@@ -239,6 +240,69 @@ def row_to_col_major(vals):
     return out
 
 
+CORE_BONES = {
+    0, 1, 2, 3, 4, 39, 40, 41, 42, 46, 59, 60, 61, 62, 66,
+    84, 85, 86, 87, 89, 90, 91, 92,
+}
+
+
+def strip_unmapped_geometry(mesh, allowed_bones=CORE_BONES):
+    """Strip vertices that only bind to unmapped/extra bones (e.g. bag, unmapped fingers)
+    and renormalize mixed vertices to mapped bones.
+    """
+    old_pos = mesh["positions"]
+    old_bi = mesh["bone_indices"]
+    old_bw = mesh["bone_weights"]
+    old_tris = mesh["triangles"]
+
+    new_pos, new_bi, new_bw = [], [], []
+    old_to_new = {}
+
+    for i in range(len(old_pos)):
+        idxs = old_bi[i] if old_bi else (0, 0, 0, 0)
+        wts = old_bw[i] if old_bw else (1.0, 0.0, 0.0, 0.0)
+
+        filtered = [
+            (b, w) for b, w in zip(idxs, wts) if b in allowed_bones and w > 1e-5
+        ]
+        total_w = sum(w for b, w in filtered)
+        if total_w < 0.01:
+            # Vertex exclusively bound to unmapped/bag bones - drop
+            continue
+
+        old_to_new[i] = len(new_pos)
+        new_pos.append(old_pos[i])
+
+        norm = [(b, w / total_w) for b, w in filtered]
+        while len(norm) < 4:
+            norm.append((0, 0.0))
+        norm = norm[:4]
+
+        new_bi.append(tuple(b for b, w in norm))
+        new_bw.append(tuple(w for b, w in norm))
+
+    new_tris = []
+    for a, b, c in old_tris:
+        if a in old_to_new and b in old_to_new and c in old_to_new:
+            new_tris.append((old_to_new[a], old_to_new[b], old_to_new[c]))
+
+    dropped_verts = len(old_pos) - len(new_pos)
+    dropped_tris = len(old_tris) - len(new_tris)
+    print(
+        f"  Stripped bag/extra: dropped {dropped_verts} verts, {dropped_tris} tris "
+        f"({len(new_pos)} verts, {len(new_tris)} tris remain)"
+    )
+
+    return {
+        "positions": new_pos,
+        "bone_indices": new_bi,
+        "bone_weights": new_bw,
+        "triangles": new_tris,
+        "bind_poses": mesh["bind_poses"],
+        "bone_hashes": mesh["bone_hashes"],
+    }
+
+
 def merge_meshes(body, head):
     """Merge body and head into one mesh."""
     nb = len(body["bind_poses"])
@@ -334,31 +398,65 @@ def save_binary(mesh, path):
 
 
 def main():
+    import argparse
+
     export_base = Path(
         r"C:\Users\machine2\Documents\Export\ExportedProject\Assets\Mesh"
     )
 
-    body_path = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else str(export_base / "m_body01_lod4.asset")
-    )
-    head_path = (
-        sys.argv[2]
-        if len(sys.argv) > 2
-        else str(export_base / "m_head01_lod3.asset")
-    )
-    out_path = "character_mesh.bin"
-    for i, arg in enumerate(sys.argv):
-        if arg == "-o" and i + 1 < len(sys.argv):
-            out_path = sys.argv[i + 1]
+    parser = argparse.ArgumentParser(description="Convert character mesh assets to binary.")
+    parser.add_argument("body_pos", nargs="?", default=None, help="Body asset path")
+    parser.add_argument("head_pos", nargs="?", default=None, help="Head asset path")
+    parser.add_argument("--body", "-b", default=None, help="Body asset name or path (e.g. m_body01, m_policebody01)")
+    parser.add_argument("--head", "-H", default=None, help="Head asset name or path (e.g. m_head01)")
+    parser.add_argument("--lod", "-l", type=int, default=4, help="LOD level (0 to 4, default: 4)")
+    parser.add_argument("--strip-bag", "--strip-extra", dest="strip_bag", action="store_true", default=None, help="Strip unmapped bag/equipment geometry from body mesh")
+    parser.add_argument("--no-strip-bag", dest="strip_bag", action="store_false", help="Do not strip bag/equipment geometry")
+    parser.add_argument("-o", "--output", default="character_mesh.bin", help="Output binary file path")
 
-    print(f"[1/4] Parsing body: {Path(body_path).name}")
-    body = parse_mesh_asset(body_path)
+    args = parser.parse_args()
+
+    lod = args.lod
+    strip_bag = args.strip_bag if args.strip_bag is not None else (lod < 4)
+
+    def resolve_asset(arg, default_base, default_lod):
+        if arg:
+            p = Path(arg)
+            if p.exists():
+                return p
+            p_base = export_base / arg
+            if p_base.exists():
+                return p_base
+            # Try with _lod<lod>.asset
+            p_lod = export_base / f"{arg}_lod{lod}.asset"
+            if p_lod.exists():
+                return p_lod
+            p_asset = export_base / f"{arg}.asset"
+            if p_asset.exists():
+                return p_asset
+        # Fallback to default
+        p_def = export_base / f"{default_base}_lod{default_lod}.asset"
+        if p_def.exists():
+            return p_def
+        return export_base / f"{default_base}.asset"
+
+    body_arg = args.body or args.body_pos
+    head_arg = args.head or args.head_pos
+
+    body_path = resolve_asset(body_arg, "m_body01", lod)
+    head_path = resolve_asset(head_arg, "m_head01", min(lod, 3))
+    out_path = args.output
+
+    print(f"[1/4] Parsing body: {body_path.name}")
+    body = parse_mesh_asset(str(body_path))
     validate(body, "body: ")
+    if strip_bag:
+        print("  Stripping bag/extra unmapped geometry from body...")
+        body = strip_unmapped_geometry(body)
+        validate(body, "stripped body: ")
 
-    print(f"[2/4] Parsing head: {Path(head_path).name}")
-    head = parse_mesh_asset(head_path)
+    print(f"[2/4] Parsing head: {head_path.name}")
+    head = parse_mesh_asset(str(head_path))
     validate(head, "head: ")
 
     print("[3/4] Merging...")
@@ -370,7 +468,7 @@ def main():
     print(
         f"\nDone: {len(combined['bind_poses'])} bones, "
         f"{len(combined['positions'])} verts, "
-        f"{len(combined['triangles'])} tris"
+        f"{len(combined['triangles'])} tris -> {out_path}"
     )
 
 

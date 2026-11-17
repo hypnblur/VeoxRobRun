@@ -67,7 +67,7 @@ public:
 	// points directly. PoseSmoothAlpha is the weight of the new sample: 1 keeps
 	// the pose raw, lower values damp jitter from partial or stale reads.
 	bool PoseSmoothing = true;
-	float PoseSmoothAlpha = 0.5f;
+	float PoseSmoothAlpha = 0.4f;
 
 	// Character 3D Capsule Chams (100% read-only DMA overlay silhouette)
 	bool Chams = false;

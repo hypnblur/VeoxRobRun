@@ -258,6 +258,7 @@ struct RigCacheEntry {
     bool smoothedValid = false;
     Vector3 lastSampledPos{};
     std::vector<Matrix4x4> worldMatrices;
+    std::vector<Matrix4x4> smoothedWorldMatrices;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -1185,7 +1186,8 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     const std::uintptr_t common = ReadPtr(data + rr::BattleData::Common);
     if (common <= 0x10000) return;
 
-    ApplyRoleFromWrapper(ReadPtr(common + rr::CommonModel::Role), entity);
+    if (entity.roleName.empty() && entity.role == 0)
+        ApplyRoleFromWrapper(ReadPtr(common + rr::CommonModel::Role), entity);
 
     bool flag = false;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsFiring), flag))
@@ -2408,6 +2410,7 @@ static void UpdateInternal()
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
                 rig.smoothedValid = false;
+                rig.smoothedWorldMatrices.clear();
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
@@ -2446,6 +2449,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.smoothedWorldMatrices.clear();
                     }
                 }
             }
@@ -2687,6 +2691,7 @@ static void UpdateInternal()
                         rig.bones.clear();
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
+                        rig.smoothedWorldMatrices.clear();
                     }
                 } else {
                     rig.poseFailures = 0;
@@ -2752,13 +2757,21 @@ static void UpdateInternal()
                     // extrapolates past the newest pose, which is what made
                     // the old render-side blend shake.
                     if (!isFastMoving && ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
-                        rig.smoothedBones.size() == rig.bones.size()) {
+                        rig.smoothedBones.size() == rig.bones.size() &&
+                        (rig.worldMatrices.empty() || rig.smoothedWorldMatrices.size() == rig.worldMatrices.size())) {
                         const float alpha = std::clamp(
                             ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
                         const float inv = 1.0f - alpha;
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];
                             const auto& r = rig.bones[i];
+                            const float dax = r.a.x-s.a.x, day = r.a.y-s.a.y, daz = r.a.z-s.a.z;
+                            const float dbx = r.b.x-s.b.x, dby = r.b.y-s.b.y, dbz = r.b.z-s.b.z;
+                            if (dax*dax+day*day+daz*daz > 0.25f ||
+                                dbx*dbx+dby*dby+dbz*dbz > 0.25f) {
+                                s.visible = r.visible;
+                                continue;
+                            }
                             s.a.x = s.a.x * inv + r.a.x * alpha;
                             s.a.y = s.a.y * inv + r.a.y * alpha;
                             s.a.z = s.a.z * inv + r.a.z * alpha;
@@ -2768,6 +2781,8 @@ static void UpdateInternal()
                             s.visible = r.visible;
                         }
                         auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
+                            const float dx = src.x-dst.x, dy = src.y-dst.y, dz = src.z-dst.z;
+                            if (dx*dx+dy*dy+dz*dz > 0.25f) return;
                             dst.x = dst.x * inv + src.x * alpha;
                             dst.y = dst.y * inv + src.y * alpha;
                             dst.z = dst.z * inv + src.z * alpha;
@@ -2793,9 +2808,24 @@ static void UpdateInternal()
                         lerpVec(rig.smoothedPoints.rightHip, rig.points.rightHip);
                         lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
                         lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
+
+                        for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
+                            auto& sm = rig.smoothedWorldMatrices[i];
+                            const auto& rm = rig.worldMatrices[i];
+                            const float dx = rm.matrix[3][0]-sm.matrix[3][0];
+                            const float dy = rm.matrix[3][1]-sm.matrix[3][1];
+                            const float dz = rm.matrix[3][2]-sm.matrix[3][2];
+                            if (dx*dx+dy*dy+dz*dz > 0.25f) continue;
+                            for (int r = 0; r < 4; ++r) {
+                                for (int c = 0; c < 4; ++c) {
+                                    sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
+                                }
+                            }
+                        }
                     } else {
                         rig.smoothedBones = rig.bones;
                         rig.smoothedPoints = rig.points;
+                        rig.smoothedWorldMatrices = rig.worldMatrices;
                         rig.smoothedValid = true;
                     }
                 }
@@ -2812,6 +2842,7 @@ static void UpdateInternal()
                     rig.bones = std::move(fallback);
                     rig.points = Skeleton::BonePoints{};
                     rig.smoothedValid = false;
+                    rig.smoothedWorldMatrices.clear();
                 }
             }
 
@@ -2827,13 +2858,17 @@ static void UpdateInternal()
                 if (catchCount++ < 10) DLOG("UpdateInternal: skeleton catch(...) fired for entity %d", entity.entityId);
             }
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=E (bones done)", uiCount);
-            if (!rig.worldMatrices.empty() &&
-                rig.worldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
-                entity.boneWorldMatrices = rig.worldMatrices;
+            const auto& activeWorldMatrices = (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid && !rig.smoothedWorldMatrices.empty())
+                ? rig.smoothedWorldMatrices
+                : rig.worldMatrices;
+            if (!activeWorldMatrices.empty() &&
+                activeWorldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
+                entity.boneWorldMatrices = activeWorldMatrices;
                 entity.boneCount = rig.layout.count;
+                entity.boneMap = rig.layout.boneMap;
                 static bool loggedCopy = false;
                 if (!loggedCopy) {
-                    DLOG("RobRunReader: copied %zu worldMatrices to entity", rig.worldMatrices.size());
+                    DLOG("RobRunReader: copied %zu worldMatrices to entity", activeWorldMatrices.size());
                     loggedCopy = true;
                 }
             }

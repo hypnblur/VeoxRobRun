@@ -47,6 +47,7 @@ struct RigLayout {
     std::vector<std::int32_t> parent;
     std::vector<std::uint8_t> selected;
     std::vector<std::pair<std::int32_t, std::int32_t>> segments;
+    std::vector<std::int32_t> boneMap;
     std::int32_t head = -1;
     std::int32_t neck = -1;
     std::int32_t chest = -1;

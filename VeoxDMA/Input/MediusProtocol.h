@@ -5,11 +5,11 @@
 
 namespace Medius {
 constexpr uint8_t kSof = 0xA5;
-constexpr uint8_t kProtoVer = 9; // Current Medius 3.4.2+ wire/ABI
+constexpr uint8_t kProtoVer = 9; // Medius 3.4.2+ wire format
 constexpr uint8_t kLegacyProtoVer = 8; // Medius 3.4.1
 inline bool IsSupportedVersion(uint8_t version)
 {
-    return version == kProtoVer || version == kLegacyProtoVer;
+    return version >= kLegacyProtoVer && version <= 10;
 }
 constexpr uint32_t kBaud = 6000000;
 constexpr size_t kMaxPayload = 512;

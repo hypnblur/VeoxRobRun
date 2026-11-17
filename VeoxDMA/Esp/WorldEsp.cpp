@@ -7,17 +7,6 @@
 #include <cfloat>
 #include <cmath>
 
-static std::string FormatCash(int amount)
-{
-	std::string s = std::to_string(amount);
-	int n = (int)s.length() - 3;
-	while (n > 0) {
-		s.insert(n, ",");
-		n -= 3;
-	}
-	return s;
-}
-
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
 	const auto& world = ConfigInstance.World;
@@ -184,7 +173,12 @@ void DrawWorldEntities()
 		if (haveLocalPosition && distance > ConfigInstance.World.MaxDistance)
 			continue;
 
-		if (ConfigInstance.World.MinValueFilter > 0)
+		if (ConfigInstance.LootFilter.Enabled && ConfigInstance.LootFilter.FilterByMinPrice && ConfigInstance.LootFilter.MinPrice > 0)
+		{
+			if (entity.hasCashAmount && entity.cashAmount < ConfigInstance.LootFilter.MinPrice)
+				continue;
+		}
+		else if (ConfigInstance.World.MinValueFilter > 0)
 		{
 			if (entity.hasCashAmount && entity.cashAmount < ConfigInstance.World.MinValueFilter)
 				continue;
@@ -195,7 +189,14 @@ void DrawWorldEntities()
 			viewProjection, entity.position, screenW, screenH, screen))
 			continue;
 
-		const ImU32 colour = ColourFor(entity.kind);
+		ImU32 colour = ColourFor(entity.kind);
+		if (ConfigInstance.LootFilter.Enabled && entity.hasCashAmount)
+		{
+			if (entity.cashAmount >= ConfigInstance.LootFilter.HighValueThreshold)
+				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.HighValueColour);
+			else if (entity.cashAmount >= ConfigInstance.LootFilter.MidValueThreshold)
+				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.MidValueColour);
+		}
 		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
 
 		std::string label = entity.label;

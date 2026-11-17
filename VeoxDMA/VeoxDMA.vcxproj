@@ -220,6 +220,7 @@
     <ClInclude Include="Config\WorldConfig.h" />
     <ClInclude Include="Config\AimConfig.h" />
     <ClInclude Include="Config\RadarConfig.h" />
+    <ClInclude Include="Config\LootFilterConfig.h" />
     <ClInclude Include="Esp\PlayerEsp.h" />
     <ClInclude Include="Esp\Radar.h" />
     <ClInclude Include="Esp\WeaponSprites.h" />

@@ -181,6 +181,7 @@ class Backend final : public DeviceBackend {
             if (errors & (CE_OVERRUN | CE_RXOVER)) {
                 PurgeComm(serial, PURGE_RXCLEAR);
                 makcu = {};
+                medius.Reset();
             }
         }
         for (int batch = 0; batch < 8 && status.cbInQue; ++batch) {
@@ -208,9 +209,9 @@ class Backend final : public DeviceBackend {
                 } else if (config.kind == DeviceKind::Medius) {
                     uint8_t type, seq; const uint8_t* payload; size_t n;
                     if (!medius.Feed(bytes[i], type, seq, payload, n)) continue;
+                    lastReply = Clock::now();
                     if (type == Medius::kTypeResp && n >= 1) {
-                        if (payload[0] == Medius::kQueryVersion && n >= 11) { proto = payload[1]; lastReply = Clock::now(); }
-                        else if (payload[0] == Medius::kQueryHealth) lastReply = Clock::now();
+                        if (payload[0] == Medius::kQueryVersion && n >= 11) proto = payload[1];
                     }
                     if (type == Medius::kTypeUsageEvent && n >= 8 && payload[5] == Medius::kClassButton
                         && n >= 8 + 3u * payload[7]) {
@@ -304,7 +305,7 @@ class Backend final : public DeviceBackend {
             if (!proto) return Fail("No Medius version reply at 6 Mbaud; check COM port and firmware");
             if (!Medius::IsSupportedVersion(proto)) {
                 const auto reason = "Medius reported protocol " + std::to_string(proto)
-                    + "; supported protocols are 8 and 9";
+                    + "; supported protocols are 8-10";
                 return Fail(reason.c_str());
             }
             verified = true;
@@ -593,8 +594,8 @@ public:
             injectedKeys = {};
             const uint8_t subscription[] = {Medius::kClassButton, 0xFF, 0xFF, 0, 1, 0};
             const uint8_t resetFlags[] = {0};
-            return Frame(Medius::kTypeReset, proto == Medius::kProtoVer ? resetFlags : nullptr,
-                proto == Medius::kProtoVer ? sizeof(resetFlags) : 0) && AxisLock(false)
+            return Frame(Medius::kTypeReset, proto >= Medius::kProtoVer ? resetFlags : nullptr,
+                proto >= Medius::kProtoVer ? sizeof(resetFlags) : 0) && AxisLock(false)
                 && Frame(Medius::kTypeCatch, subscription, sizeof(subscription));
         }
         if (IsNetworkDevice(config.kind)) {

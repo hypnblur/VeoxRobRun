@@ -5,6 +5,7 @@
 #include "WorldConfig.h"
 #include "AimConfig.h"
 #include "RadarConfig.h"
+#include "LootFilterConfig.h"
 #include <cassert>
 
 class ConfigInstances
@@ -15,18 +16,24 @@ public:
 	WorldConfig World = WorldConfig(LIT("World"));
 	AimConfig Aim = AimConfig(LIT("Aim"));
 	RadarConfig Radar = RadarConfig(LIT("Radar"));
+	LootFilterConfig LootFilter = LootFilterConfig(LIT("LootFilter"));
 
 	static_assert(
 		std::string_view("Player") != std::string_view("Overlay") &&
 		std::string_view("Player") != std::string_view("World") &&
 		std::string_view("Player") != std::string_view("Aim") &&
 		std::string_view("Player") != std::string_view("Radar") &&
+		std::string_view("Player") != std::string_view("LootFilter") &&
 		std::string_view("Overlay") != std::string_view("World") &&
 		std::string_view("Overlay") != std::string_view("Aim") &&
 		std::string_view("Overlay") != std::string_view("Radar") &&
+		std::string_view("Overlay") != std::string_view("LootFilter") &&
 		std::string_view("World") != std::string_view("Aim") &&
 		std::string_view("World") != std::string_view("Radar") &&
-		std::string_view("Aim") != std::string_view("Radar"),
+		std::string_view("World") != std::string_view("LootFilter") &&
+		std::string_view("Aim") != std::string_view("Radar") &&
+		std::string_view("Aim") != std::string_view("LootFilter") &&
+		std::string_view("Radar") != std::string_view("LootFilter"),
 		"Config section names must be unique — merge_patch silently overwrites on collision");
 
 	json ToJson()
@@ -37,6 +44,7 @@ public:
 		jsoned.merge_patch(World.ToJson());
 		jsoned.merge_patch(Aim.ToJson());
 		jsoned.merge_patch(Radar.ToJson());
+		jsoned.merge_patch(LootFilter.ToJson());
 		return jsoned;
 	}
 
@@ -47,6 +55,7 @@ public:
 		World.FromJson(jsoned);
 		Aim.FromJson(jsoned);
 		Radar.FromJson(jsoned);
+		LootFilter.FromJson(jsoned);
 	}
 };
 inline ConfigInstances ConfigInstance;

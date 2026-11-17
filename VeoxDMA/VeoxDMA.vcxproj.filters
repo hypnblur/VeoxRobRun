@@ -127,6 +127,9 @@
     <ClInclude Include="Config\WorldConfig.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Config\LootFilterConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Esp\PlayerEsp.h">
       <Filter>Header Files</Filter>
     </ClInclude>

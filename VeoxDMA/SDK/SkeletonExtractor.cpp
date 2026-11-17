@@ -242,6 +242,153 @@ static bool ResolveViewHierarchy(Snapshot& m, U view, ResolvedHierarchy& out)
     return TryLoadHierarchyFromTransform(m, m.ptr(view, 0x10), false, out);
 }
 
+static const int kDefaultBoneMapMan[94] = {
+    9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 116, 130, 132, 133, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150
+};
+
+static const int kDefaultBoneMapWoman[94] = {
+    9, 12, 13, 14, 15, 15, 19, 20, 17, 18, 21, 22, 23, 24, 25, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 26, 27, 28, 29, 30, 31, 32, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 116, 130, 132, 133, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150
+};
+
+static const char* const kMeshBoneNames[94] = {
+    "M_spine_1_jnt", "M_spine_2_jnt", "M_spine_3_jnt", "M_neck_jnt", "M_head_1_jnt", "M_head_2_jnt",
+    "L_eyelidUp_jnt", "R_eyelidUp_jnt", "L_head01_eye_jnt", "R_head01_eye_jnt",
+    "L_eyelidDn_jnt", "R_eyelidDn_jnt", "M_lipsUp_jnt", "L_lipsUp_jnt", "L_lips_jnt",
+    "L_noseWing_jnt", "L_noseUp_jnt", "L_cheekUp_jnt", "L_cheekDn_jnt", "L_eyebrow_1_jnt",
+    "L_eyebrow_2_jnt", "L_eyebrow_3_jnt", "M_foreheadDn_jnt", "R_lips_jnt", "R_lipsUp_jnt",
+    "R_noseWing_jnt", "R_noseUp_jnt", "R_cheekUp_jnt", "R_cheekDn_jnt", "R_eyebrow_1_jnt",
+    "R_eyebrow_2_jnt", "R_eyebrow_3_jnt", "M_jaw_jnt", "M_lipsDn_jnt", "L_lipsDn_jnt",
+    "R_lipsDn_jnt", "M_tongue_1_jnt", "M_tongue_2_jnt", "M_tongue_3_jnt",
+    "L_arm_0_jnt", "L_arm_1_jnt", "L_arm_2_jnt", "L_arm_3_jnt",
+    "L_index_1_jnt", "L_index_2_jnt", "L_index_3_jnt",
+    "L_middle_1_jnt", "L_middle_2_jnt", "L_middle_3_jnt",
+    "L_ring_1_jnt", "L_ring_2_jnt", "L_ring_3_jnt",
+    "L_pinky_1_jnt", "L_pinky_2_jnt", "L_pinky_3_jnt",
+    "L_thumb_1_jnt", "L_thumb_2_jnt", "L_thumb_3_jnt",
+    "L_armTwist_jnt",
+    "R_arm_0_jnt", "R_arm_1_jnt", "R_arm_2_jnt", "R_arm_3_jnt",
+    "R_index_1_jnt", "R_index_2_jnt", "R_index_3_jnt",
+    "R_middle_1_jnt", "R_middle_2_jnt", "R_middle_3_jnt",
+    "R_ring_1_jnt", "R_ring_2_jnt", "R_ring_3_jnt",
+    "R_pinky_1_jnt", "R_pinky_2_jnt", "R_pinky_3_jnt",
+    "R_thumb_1_jnt", "R_thumb_2_jnt", "R_thumb_3_jnt",
+    "Weapone1_jnt", "Magazine1_jnt", "R_armTwist_jnt",
+    "bag_jnt", "L_bag_jnt", "R_bag_jnt",
+    "L_leg_1_jnt", "L_leg_2_jnt", "L_leg_3_jnt", "L_foot_1_jnt", "L_foot_2_jnt",
+    "R_leg_1_jnt", "R_leg_2_jnt", "R_leg_3_jnt", "R_foot_1_jnt", "R_foot_2_jnt"
+};
+
+// Auto-discovered offsets for native Transform -> GameObject -> name chain.
+// Probed once; +0x28 on Transform is the hierarchy ptr, so GameObject is elsewhere.
+static bool s_nameOffsetsProbed = false;
+static U s_goOffset = 0;
+static U s_nameOffset = 0;
+
+static void EnsureNameOffsetsProbed(int count, int root,
+    const std::vector<std::int32_t>& parent,
+    const std::vector<unsigned char>& reachable,
+    const std::vector<U>& transforms,
+    const Read& read)
+{
+    if (s_nameOffsetsProbed) return;
+    s_nameOffsetsProbed = true;
+    auto isAnc = [&](int a, int b) -> bool {
+        for (int s = 0; b >= 0 && b < count && s < count; b = parent[b], ++s)
+            if (a == b) return true;
+        return false;
+    };
+    for (int b = 0; b < count; ++b) {
+        if (!reachable[b] || !isAnc(root, b)) continue;
+        bool found = false;
+        const U goOffsets[] = {0x08, 0x10, 0x18, 0x20, 0x30, 0x38, 0x40};
+        for (U tOff : goOffsets) {
+            if (found) break;
+            U go = 0;
+            if (!read(transforms[b] + tOff, &go, sizeof(go)) || go <= 0x10000) continue;
+            const U nameOffsets[] = {0x48, 0x50, 0x60};
+            for (U nOff : nameOffsets) {
+                U np = 0;
+                if (!read(go + nOff, &np, sizeof(np)) || np <= 0x10000) continue;
+                char buf[32]{};
+                if (!read(np, buf, 31)) continue;
+                buf[31] = '\0';
+                bool ok = true;
+                int len = 0;
+                for (; len < 31 && buf[len]; ++len)
+                    if ((unsigned char)buf[len] < 0x20 || (unsigned char)buf[len] > 0x7E)
+                        { ok = false; break; }
+                if (ok && len >= 2) {
+                    s_goOffset = tOff;
+                    s_nameOffset = nOff;
+                    DLOG("NameOffsetProbe: Transform+0x%llx -> +0x%llx -> '%s'",
+                        (unsigned long long)tOff, (unsigned long long)nOff, buf);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) DLOG("NameOffsetProbe: FAILED to find name chain");
+        break;
+    }
+}
+
+static bool ReadBoneName(const Read& read, U transform, char* buf, int bufSize)
+{
+    if (s_goOffset == 0) return false;
+    U go = 0;
+    if (!read(transform + s_goOffset, &go, sizeof(go)) || go <= 0x10000) return false;
+    U np = 0;
+    if (!read(go + s_nameOffset, &np, sizeof(np)) || np <= 0x10000) return false;
+    std::memset(buf, 0, bufSize);
+    if (!read(np, buf, bufSize - 1)) return false;
+    buf[bufSize - 1] = '\0';
+    int len = 0;
+    for (; len < bufSize - 1 && buf[len]; ++len)
+        if (static_cast<unsigned char>(buf[len]) < 0x20 ||
+            static_cast<unsigned char>(buf[len]) > 0x7E) return false;
+    return len >= 2;
+}
+
+// Reads bone names via DMA and corrects boneMap entries by exact name match.
+// Returns the number of mesh bone names matched.
+static int RefineBonemapByName(int count, int root,
+    const std::vector<std::int32_t>& parent,
+    const std::vector<unsigned char>& reachable,
+    const std::vector<U>& transforms,
+    const Read& read, std::vector<int>& boneMap)
+{
+    EnsureNameOffsetsProbed(count, root, parent, reachable, transforms, read);
+    if (s_goOffset == 0) return 0;
+    auto isAnc = [&](int a, int b) -> bool {
+        for (int s = 0; b >= 0 && b < count && s < count; b = parent[b], ++s)
+            if (a == b) return true;
+        return false;
+    };
+    struct NB { int index; std::string name; };
+    std::vector<NB> named;
+    for (int b = 0; b < count; ++b) {
+        if (!reachable[b] || !isAnc(root, b)) continue;
+        char buf[64]{};
+        if (!ReadBoneName(read, transforms[b], buf, sizeof(buf)))
+            continue;
+        named.push_back({b, std::string(buf)});
+    }
+    int matched = 0;
+    for (std::size_t i = 0; i < 94 && i < boneMap.size(); ++i)
+        for (const auto& nb : named)
+            if (nb.name == kMeshBoneNames[i]) { boneMap[i] = nb.index; ++matched; break; }
+    static bool loggedOnce = false;
+    if (!loggedOnce) {
+        loggedOnce = true;
+        DLOG("RefineBonemapByName: count=%d named=%zu matched=%d/94 (goOff=0x%llx nameOff=0x%llx)",
+            count, named.size(), matched,
+            (unsigned long long)s_goOffset, (unsigned long long)s_nameOffset);
+        for (std::size_t i = 0; i < named.size() && i < 30; ++i)
+            DLOG("  bone[%d] = '%s'", named[i].index, named[i].name.c_str());
+    }
+    return matched;
+}
+
 bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 {
     out = RigLayout{};
@@ -604,6 +751,14 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
             }
         }
     }
+    const bool isWoman = (out.head == 15 || out.neck == 14 || count < 200);
+    const int* defaultMap = isWoman ? kDefaultBoneMapWoman : kDefaultBoneMapMan;
+    out.boneMap.assign(defaultMap, defaultMap + 94);
+    out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
+    int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
+        read, out.boneMap);
+    if (nameMatched == 0)
+        for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
     return !out.segments.empty();
 }
 
@@ -645,15 +800,18 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
         } else {
             // Fallback for non-topological parent index
             Vec v = local[b].p;
+            Quat q = local[b].q;
             bool ok = true;
             int steps = 0;
             for (int curP = p; curP != -1; ++steps) {
                 if (steps >= count || curP < 0 || curP >= count || !boneValid[curP]) { ok = false; break; }
                 v = Add(local[curP].p, Rotate(local[curP].q, Mul(local[curP].s, v)));
+                q = MulQuat(local[curP].q, q);
                 curP = layout.parent[curP];
             }
             if (ok && Finite(v)) {
                 world[b] = v;
+                worldRot[b] = q;
                 worldValid[b] = 1;
             }
         }
@@ -957,32 +1115,13 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     const std::vector<unsigned char>& reachable = rh.reachable;
     auto ancestor = [&](int a, int b) { return rh.isAncestor(a, b); };
 
-    // Read each transform's GameObject name via native Transform -> GameObject(0x30) -> name(0x48)
-    // Unity native name is a char* at GameObject+0x48, length at +0x40 (or just read until null).
+    EnsureNameOffsetsProbed(count, root, parent, reachable, transforms, read);
     struct NamedBone { int index; std::string name; };
     std::vector<NamedBone> namedBones;
     for (int b = 0; b < count; ++b) {
         if (!reachable[b] || !ancestor(root, b)) continue;
-        U gameObject = 0;
-        if (!read(transforms[b] + 0x30, &gameObject, sizeof(gameObject)) || gameObject <= 0x10000)
-            continue;
         char buf[64]{};
-        auto tryNameOffset = [&](U off) -> bool {
-            U namePtr = 0;
-            if (!read(gameObject + off, &namePtr, sizeof(namePtr)) || namePtr <= 0x10000)
-                return false;
-            std::memset(buf, 0, sizeof(buf));
-            if (!read(namePtr, buf, sizeof(buf) - 1))
-                return false;
-            buf[63] = '\0';
-            int len = 0;
-            for (; len < 63 && buf[len]; ++len) {
-                const unsigned char ch = static_cast<unsigned char>(buf[len]);
-                if (ch < 0x20 || ch > 0x7E) return false;
-            }
-            return len >= 2;
-        };
-        if (!tryNameOffset(0x60) && !tryNameOffset(0x48))
+        if (!ReadBoneName(read, transforms[b], buf, sizeof(buf)))
             continue;
         namedBones.push_back({b, std::string(buf)});
     }
@@ -1081,6 +1220,16 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
         if (out.selected[b] && p >= 0 && out.selected[p])
             out.segments.push_back({p, b});
     }
+
+    const bool isWoman = (out.head == 15 || out.neck == 14 || count < 200);
+    const int* defaultMap = isWoman ? kDefaultBoneMapWoman : kDefaultBoneMapMan;
+    out.boneMap.assign(defaultMap, defaultMap + 94);
+    out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
+    int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
+        read, out.boneMap);
+    if (nameMatched == 0)
+        for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
+
     return !out.segments.empty();
 }
 

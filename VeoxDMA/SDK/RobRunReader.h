@@ -70,6 +70,7 @@ struct EntityData {
     Skeleton::BonePoints bonePoints;
     // Per-bone world-space 4x4 matrices for mesh-based chams skinning.
     std::vector<Matrix4x4> boneWorldMatrices;
+    std::vector<int> boneMap;
     int boneCount = 0;
 };
 

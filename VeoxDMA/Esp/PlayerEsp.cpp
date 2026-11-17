@@ -177,23 +177,30 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		}
 	}
 	if (g_charMesh.valid && ent.boneWorldMatrices.size() >= 2) {
-		static std::vector<int> boneMap;
 		static std::vector<Vector3> skinned;
 		static bool loggedOnce = false;
 		if (!loggedOnce) {
-			DLOG("PlayerEsp: mesh chams path entered, boneWorldMatrices.size=%zu", ent.boneWorldMatrices.size());
+			DLOG("PlayerEsp: mesh chams path entered, boneWorldMatrices.size=%zu, boneMap.size=%zu",
+				ent.boneWorldMatrices.size(), ent.boneMap.size());
 			loggedOnce = true;
 		}
-		if (boneMap.size() != g_charMesh.numBones) {
-			boneMap.resize(g_charMesh.numBones);
-			for (std::uint32_t i = 0; i < g_charMesh.numBones; ++i)
-				boneMap[i] = static_cast<int>(i);
+
+		static const int kDefaultBoneMap[94] = {
+			9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 116, 130, 132, 133, 140, 141, 142, 143, 144, 146, 147, 148, 149, 150
+		};
+
+		const int* activeBoneMap = nullptr;
+		if (ent.boneMap.size() >= g_charMesh.numBones) {
+			activeBoneMap = ent.boneMap.data();
+		} else if (g_charMesh.numBones == 94) {
+			activeBoneMap = kDefaultBoneMap;
 		}
+
 		skinned.resize(g_charMesh.vertices.size());
 
 		const int safeBoneCount = static_cast<int>(ent.boneWorldMatrices.size());
 		CharacterMesh::Skin(g_charMesh, ent.boneWorldMatrices.data(),
-			safeBoneCount, boneMap.data(), skinned.data());
+			safeBoneCount, activeBoneMap, skinned.data());
 
 		if (CharacterMesh::Draw(dl, g_charMesh, skinned.data(), vp,
 			screenW, screenH, chamsCol))
