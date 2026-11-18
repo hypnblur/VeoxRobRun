@@ -301,14 +301,14 @@ void BeginCard(const char* title, float width, float minHeight = 62.f)
 		ImDrawFlags_RoundCornersTop);
 	dl->AddLine(ImVec2(bb.Min.x, bb.Min.y + kCardHeader),
 		ImVec2(bb.Max.x, bb.Min.y + kCardHeader), C(kStroke), 1.f);
-	dl->AddRectFilled(ImVec2(bb.Min.x + 12.f, bb.Min.y + 1.f),
-		ImVec2(bb.Min.x + 44.f, bb.Min.y + 2.5f), C(kAccent, 0.85f), 1.f);
+	//dl->AddRectFilled(ImVec2(bb.Min.x + 12.f, bb.Min.y + 1.f), ImVec2(bb.Min.x + 44.f, bb.Min.y + 2.5f), C(kAccent, 0.85f), 1.f);
+	dl->AddRect(bb.Min, bb.Max, C(Mix(kAccent, ImVec4(1, 1, 1, 1), hover * 0.3f), 0.85f), 10.f, 0, 1.f);
 
 	const char* titleEnd = ImGui::FindRenderedTextEnd(title);
 	std::string displayTitle(title, titleEnd);
 	Text(font::inter_bold,
-		ImVec2(bb.Min.x + 14.f, bb.Min.y + (kCardHeader - font::inter_bold->FontSize) * 0.5f - 1.f),
-		C(kTextDim), displayTitle.c_str());
+		ImVec2(bb.Min.x + 14.f, bb.Min.y + (kCardHeader - font::inter_bold->FontSize) * 0.5f),
+		C(kAccent, 0.85f), displayTitle.c_str());
 
 	ImGui::SetCursorScreenPos(ImVec2(bb.Min.x, bb.Min.y + kCardHeader));
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 0));
@@ -1200,6 +1200,7 @@ void DrawRadar()
 		ToggleRow("Show Loot", &ConfigInstance.Radar.ShowLoot);
 		ToggleRow("Rotate With Camera", &ConfigInstance.Radar.RotateWithCamera);
 		ToggleRow("Full Map Window", &ConfigInstance.Radar.PopoutWindow);
+		ToggleRow("Lock Radar in Place", &ConfigInstance.Radar.Locked);
 
 		SectionLabel("DISPLAY");
 		SliderFloatRow("Size", &ConfigInstance.Radar.Size, 100.f, 1000.f, "px");
@@ -1215,22 +1216,22 @@ void DrawRadar()
 	ImGui::BeginGroup();
 	{
 		BeginCard("MAP BOUNDS", kCardW);
-		Note("World coordinates used to calibrate entity scale over the in-game map.");
-		SectionLabel("X AXIS");
-		SliderFloatRow("Min X", &ConfigInstance.Radar.WorldMinX, -5000.f, 5000.f);
-		SliderFloatRow("Max X", &ConfigInstance.Radar.WorldMaxX, -5000.f, 5000.f);
-		SectionLabel("Z AXIS");
-		SliderFloatRow("Min Z", &ConfigInstance.Radar.WorldMinZ, -5000.f, 5000.f);
-		SliderFloatRow("Max Z", &ConfigInstance.Radar.WorldMaxZ, -5000.f, 5000.f);
-		if (ButtonRow("", "Reset Bounds", 130.f))
+		const std::string mapName = RobRunReader::GetLocationId();
+		Note("Current Map: %s", mapName.empty() ? "empty" : mapName.c_str());
+		Note("World coordinates used to calibrate entity scale over the in-game map.\nThe radar reads entity positions from the same snapshot as the ESP.\nBounds calibrate where positions land on the map.");
+		if (ButtonRow("", "Reset Bounds", ImGui::GetContentRegionAvail().x))
 		{
 			ConfigInstance.Radar.WorldMinX = -600.f;
 			ConfigInstance.Radar.WorldMaxX = 600.f;
 			ConfigInstance.Radar.WorldMinZ = -400.f;
 			ConfigInstance.Radar.WorldMaxZ = 400.f;
 		}
-		Note("The radar reads entity positions from the same snapshot as the ESP. "
-			"Bounds calibrate where positions land on the map.");
+		SectionLabel("X AXIS");
+		SliderFloatRow("Min X", &ConfigInstance.Radar.WorldMinX, -5000.f, 5000.f);
+		SliderFloatRow("Max X", &ConfigInstance.Radar.WorldMaxX, -5000.f, 5000.f);
+		SectionLabel("Z AXIS");
+		SliderFloatRow("Min Z", &ConfigInstance.Radar.WorldMinZ, -5000.f, 5000.f);
+		SliderFloatRow("Max Z", &ConfigInstance.Radar.WorldMaxZ, -5000.f, 5000.f);
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -1579,6 +1580,7 @@ void DrawAim()
 		const auto kind = deviceKinds[deviceIndex];
 		const bool isNet = IsNetworkDevice(kind);
 		const bool isSerial = kind != DeviceKind::Off && !isNet;
+		const float BoundsWidth = ImGui::GetContentRegionAvail().x;
 
 		if (isNet)
 		{
@@ -1615,13 +1617,13 @@ void DrawAim()
 					std::strncpy(comPort, ports[sel].port.c_str(), sizeof(comPort) - 1);
 					comPort[sizeof(comPort) - 1] = 0;
 				}
-				if (ButtonRow("", "Refresh Ports", 130.f))
+				if (ButtonRow("", "Refresh Ports", ImGui::GetContentRegionAvail().x))
 					Session().RefreshPorts();
 			}
 			else
 			{
 				Note("No COM ports found.");
-				if (ButtonRow("", "Refresh Ports", 130.f))
+				if (ButtonRow("", "Refresh Ports", BoundsWidth))
 					Session().RefreshPorts();
 			}
 
@@ -1639,7 +1641,7 @@ void DrawAim()
 		{
 			if (!connected && !connecting)
 			{
-				if (ButtonRow("", "Connect", 130.f, true))
+				if (ButtonRow("", "Connect", BoundsWidth, true))
 				{
 					DeviceConfig cfg;
 					cfg.kind = kind;
@@ -1655,9 +1657,9 @@ void DrawAim()
 			}
 			else
 			{
-				if (ButtonRow("", "Disconnect", 130.f))
+				if (ButtonRow("", "Disconnect", BoundsWidth))
 					Session().Disconnect();
-				if (connected && ButtonRow("", "Test Movement", 130.f))
+				if (connected && ButtonRow("", "Test Movement", BoundsWidth))
 					Session().TestMovement();
 			}
 		}
@@ -2537,59 +2539,111 @@ void DrawTopBar(const ImVec2& pos)
 
 	// search field
 	const float fieldW = 320.f;
-	const ImVec2 fieldMin(pos.x + kSide + ((kW - kSide) - fieldW) * 0.5f, pos.y + 17.f);
+	const ImVec2 fieldMin(
+		pos.x + kSide + ((kW - kSide) - fieldW) * 0.5f,
+		pos.y + 17.f);
 	const ImVec2 fieldMax(fieldMin.x + fieldW, fieldMin.y + 32.f);
 
 	const bool focused = ImGui::GetActiveID() == ImGui::GetID("##search");
-	dl->AddRectFilled(fieldMin, fieldMax, C(ImVec4(1, 1, 1, 0.045f)), 8.f);
-	dl->AddRect(fieldMin, fieldMax, C(Mix(kStroke, kAccent, focused ? 0.55f : 0.f)), 8.f, 0, 1.f);
+	dl->AddRectFilled(fieldMin, fieldMax,
+		C(ImVec4(1, 1, 1, 0.045f)), 8.f);
+	dl->AddRect(fieldMin, fieldMax,
+		C(Mix(kStroke, kAccent, focused ? 0.55f : 0.f)),
+		8.f, 0, 1.f);
 
 	// magnifier
 	const ImVec2 mag(fieldMin.x + 16.f, fieldMin.y + 15.f);
 	dl->AddCircle(mag, 5.f, C(kTextFaint), 16, 1.4f);
-	dl->AddLine(ImVec2(mag.x + 4.f, mag.y + 4.f), ImVec2(mag.x + 8.f, mag.y + 8.f), C(kTextFaint), 1.4f);
+	dl->AddLine(
+		ImVec2(mag.x + 4.f, mag.y + 4.f),
+		ImVec2(mag.x + 8.f, mag.y + 8.f),
+		C(kTextFaint), 1.4f);
 
+	// clear button
+	const ImRect clear(
+		fieldMax.x - 30.f, fieldMin.y + 5.f,
+		fieldMax.x - 5.f, fieldMax.y - 5.f);
+
+	ImGui::SetCursorScreenPos(clear.Min);
+	const bool clearPressed =
+		ImGui::InvisibleButton("##clear", clear.GetSize());
+	const bool clearHovered = ImGui::IsItemHovered();
+
+	if (g_search[0])
+	{
+		const ImVec2 c(
+			(clear.Min.x + clear.Max.x) * 0.5f,
+			(clear.Min.y + clear.Max.y) * 0.5f);
+
+		dl->AddLine(
+			ImVec2(c.x - 3.5f, c.y - 3.5f),
+			ImVec2(c.x + 3.5f, c.y + 3.5f),
+			C(kTextDim, clearHovered ? 1.f : 0.7f), 1.4f);
+
+		dl->AddLine(
+			ImVec2(c.x + 3.5f, c.y - 3.5f),
+			ImVec2(c.x - 3.5f, c.y + 3.5f),
+			C(kTextDim, clearHovered ? 1.f : 0.7f), 1.4f);
+	}
+
+	if (clearPressed)
+	{
+		g_search[0] = '\0';
+		ImGui::ClearActiveID();
+	}
+
+	// input
 	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(30.f, 8.f));
 	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8.f);
 	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+
 	ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, IM_COL32(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(0, 0, 0, 0));
 	ImGui::PushStyleColor(ImGuiCol_Text, C(kText));
 	ImGui::PushStyleColor(ImGuiCol_TextDisabled, C(kTextFaint));
+
 	ImGui::SetCursorScreenPos(fieldMin);
-	ImGui::SetNextItemWidth(fieldW);
-	ImGui::InputTextWithHint("##search", "Search settings", g_search, sizeof(g_search));
+	ImGui::SetNextItemWidth(fieldW - 34.f);
+	ImGui::InputTextWithHint(
+		"##search",
+		"Search settings",
+		g_search,
+		sizeof(g_search));
+
 	ImGui::PopStyleColor(5);
 	ImGui::PopStyleVar(3);
 
-	// clear button
-	if (g_search[0])
+	// close button
+	const ImRect close(
+		pos + ImVec2(kW - 46.f, 19.f),
+		pos + ImVec2(kW - 20.f, 45.f));
+
+	const bool closeHover =
+		ImGui::IsMouseHoveringRect(close.Min, close.Max);
+
+	dl->AddRectFilled(
+		close.Min,
+		close.Max,
+		C(ImVec4(1, 1, 1, 1), closeHover ? 0.08f : 0.04f),
+		7.f);
+
 	{
-		const ImRect clear(fieldMax.x - 28.f, fieldMin.y + 8.f, fieldMax.x - 8.f, fieldMax.y - 8.f);
-		const bool hovered = ImGui::IsMouseHoveringRect(clear.Min, clear.Max);
-		const ImVec2 c((clear.Min.x + clear.Max.x) * 0.5f, (clear.Min.y + clear.Max.y) * 0.5f);
-		dl->AddLine(ImVec2(c.x - 3.5f, c.y - 3.5f), ImVec2(c.x + 3.5f, c.y + 3.5f),
-			C(kTextDim, hovered ? 1.f : 0.7f), 1.4f);
-		dl->AddLine(ImVec2(c.x + 3.5f, c.y - 3.5f), ImVec2(c.x - 3.5f, c.y + 3.5f),
-			C(kTextDim, hovered ? 1.f : 0.7f), 1.4f);
-		ImGui::SetCursorScreenPos(clear.Min);
-		if (ImGui::InvisibleButton("##clear", clear.GetSize()))
-			g_search[0] = 0;
+		const ImVec2 c(
+			(close.Min.x + close.Max.x) * 0.5f,
+			(close.Min.y + close.Max.y) * 0.5f);
+
+		dl->AddLine(
+			ImVec2(c.x - 4.f, c.y - 4.f),
+			ImVec2(c.x + 4.f, c.y + 4.f),
+			C(kTextDim, closeHover ? 1.f : 0.8f), 1.5f);
+
+		dl->AddLine(
+			ImVec2(c.x + 4.f, c.y - 4.f),
+			ImVec2(c.x - 4.f, c.y + 4.f),
+			C(kTextDim, closeHover ? 1.f : 0.8f), 1.5f);
 	}
 
-	// close button
-	const ImRect close(pos + ImVec2(kW - 46.f, 19.f), pos + ImVec2(kW - 20.f, 45.f));
-	const bool closeHover = ImGui::IsMouseHoveringRect(close.Min, close.Max);
-	dl->AddRectFilled(close.Min, close.Max,
-		C(ImVec4(1, 1, 1, 1), closeHover ? 0.08f : 0.04f), 7.f);
-	{
-		const ImVec2 c((close.Min.x + close.Max.x) * 0.5f, (close.Min.y + close.Max.y) * 0.5f);
-		dl->AddLine(ImVec2(c.x - 4.f, c.y - 4.f), ImVec2(c.x + 4.f, c.y + 4.f),
-			C(kTextDim, closeHover ? 1.f : 0.8f), 1.5f);
-		dl->AddLine(ImVec2(c.x + 4.f, c.y - 4.f), ImVec2(c.x - 4.f, c.y + 4.f),
-			C(kTextDim, closeHover ? 1.f : 0.8f), 1.5f);
-	}
 	ImGui::SetCursorScreenPos(close.Min);
 	if (ImGui::InvisibleButton("##close", close.GetSize()))
 		Overlay::SetMenuOpen(false);
@@ -2765,7 +2819,7 @@ void Init()
 	style.FramePadding = ImVec2(10.f, 6.f);
 	style.ItemSpacing = ImVec2(0.f, 7.f);
 	style.ItemInnerSpacing = ImVec2(6.f, 4.f);
-	style.ScrollbarSize = 8.f;
+	style.ScrollbarSize = 16.f;
 	style.AntiAliasedLines = true;
 	style.AntiAliasedFill = true;
 

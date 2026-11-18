@@ -552,9 +552,12 @@ void Draw()
 	ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(18, 20, 30, titleAlpha));
 	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(30, 120, 255, titleActiveAlpha));
 
-	if (!ImGui::Begin("Radar", &ConfigInstance.Radar.Enabled,
-		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-		ImGuiWindowFlags_NoCollapse))
+
+	auto Flags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse;
+	if (ConfigInstance.Radar.Locked)
+		Flags += ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoMove;
+
+	if (!ImGui::Begin("Radar", &ConfigInstance.Radar.Enabled, Flags))
 	{
 		ImGui::End();
 		ImGui::PopStyleColor(4);
@@ -697,8 +700,7 @@ void Draw()
 
 				if (!show) continue;
 
-				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw,
-					cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
+				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw, cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
 
 				float ddx = pos.x - radarCenter.x;
 				float ddy = pos.y - radarCenter.y;
@@ -716,8 +718,7 @@ void Draw()
 				const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
 				const ImU32 ringColor = ent.isPartyMember ? IM_COL32(50, 220, 100, 255) : marker.color;
 
-				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw,
-					cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
+				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw, cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
 
 				float ddx = pos.x - radarCenter.x;
 				float ddy = pos.y - radarCenter.y;
@@ -735,6 +736,7 @@ void Draw()
 				dl->AddText(ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, 255), marker.text);
 				dl->AddText(tp, marker.color, marker.text);
 				// Direction pointer for other players
+				// Direction pointer for other players - arrowhead like local player
 				if (ent.yaw != 0.f || ent.lookDirection.x != 0.f || ent.lookDirection.z != 0.f) {
 					float otherYaw = ent.yaw;
 					if (otherYaw == 0.f) {
@@ -750,9 +752,23 @@ void Draw()
 					}
 					const float os = std::sin(otherAngle);
 					const float oc = std::cos(otherAngle);
-					const ImVec2 oStart(pos.x + os * badgeRadius, pos.y - oc * badgeRadius);
-					const ImVec2 oEnd(pos.x + os * (badgeRadius + 5.f), pos.y - oc * (badgeRadius + 5.f));
-					dl->AddLine(oStart, oEnd, ringColor, 2.0f);
+					const ImVec2 oFwd(os, -oc);
+					const ImVec2 oRgt(oc, os);
+
+					const float oTipLen = badgeRadius * 1.3f;
+					const float oBaseLen = badgeRadius * 0.25f;
+					const float oHalfWidth = badgeRadius * 0.7f;
+
+					const ImVec2 oTip(pos.x + oFwd.x * (badgeRadius + oTipLen),
+						pos.y + oFwd.y * (badgeRadius + oTipLen));
+					const ImVec2 oLeftWing(pos.x + oFwd.x * (badgeRadius + oBaseLen) - oRgt.x * oHalfWidth,
+						pos.y + oFwd.y * (badgeRadius + oBaseLen) - oRgt.y * oHalfWidth);
+					const ImVec2 oRightWing(pos.x + oFwd.x * (badgeRadius + oBaseLen) + oRgt.x * oHalfWidth,
+						pos.y + oFwd.y * (badgeRadius + oBaseLen) + oRgt.y * oHalfWidth);
+
+					dl->AddTriangleFilled(oTip, oLeftWing, oRightWing, ringColor);
+					dl->AddTriangle(oTip, oLeftWing, oRightWing, IM_COL32(0, 0, 0, 220), 1.f);
+					dl->AddLine(pos + ImVec2(oFwd.x * badgeRadius, oFwd.y * badgeRadius), oTip, ringColor, 1.5f);
 				}
 			}
 		}
@@ -796,7 +812,7 @@ void Draw()
 
 	dl->PopClipRect();
 
-	if (ImGui::IsWindowHovered()) {
+	if (!ConfigInstance.Radar.Locked && ImGui::IsWindowHovered()) {
 		float wheel = ImGui::GetIO().MouseWheel;
 		if (wheel != 0.f) {
 			ConfigInstance.Radar.Zoom = std::clamp(
@@ -858,9 +874,7 @@ void DrawFullMap()
 	ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(16, 18, 28, 240));
 	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(25, 60, 120, 240));
 
-	if (!ImGui::Begin("Full Map", &ConfigInstance.Radar.PopoutWindow,
-		ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
-		ImGuiWindowFlags_NoCollapse))
+	if (!ImGui::Begin("Full Map", &ConfigInstance.Radar.PopoutWindow, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse))
 	{
 		ImGui::End();
 		ImGui::PopStyleColor(3);

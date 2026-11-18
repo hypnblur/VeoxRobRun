@@ -27,6 +27,7 @@ public:
 	bool ShowPlayerDistances = true;
 	bool RotateWithCamera = false;
 	bool ShowMap = true;
+	bool Locked = false;
 
 	// Pop-out standalone OS window
 	bool PopoutWindow = true;
@@ -71,6 +72,7 @@ public:
 		j[ConfigName][LIT("WorldMinZ")] = WorldMinZ;
 		j[ConfigName][LIT("WorldMaxZ")] = WorldMaxZ;
 		j[ConfigName][LIT("SelectedMap")] = SelectedMap;
+		j[ConfigName][LIT("Locked")] = Locked;
 		return j;
 	}
 
@@ -105,5 +107,6 @@ public:
 		WorldMinZ = s.value(LIT("WorldMinZ"), WorldMinZ);
 		WorldMaxZ = s.value(LIT("WorldMaxZ"), WorldMaxZ);
 		SelectedMap = s.value(LIT("SelectedMap"), SelectedMap);
+		Locked = s.value(LIT("Locked"), Locked);
 	}
 };
