@@ -190,6 +190,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		VeoxMenu::Init();
 		Radar::Init();
 		WeaponSprites::Init();
+		Backdrop::Create(g_hInstance);
 		Aim::StartAimWorker();
 		DLOG("Overlay init callback done");
 	};
