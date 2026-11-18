@@ -851,13 +851,7 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached(int pid)
 
 bool Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
 {
-	if (!VMMDLL_Scatter_ExecuteRead(handle))
-	{
-		return false;
-	}
-	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0))
-	{
-		return false;
-	}
-	return true;
+	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
+	VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0);
+	return ok;
 }
