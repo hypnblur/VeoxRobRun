@@ -70,6 +70,7 @@ static bool AttachGame()
 	SetAttachStatus("Attached.");
 	g_attached.store(true, std::memory_order_release);
 	g_pendingAttachToast.store(true);
+	Aim::StartAimWorker();
 	return true;
 }
 
@@ -101,8 +102,10 @@ static void TickOverlay()
 	if (g_pendingReattach.exchange(false))
 	{
 		Overlay::Notify("Re-attaching...", 0xFFFFCC44u, 2.f);
-		RobRunReader::Shutdown();
+		Aim::StopAimWorker();
 		StopAttachLoop();
+		RobRunReader::Shutdown();
+		TargetProcess.ResetProcess();
 		g_attached.store(false, std::memory_order_release);
 		SetAttachStatus("Re-attaching...");
 		StartAttachLoop();

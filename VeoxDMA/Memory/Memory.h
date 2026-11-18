@@ -64,6 +64,7 @@ public:
 	bool Init(std::string process_name, bool memMap = true, bool debug = false);
 
 	int GetPID() const { return current_process.PID; }
+	void ResetProcess();
 
 	/*This part here is things related to the process information such as Base daddy, Size ect.*/
 

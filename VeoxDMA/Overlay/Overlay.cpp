@@ -532,8 +532,14 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		}
 
 		const int menuVk = GetMenuKeyVk();
-		if (KeyJustPressed(menuVk))
-			ToggleMenu();
+		if (KeyJustPressed(menuVk)) {
+			if (ConfigInstance.Overlay.PanicMode) {
+				TogglePanic();
+				SetMenuOpen(true);
+			} else {
+				ToggleMenu();
+			}
+		}
 
 		const int panicVk = GetPanicKeyVk();
 		if (panicVk > 0 && KeyJustPressed(panicVk))

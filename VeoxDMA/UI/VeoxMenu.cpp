@@ -1009,10 +1009,18 @@ void DrawVisuals()
 			EndCard();
 		}
 
-		if (MatchAny({ "Name", "Distance", "Health", "Weapon" }))
+		if (MatchAny({ "Name", "Distance", "Health", "Weapon", "Role", "Criminal", "Police", "Civilian" }))
 		{
 			BeginCard("TEXT & COLOURS", kCardW);
 			ColorRow("Name", ConfigInstance.Player.NameColour);
+			ToggleRow("Color names by role", &ConfigInstance.Player.NameByRole);
+			if (ConfigInstance.Player.NameByRole)
+			{
+				ColorRow("Criminal", ConfigInstance.Player.CriminalColour);
+				ColorRow("Police", ConfigInstance.Player.PoliceColour);
+				ColorRow("Civilian", ConfigInstance.Player.CivilianColour);
+				ColorRow("Hubber", ConfigInstance.Player.HubberColour);
+			}
 			ColorRow("Distance", ConfigInstance.Player.DistanceColour);
 			ColorRow("Health", ConfigInstance.Player.HealthTextColour);
 			ColorRow("Weapon", ConfigInstance.Player.WeaponColour);
@@ -2169,6 +2177,13 @@ void DrawMisc()
 					world.containers, world.loots, world.vehicles, world.grenades);
 				Note("Skeletons %u | Aim poses %u | Pose retries %u", snapshot->skeletonCount,
 					snapshot->poseCount, snapshot->poseFailures);
+				Note("Bones %u inv %u (nZ %u nB %u pI %u) chain %u",
+					snapshot->boneTotal, snapshot->boneInvalid,
+					snapshot->boneNormZero, snapshot->boneNormBad,
+					snapshot->bonePosInf, snapshot->boneChainDrop);
+				Note("Scatter ok %u fail %u | Fresh ok %u",
+					snapshot->poseScatterOk, snapshot->poseScatterFail,
+					snapshot->poseFreshOk);
 				Note("Read failures %u", snapshot->failureCount);
 			}
 			else

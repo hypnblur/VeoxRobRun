@@ -102,19 +102,30 @@ bool ValidateHierarchy(const RigLayout& layout, const ReadFn& read);
 // weapon/limb IK view is temporarily unbound (holster, reload, vehicle).
 bool BuildLayoutByName(std::uint64_t view, const ReadFn& read, RigLayout& out);
 
+struct PoseStats {
+    int total = 0;
+    int invalid = 0;
+    int normZero = 0;    // quaternion norm ~0 (unread/zeroed data)
+    int normBad = 0;     // norm outside [0.5,1.5] but > 0.01
+    int posInf = 0;      // non-finite position or scale
+    int chainDrop = 0;   // valid bone but parent invalid
+};
+
 // Reads the current animation pose and emits world-space bone segments.
 // Returns false when the layout is no longer valid (freed/moved array,
 // corrupt pose), in which case the caller should rebuild it.
 bool SampleLayout(const RigLayout& layout, const ReadFn& read,
     std::vector<BoneSegment>& out, BonePoints* points = nullptr,
-    BoneLocal* localOut = nullptr, Matrix4x4* worldMatricesOut = nullptr);
+    BoneLocal* localOut = nullptr, Matrix4x4* worldMatricesOut = nullptr,
+    PoseStats* stats = nullptr);
 
 // Processes pre-read pose data (from a scatter read) instead of issuing its
 // own DMA read. The buffer must hold layout.count * 48 bytes (one TRS per bone).
 bool ProcessPoseData(const RigLayout& layout, const void* poseData,
     std::size_t poseSize, std::vector<BoneSegment>& out,
     BonePoints* points = nullptr, BoneLocal* localOut = nullptr,
-    Matrix4x4* worldMatricesOut = nullptr);
+    Matrix4x4* worldMatricesOut = nullptr,
+    PoseStats* stats = nullptr);
 
 // Returns the byte size of the pose buffer needed for a layout.
 inline std::size_t PoseDataSize(const RigLayout& layout) {

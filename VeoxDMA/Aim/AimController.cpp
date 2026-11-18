@@ -671,10 +671,12 @@ void StartAimWorker()
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
         while (!g_aimWorkerStop.load(std::memory_order_relaxed)) {
-            RobRunReader::RefreshCamera();
-            Tick();
-            TickRecoilSpread();
-            TickInstantLoot();
+            try {
+                RobRunReader::RefreshCamera();
+                Tick();
+                TickRecoilSpread();
+                TickInstantLoot();
+            } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     });
@@ -1263,11 +1265,19 @@ void Tick()
 
 static std::uintptr_t g_cachedPlayerClient = 0;
 static std::uint64_t g_lastRecoilGen = 0;
+static float    g_lastPitch = 0.f;
+static bool     g_pitchValid = false;
+static int      g_lastShotIndex = -1;
+static float    g_kickBudget = 0.f;
+static constexpr float kKickBudgetPerShot = 0.0175f; // ~1 degree
 
 void TickRecoilSpread()
 {
     const auto& cfg = ConfigInstance.Aim;
-    if (!cfg.NoRecoil && !cfg.NoSpread && !cfg.DynamicRecoilCompensation) return;
+    if (!cfg.NoRecoil && !cfg.NoSpread && !cfg.DynamicRecoilCompensation) {
+        g_pitchValid = false;
+        return;
+    }
 
     const auto snapshot = RobRunReader::GetSnapshot();
     if (!snapshot || snapshot->battleModel <= 0x10000) return;
@@ -1275,9 +1285,16 @@ void TickRecoilSpread()
     if (snapshot->sessionGeneration != g_lastRecoilGen) {
         g_cachedPlayerClient = 0;
         g_lastRecoilGen = snapshot->sessionGeneration;
+        g_pitchValid = false;
+        g_lastShotIndex = -1;
+        g_kickBudget = 0.f;
     }
 
-    if (g_cachedPlayerClient <= 0x10000) {
+    // Revalidate client pointer every 500ms (respawn can free old one)
+    static std::uint64_t g_lastClientCheck = 0;
+    const std::uint64_t now = GetTickCount64();
+    if (g_cachedPlayerClient <= 0x10000 || now - g_lastClientCheck > 500) {
+        g_lastClientCheck = now;
         const std::uintptr_t battleEnts = RobRunMemory::ReadPtr(
             snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
         if (battleEnts <= 0x10000) return;
@@ -1289,48 +1306,87 @@ void TickRecoilSpread()
         if (g_cachedPlayerClient <= 0x10000) return;
     }
 
-    Memory::ScopedScatter scatter(TargetProcess);
-    if (!scatter.handle) return;
-
-    struct { float x, y, z; } zero3 = {0.f, 0.f, 0.f};
-
+    // --- No Recoil: cancel pitch kick via PlayerRotationInput ---
     if (cfg.NoRecoil) {
-        const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
-            g_cachedPlayerClient + rr::PlayerClient::Recoil);
-        if (recoilModel > 0x10000)
-            TargetProcess.AddScatterWriteRequest(scatter,
-                recoilModel + rr::RecoilModel::OffsetVec, &zero3, sizeof(zero3));
-    } else if (cfg.DynamicRecoilCompensation) {
+        const std::uintptr_t rotInput = snapshot->playerRotationInput;
+        if (rotInput > 0x10000) {
+            const std::uintptr_t fireModel = RobRunMemory::ReadPtr(
+                g_cachedPlayerClient + rr::CharacterClientModel::FireModel);
+            if (fireModel > 0x10000) {
+                struct { std::uint8_t isFiring; std::uint8_t hasShot; std::uint8_t pad[2]; std::int32_t shotIndex; } fire{};
+                RobRunMemory::ReadBytes(fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire));
+
+                float pitch = 0.f;
+                RobRunMemory::ReadBytes(rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
+
+                if (std::isfinite(pitch) && std::fabs(pitch) < 1.75f) {
+                    if (!g_pitchValid) {
+                        g_lastPitch = pitch;
+                        g_lastShotIndex = fire.shotIndex;
+                        g_pitchValid = true;
+                    } else {
+                        if (fire.shotIndex != g_lastShotIndex) {
+                            g_kickBudget += kKickBudgetPerShot;
+                            g_lastShotIndex = fire.shotIndex;
+                        }
+                        if (fire.isFiring) {
+                            const float delta = pitch - g_lastPitch;
+                            if (delta < -1e-5f && g_kickBudget > 0.f) {
+                                float correction = -delta;
+                                if (correction > g_kickBudget) correction = g_kickBudget;
+                                g_kickBudget -= correction;
+                                const float newPitch = pitch + correction;
+                                TargetProcess.Write(rotInput + rr::PlayerRotationInputModel::Pitch,
+                                    newPitch);
+                                g_lastPitch = newPitch;
+                            } else {
+                                g_lastPitch = pitch;
+                            }
+                        } else {
+                            g_lastPitch = pitch;
+                            g_kickBudget = 0.f;
+                        }
+                    }
+                } else {
+                    g_pitchValid = false;
+                }
+            }
+        }
+    }
+    // --- Dynamic Recoil: scale RecoilOffset (Vector2, 8 bytes) ---
+    else if (cfg.DynamicRecoilCompensation) {
         const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
             g_cachedPlayerClient + rr::PlayerClient::Recoil);
         if (recoilModel > 0x10000) {
-            Vector3 curOffset{};
-            if (RobRunMemory::ReadVector3(recoilModel + rr::RecoilModel::OffsetVec, curOffset)) {
+            struct { float x, y; } cur{};
+            if (RobRunMemory::ReadBytes(recoilModel + rr::RecoilModel::OffsetVec, &cur, sizeof(cur))) {
                 const float factor = std::clamp(1.f - cfg.RecoilStrength, 0.f, 1.f);
-                curOffset.x *= factor;
-                curOffset.y *= factor;
-                curOffset.z *= factor;
-                TargetProcess.AddScatterWriteRequest(scatter,
-                    recoilModel + rr::RecoilModel::OffsetVec, &curOffset, sizeof(curOffset));
+                cur.x *= factor;
+                cur.y *= factor;
+                TargetProcess.Write(recoilModel + rr::RecoilModel::OffsetVec,
+                    reinterpret_cast<void*>(&cur), sizeof(cur));
             }
         }
     }
 
+    // --- No Spread: zero per-frame outputs (limited effectiveness) ---
     if (cfg.NoSpread) {
-        const std::uintptr_t spreadModel = RobRunMemory::ReadPtr(
-            g_cachedPlayerClient + rr::PlayerClient::FakeSpread);
-        if (spreadModel > 0x10000) {
-            float zero = 0.f;
-            TargetProcess.AddScatterWriteRequest(scatter,
-                spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
-            TargetProcess.AddScatterWriteRequest(scatter,
-                spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
-            TargetProcess.AddScatterWriteRequest(scatter,
-                spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
+        Memory::ScopedScatter scatter(TargetProcess);
+        if (scatter.handle) {
+            const std::uintptr_t spreadModel = RobRunMemory::ReadPtr(
+                g_cachedPlayerClient + rr::PlayerClient::FakeSpread);
+            if (spreadModel > 0x10000) {
+                float zero = 0.f;
+                TargetProcess.AddScatterWriteRequest(scatter,
+                    spreadModel + rr::FakeSpreadModel::Spread, &zero, sizeof(zero));
+                TargetProcess.AddScatterWriteRequest(scatter,
+                    spreadModel + rr::FakeSpreadModel::Air, &zero, sizeof(zero));
+                TargetProcess.AddScatterWriteRequest(scatter,
+                    spreadModel + rr::FakeSpreadModel::Move, &zero, sizeof(zero));
+            }
+            TargetProcess.ExecuteScatterWrite(scatter);
         }
     }
-
-    if (!TargetProcess.ExecuteScatterWrite(scatter)) return;
 }
 
 void Draw()

@@ -39,6 +39,14 @@ Memory::~Memory()
 	PROCESS_INITIALIZED = false;
 }
 
+void Memory::ResetProcess()
+{
+	PROCESS_INITIALIZED = FALSE;
+	current_process = CurrentProcessInformation{};
+	std::lock_guard<std::mutex> lock(modules_mutex);
+	Modules.clear();
+}
+
 bool Memory::DumpMemoryMap(bool debug)
 {
 	LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"" };
@@ -105,7 +113,7 @@ bool Memory::SetFPGA()
 	ULONG64 qwID = 0;
 	ULONG64 qwVersionMajor = 0;
 	ULONG64 qwVersionMinor = 0;
-	if (!VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_FPGA_ID, &qwID) && VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_VERSION_MAJOR, &qwVersionMajor) && VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_VERSION_MINOR, &qwVersionMinor))
+	if (!VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_FPGA_ID, &qwID) || !VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_VERSION_MAJOR, &qwVersionMajor) || !VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_VERSION_MINOR, &qwVersionMinor))
 	{
 		LOG("[!] Failed to lookup FPGA device, Attempting to proceed\n\n");
 		return false;
@@ -292,6 +300,7 @@ std::vector<int> Memory::GetPidListFromName(std::string name)
 			list.push_back(process.dwPID);
 	}
 
+	VMMDLL_MemFree(process_info);
 	return list;
 }
 
@@ -712,32 +721,44 @@ bool Memory::Read(uintptr_t address, void* buffer, size_t size) const
 	// reader take seconds per pass. VMM's background refresh keeps the cache
 	// current, and the reader still validates dictionary version/count and
 	// class identity before accepting a pass.
-	return VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
-		(PBYTE)buffer, size, NULL, 0) != 0;
+	DWORD cbRead = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+		(PBYTE)buffer, size, &cbRead, 0))
+		return false;
+	return cbRead == static_cast<DWORD>(size);
 }
 
 bool Memory::Read(uintptr_t address, void* buffer, size_t size, int pid) const
 {
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
-	return VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
-		NULL, 0) != 0;
+	DWORD cbRead = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
+		&cbRead, 0))
+		return false;
+	return cbRead == static_cast<DWORD>(size);
 }
 
 bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size) const
 {
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
-	return VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
-		(PBYTE)buffer, size, NULL, VMMDLL_FLAG_NOCACHE) != 0;
+	DWORD cbRead = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+		(PBYTE)buffer, size, &cbRead, VMMDLL_FLAG_NOCACHE))
+		return false;
+	return cbRead == static_cast<DWORD>(size);
 }
 
 bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) const
 {
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
-	return VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
-		NULL, VMMDLL_FLAG_NOCACHE) != 0;
+	DWORD cbRead = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
+		&cbRead, VMMDLL_FLAG_NOCACHE))
+		return false;
+	return cbRead == static_cast<DWORD>(size);
 }
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()
@@ -763,8 +784,7 @@ void Memory::CloseScatterHandle(VMMDLL_SCATTER_HANDLE handle)
 
 void Memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
 {
-	DWORD memoryPrepared = NULL;
-	if (!VMMDLL_Scatter_PrepareEx(handle, address, size, (PBYTE)buffer, &memoryPrepared))
+	if (!VMMDLL_Scatter_PrepareEx(handle, address, size, (PBYTE)buffer, NULL))
 	{
 		//	LOG("[!] Failed to prepare scatter read at 0x%p\n", address);
 	}
@@ -783,48 +803,24 @@ bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addre
 }
 bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 {
-
-	if (!VMMDLL_Scatter_Execute(handle))
-	{
-		//	LOG("[-] Failed to Execute Scatter Read\n");
-		return false;
-	}
-	//Clear after using it
-	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE))
-	{
-		//	LOG("[-] Failed to clear Scatter\n");
-		return false;
-	}
-	return true;
+	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
+	VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE);
+	return ok;
 }
 bool Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
 {
-	if (!VMMDLL_Scatter_ExecuteRead(handle))
-	{
-		return false;
-	}
-	//Clear after using it
-	if (!VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE))
-	{
-		return false;
-	}
-	return true;
+	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
+	VMMDLL_Scatter_Clear(handle, this->current_process.PID, VMMDLL_FLAG_NOCACHE);
+	return ok;
 }
 bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
 		pid = this->current_process.PID;
 
-	if (!VMMDLL_Scatter_ExecuteRead(handle))
-	{
-		return false;
-	}
-	//Clear after using it
-	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
-	{
-		return false;
-	}
-	return true;
+	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
+	VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE);
+	return ok;
 }
 
 bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
@@ -832,16 +828,9 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 	if (pid == 0)
 		pid = this->current_process.PID;
 
-	if (!VMMDLL_Scatter_Execute(handle))
-	{
-		return false;
-	}
-	//Clear after using it
-	if (!VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE))
-	{
-		return false;
-	}
-	return true;
+	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
+	VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE);
+	return ok;
 }
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached()

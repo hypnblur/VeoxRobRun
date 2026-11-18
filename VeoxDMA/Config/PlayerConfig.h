@@ -57,6 +57,11 @@ public:
 	bool VisRing = true;
 	bool StatusRing = true;
 
+	bool NameByRole = true;
+	D2D1::ColorF CriminalColour = Colour(255, 85, 85);
+	D2D1::ColorF PoliceColour = Colour(80, 175, 255);
+	D2D1::ColorF CivilianColour = Colour(100, 235, 130);
+	D2D1::ColorF HubberColour = Colour(150, 175, 225);
 	D2D1::ColorF NameColour = Colour(255, 255, 255);
 	D2D1::ColorF DistanceColour = Colour(200, 200, 200);
 	D2D1::ColorF HealthTextColour = Colour(100, 255, 100);
@@ -158,6 +163,11 @@ public:
         j[ConfigName][LIT("ShowStamina")] = ShowStamina;
         j[ConfigName][LIT("SpectatorAlert")] = SpectatorAlert;
         j[ConfigName][LIT("WeaponSprite")] = WeaponSprite;
+        j[ConfigName][LIT("NameByRole")] = NameByRole;
+        ToJsonColour(&j, LIT("CriminalColour"), &CriminalColour);
+        ToJsonColour(&j, LIT("PoliceColour"), &PoliceColour);
+        ToJsonColour(&j, LIT("CivilianColour"), &CivilianColour);
+        ToJsonColour(&j, LIT("HubberColour"), &HubberColour);
         ToJsonColour(&j, LIT("NameColour"), &NameColour);
         ToJsonColour(&j, LIT("DistanceColour"), &DistanceColour);
         ToJsonColour(&j, LIT("HealthTextColour"), &HealthTextColour);
@@ -239,6 +249,11 @@ public:
         ShowStamina = j[ConfigName].value(LIT("ShowStamina"), ShowStamina);
         SpectatorAlert = j[ConfigName].value(LIT("SpectatorAlert"), SpectatorAlert);
         WeaponSprite = j[ConfigName].value(LIT("WeaponSprite"), WeaponSprite);
+        NameByRole = j[ConfigName].value(LIT("NameByRole"), NameByRole);
+        FromJsonColour(j, LIT("CriminalColour"), &CriminalColour);
+        FromJsonColour(j, LIT("PoliceColour"), &PoliceColour);
+        FromJsonColour(j, LIT("CivilianColour"), &CivilianColour);
+        FromJsonColour(j, LIT("HubberColour"), &HubberColour);
         FromJsonColour(j, LIT("NameColour"), &NameColour);
         FromJsonColour(j, LIT("DistanceColour"), &DistanceColour);
         FromJsonColour(j, LIT("HealthTextColour"), &HealthTextColour);

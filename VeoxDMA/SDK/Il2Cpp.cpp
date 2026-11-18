@@ -2,6 +2,7 @@
 #include "Il2Cpp.h"
 #include "RobRunSDK.h"
 #include "Memory.h"
+#include "DebugLog.h"
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -62,8 +63,12 @@ static std::string ReadCString(std::uintptr_t address, std::size_t maxLength = 1
     const std::size_t size = (maxLength < sizeof(buffer)) ? maxLength : sizeof(buffer) - 1;
     if (ReadBytes(address, buffer, size)) {
         buffer[size] = '\0';
-        return std::string(buffer);
+        // Only accept if a null terminator exists within the read — a
+        // truncated read without one means the string was not fully captured.
+        if (std::memchr(buffer, '\0', size) != nullptr)
+            return std::string(buffer);
     }
+    // Byte-by-byte fallback: stops on first read failure or null
     std::string out;
     for (std::size_t i = 0; i < size; ++i) {
         char c = 0;
@@ -246,6 +251,15 @@ void Init(std::uintptr_t gameAssemblyBase)
     g_classTableAttempted = false;
 }
 
+void ResetCaches()
+{
+    { std::lock_guard<std::mutex> lock(g_classCacheMutex); g_classCache.clear(); }
+    { std::lock_guard<std::mutex> lock(g_classNameCacheMutex); g_classNameCache.clear(); }
+    { std::lock_guard<std::mutex> lock(g_namespaceCacheMutex); g_namespaceCache.clear(); }
+    { std::lock_guard<std::mutex> lock(g_fieldsCacheMutex); g_fieldsCache.clear(); }
+    { std::lock_guard<std::mutex> lock(g_primitiveMutex); g_primitiveOffsets.clear(); }
+}
+
 std::uintptr_t Base()
 {
     return gaBase;
@@ -255,15 +269,27 @@ bool VerifyFingerprint()
 {
     if (!gaBase) return false;
     std::uint32_t lfanew = 0;
-    if (!ReadBytes(gaBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000)
+    if (!ReadBytes(gaBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000) {
+        DLOG("Fingerprint: PE header read failed (lfanew=0x%x)", lfanew);
         return false;
+    }
     const std::uintptr_t nt = gaBase + lfanew;
     std::uint32_t signature = 0;
-    if (!ReadBytes(nt, &signature, sizeof(signature)) || signature != 0x00004550u)
+    if (!ReadBytes(nt, &signature, sizeof(signature)) || signature != 0x00004550u) {
+        DLOG("Fingerprint: PE signature mismatch (got 0x%x)", signature);
         return false;
+    }
     std::uint32_t sizeOfImage = 0;
-    if (!ReadBytes(nt + 0x50, &sizeOfImage, sizeof(sizeOfImage))) return false;
-    return sizeOfImage == rr::kPeSizeOfImage;
+    if (!ReadBytes(nt + 0x50, &sizeOfImage, sizeof(sizeOfImage))) {
+        DLOG("Fingerprint: SizeOfImage read failed");
+        return false;
+    }
+    if (sizeOfImage != rr::kPeSizeOfImage) {
+        DLOG("Fingerprint: SizeOfImage mismatch (got 0x%x, expected 0x%x)",
+             sizeOfImage, (unsigned)rr::kPeSizeOfImage);
+        return false;
+    }
+    return true;
 }
 
 namespace {
@@ -402,12 +428,15 @@ std::vector<Field> Fields(std::uintptr_t klass, bool includeParents)
     }
 
     std::vector<Field> out;
+    bool traversalComplete = true;
     for (int depth = 0; ValidPtr(klass) && depth < 32; ++depth) {
         const std::uintptr_t fields = ReadPtr(klass + rr::Klass::fields);
         std::uint16_t count = 0;
-        if (!ReadBytes(klass + rr::Klass::field_count, &count, sizeof(count)))
+        if (!ReadBytes(klass + rr::Klass::field_count, &count, sizeof(count))) {
+            traversalComplete = false;
             break;
-        if (count > 4096) break;
+        }
+        if (count > 4096) { traversalComplete = false; break; }
         if (ValidPtr(fields)) {
             for (std::uint16_t i = 0; i < count; ++i) {
                 const std::uintptr_t fi = fields + static_cast<std::uintptr_t>(i) * rr::FieldInfo::stride;
@@ -431,7 +460,7 @@ std::vector<Field> Fields(std::uintptr_t klass, bool includeParents)
         klass = ReadPtr(klass + rr::Klass::parent);
     }
 
-    if (!out.empty()) {
+    if (!out.empty() && traversalComplete) {
         std::lock_guard<std::mutex> lock(g_fieldsCacheMutex);
         g_fieldsCache[cacheKey] = out;
     }

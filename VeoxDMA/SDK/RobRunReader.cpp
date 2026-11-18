@@ -171,6 +171,15 @@ static float localYaw = 0.f;
 static float localPitch = 0.f;
 static std::uint32_t failureCount = 0;
 static std::uint32_t poseFailureCount = 0;
+static std::uint32_t boneTotalAcc = 0;
+static std::uint32_t boneInvalidAcc = 0;
+static std::uint32_t boneNormZeroAcc = 0;
+static std::uint32_t boneNormBadAcc = 0;
+static std::uint32_t bonePosInfAcc = 0;
+static std::uint32_t boneChainDropAcc = 0;
+static std::uint32_t poseScatterOkAcc = 0;
+static std::uint32_t poseScatterFailAcc = 0;
+static std::uint32_t poseFreshOkAcc = 0;
 static std::atomic<bool> readCatalog{ false };
 static int updateCounter = 0;
 static int gameRetryCountdown = 0;
@@ -623,6 +632,15 @@ static void PublishSnapshot()
     snapshot->playerRotationInput = cachedPlayerRotationInput;
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
+    snapshot->boneTotal = boneTotalAcc;
+    snapshot->boneInvalid = boneInvalidAcc;
+    snapshot->boneNormZero = boneNormZeroAcc;
+    snapshot->boneNormBad = boneNormBadAcc;
+    snapshot->bonePosInf = bonePosInfAcc;
+    snapshot->boneChainDrop = boneChainDropAcc;
+    snapshot->poseScatterOk = poseScatterOkAcc;
+    snapshot->poseScatterFail = poseScatterFailAcc;
+    snapshot->poseFreshOk = poseFreshOkAcc;
     snapshot->stampMs = GetTickCount64();
     snapshot->stampUs = SteadyMicros();
     snapshot->sessionGeneration = sessionGeneration;
@@ -662,6 +680,24 @@ void Shutdown()
         g_workerThread.join();
     if (g_worldWorkerThread.joinable())
         g_worldWorkerThread.join();
+
+    {
+        std::lock_guard<std::mutex> lock(g_snapshotMutex);
+        g_snapshot = std::make_shared<Snapshot>();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_worldMutex);
+        g_worldState = std::make_shared<RobRunWorld::State>();
+        g_plotState = std::make_shared<RobRunWorld::PlotState>();
+        g_inventoryState = std::make_shared<RobRunInventory::State>();
+    }
+    g_renderCameraModel.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        g_freshCamera = RobRunCamera::CameraState{};
+    }
+    gaBase = 0;
+    upBase = 0;
 }
 
 void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
@@ -763,31 +799,41 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_worldWorkerThread = std::thread([] {
         DLOG("World worker thread started");
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
-            const std::uintptr_t bm = cachedBattleModel;
-            const std::uintptr_t be = cachedBattleEntities;
-            const std::uintptr_t lc = cachedLocalCharacter;
-            if (bm > 0x10000) {
-                auto state = std::make_shared<RobRunWorld::State>();
-                if (RobRunWorld::Read(bm, be, *state)) {
-                    std::lock_guard<std::mutex> lock(g_worldMutex);
-                    g_worldState = std::move(state);
-                    UpdateDynamicOccluders(g_worldState);
-                }
-                if (be > 0x10000) {
-                    auto plots = std::make_shared<RobRunWorld::PlotState>();
-                    if (RobRunWorld::ReadPlots(be, *plots)) {
+            try {
+                const std::uint64_t gen = sessionGeneration;
+                const std::uintptr_t bm = cachedBattleModel;
+                const std::uintptr_t be = cachedBattleEntities;
+                const std::uintptr_t lc = cachedLocalCharacter;
+                if (bm > 0x10000) {
+                    auto state = std::make_shared<RobRunWorld::State>();
+                    if (RobRunWorld::Read(bm, be, *state) && sessionGeneration == gen) {
                         std::lock_guard<std::mutex> lock(g_worldMutex);
-                        g_plotState = std::move(plots);
+                        g_worldState = std::move(state);
+                        UpdateDynamicOccluders(g_worldState);
+                    }
+                    if (be > 0x10000 && sessionGeneration == gen) {
+                        auto plots = std::make_shared<RobRunWorld::PlotState>();
+                        if (RobRunWorld::ReadPlots(be, *plots) && sessionGeneration == gen) {
+                            std::lock_guard<std::mutex> lock(g_worldMutex);
+                            g_plotState = std::move(plots);
+                        }
                     }
                 }
-            }
-            if (lc > 0x10000) {
-                auto inv = std::make_shared<RobRunInventory::State>();
-                if (RobRunInventory::Read(bm, lc, *inv, readCatalog.load())) {
-                    std::lock_guard<std::mutex> lock(g_worldMutex);
-                    g_inventoryState = std::move(inv);
+                if (lc > 0x10000 && sessionGeneration == gen) {
+                    auto inv = std::make_shared<RobRunInventory::State>();
+                    if (RobRunInventory::Read(bm, lc, *inv, readCatalog.load()) && sessionGeneration == gen) {
+                        std::lock_guard<std::mutex> lock(g_worldMutex);
+                        g_inventoryState = std::move(inv);
+                    }
                 }
-            }
+                // Session changed while we were reading — clear stale published state
+                if (sessionGeneration != gen) {
+                    std::lock_guard<std::mutex> lock(g_worldMutex);
+                    g_worldState = std::make_shared<RobRunWorld::State>();
+                    g_plotState = std::make_shared<RobRunWorld::PlotState>();
+                    g_inventoryState = std::make_shared<RobRunInventory::State>();
+                }
+            } catch (...) {}
             for (int i = 0; i < 25 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(10);
         }
@@ -1035,12 +1081,7 @@ static std::string NormalizeRoleName(const std::string& raw)
     }
     if (lower.empty()) return {};
 
-    if (lower.find("crim") != std::string::npos ||
-        lower.find("rob") != std::string::npos ||
-        lower.find("thief") != std::string::npos ||
-        lower.find("bandit") != std::string::npos ||
-        lower.find("gang") != std::string::npos)
-        return "Criminal";
+    // Police first — "robbery" contains "rob" which would false-positive as Criminal
     if (lower.find("polic") != std::string::npos ||
         lower.find("cop") != std::string::npos ||
         lower.find("officer") != std::string::npos ||
@@ -1048,6 +1089,12 @@ static std::string NormalizeRoleName(const std::string& raw)
         lower.find("guard") != std::string::npos ||
         lower.find("sheriff") != std::string::npos)
         return "Police Officer";
+    if (lower.find("crim") != std::string::npos ||
+        lower.find("robber") != std::string::npos ||
+        lower.find("thief") != std::string::npos ||
+        lower.find("bandit") != std::string::npos ||
+        lower.find("gang") != std::string::npos)
+        return "Criminal";
     if (lower.find("civil") != std::string::npos ||
         lower.find("citizen") != std::string::npos ||
         lower.find("settler") != std::string::npos ||
@@ -1837,6 +1884,7 @@ static void RevalidateSession()
         // the whole session on the first miss forces a full re-resolve and
         // drops every cached rig, which shows up as a skeleton stutter.
         if (++fingerprintFailures < 2) return;
+        DLOG("Fingerprint: sustained failure, resetting roots and metadata caches");
         ++failureCount;
         cachedGame = 0;
         cachedBattleModel = 0;
@@ -1847,20 +1895,29 @@ static void RevalidateSession()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
         cachedUpdater = 0;
+        Il2Cpp::ResetCaches();
         fingerprintFailures = 0;
         return;
     }
     fingerprintFailures = 0;
     (void)Il2Cpp::VerifyAccessors();
 
-    if (cachedGame && !IsClass(cachedGame, "Game"))
+    if (cachedGame && !IsClass(cachedGame, "Game")) {
+        DLOG("GameRoot: class check failed for cachedGame=0x%llx", (unsigned long long)cachedGame);
         cachedGame = 0;
-    if (cachedBattleModel && !IsClass(cachedBattleModel, "BattleModel"))
+    }
+    if (cachedBattleModel && !IsClass(cachedBattleModel, "BattleModel")) {
+        DLOG("ReaderRoot: class check failed for BattleModel=0x%llx", (unsigned long long)cachedBattleModel);
         cachedBattleModel = 0;
-    if (cachedBattleEntities && !IsClass(cachedBattleEntities, "BattleEntitiesModel"))
+    }
+    if (cachedBattleEntities && !IsClass(cachedBattleEntities, "BattleEntitiesModel")) {
+        DLOG("ReaderRoot: class check failed for BattleEntitiesModel=0x%llx", (unsigned long long)cachedBattleEntities);
         cachedBattleEntities = 0;
-    if (cachedUpdater && !IsClass(cachedUpdater, "BattleEntitiesUpdater"))
+    }
+    if (cachedUpdater && !IsClass(cachedUpdater, "BattleEntitiesUpdater")) {
+        DLOG("ReaderRoot: class check failed for BattleEntitiesUpdater=0x%llx", (unsigned long long)cachedUpdater);
         cachedUpdater = 0;
+    }
 }
 
 static void UpdateInternal()
@@ -1874,6 +1931,9 @@ static void UpdateInternal()
     fallbackViewProjection = Matrix4x4{};
     fallbackViewProjectionValid = false;
     poseFailureCount = 0;
+    boneTotalAcc = boneInvalidAcc = boneNormZeroAcc = boneNormBadAcc = 0;
+    bonePosInfAcc = boneChainDropAcc = 0;
+    poseScatterOkAcc = poseScatterFailAcc = poseFreshOkAcc = 0;
 
     if (!gaBase) { if (uiCount <= 3) DLOG("UpdateInternal #%d: no gaBase", uiCount); return; }
 
@@ -1890,9 +1950,10 @@ static void UpdateInternal()
             // on every pass.
             gameRetryCountdown = cachedGame ? 0 : 30;
             if (!cachedGame) {
-                // ~300 attempts × 30-pass backoff ≈ 5 minutes of total failure.
-                // The DTB may have gone stale; attempt a re-fix once.
+                if (gameResolveFails == 0)
+                    DLOG("GameRoot: GOM resolve failed, backing off");
                 if (++gameResolveFails >= 300) {
+                    DLOG("GameRoot: sustained failure (%d attempts), attempting CR3 fix", gameResolveFails);
                     gameResolveFails = 0;
                     TargetProcess.FixCr3();
                 }
@@ -1929,6 +1990,8 @@ static void UpdateInternal()
         cachedLocalCharacter = 0;
         NoteSessionState();
         ++failureCount;
+        DLOG("ReaderRoot: BattleModel lost, failures=%u game=0x%llx",
+             failureCount, (unsigned long long)cachedGame);
         return;
     }
 
@@ -2569,6 +2632,360 @@ static void UpdateInternal()
             std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
             dynCopy = g_dynOccluders;
         }
+
+        // --- Scatter-batched detail refresh ---
+        // Collect entities needing detail refresh, then read all their
+        // data in 4 scatter phases (4 DMA round-trips) instead of
+        // ~50 sequential reads per entity.
+        struct ScatterEnt {
+            std::size_t workIdx;
+            int entityId;
+            std::uintptr_t characterModel;
+            // phase 1: from characterModel
+            std::uintptr_t privateModel{};
+            std::uintptr_t data{};
+            std::uintptr_t isDeadWrapper{};
+            std::uintptr_t weaponReload{};
+            std::uintptr_t itemInHands{};
+            std::uintptr_t hasArmorWrapper{};
+            std::uintptr_t inVehicle{};
+            std::uintptr_t isBgReloadWrapper{};
+            std::uintptr_t playerRole{};
+            std::uintptr_t costModel{};
+            std::uintptr_t knockout{};
+            std::uintptr_t knockdown{};
+            std::uintptr_t kdLeaveModel{};
+            // phase 2: second level
+            std::uintptr_t healthModel{};
+            std::uintptr_t initArmorModel{};
+            std::uintptr_t staminaModel{};
+            std::uintptr_t common{};
+            std::uintptr_t vehicleWrapper{};
+            std::uintptr_t reloadState{};
+            std::uintptr_t reloadEndTsW{};
+            std::uintptr_t kdEndTsW{};
+            std::uintptr_t koPhase{};
+            std::uintptr_t koEndTsW{};
+            std::uint8_t   koSurrendered{};
+            std::uint8_t   koHandcuffed{};
+            std::uintptr_t weaponCurrent{};
+            // phase 3: third level + blocks
+            struct { std::uintptr_t hw; std::uintptr_t dw; std::int32_t maxAmt; std::int32_t critHp; } hb{};
+            std::uintptr_t staminaW{};
+            std::uintptr_t armorW{};
+            std::uintptr_t commonRole{};
+            std::uintptr_t firingW{};
+            std::uintptr_t sprintingW{};
+            std::uintptr_t crouchingW{};
+            std::uintptr_t deadCommonW{};
+            std::uintptr_t vehIdW{};
+            std::uintptr_t reloadDesc{};
+            std::uintptr_t koPhaseDesc{};
+            std::uintptr_t weaponData{};
+            struct { std::int32_t charInv, vehInv, charEquip, charInvCash, charInvItems; } costs{};
+            // phase 4: wrapper values
+            float healthVal{};
+            std::uint8_t deadVal{};
+            std::int32_t staminaVal{};
+            std::int32_t armorVal{};
+            std::uint8_t hasArmorVal{};
+            std::uint8_t firingVal{};
+            std::uint8_t sprintingVal{};
+            std::uint8_t crouchingVal{};
+            std::uint8_t deadCommonVal{};
+            std::int32_t vehIdCommon{};
+            std::int32_t vehIdRole{};
+            std::uint8_t bgReloadVal{};
+            std::int64_t reloadEndTs{};
+            std::int64_t kdEndTs{};
+            std::uint8_t kdLeaveActive{};
+            std::int64_t koEndTs{};
+            std::uintptr_t weaponDesc{};
+        };
+        ScatterEnt se[8];
+        int seCount = 0;
+        std::unordered_map<int, int> seIdx;
+        seIdx.reserve(8);
+        for (auto& w : work) {
+            if (!w.positionValid) continue;
+            auto& det = detailCache[w.entityId];
+            const bool modelChanged = det.characterModel != w.characterModel;
+            const bool expired = now - det.stamp > 500;
+            if (!modelChanged && !(expired && detailBudget > 0)) continue;
+            if (!modelChanged) --detailBudget;
+            if (modelChanged) {
+                det = DetailCacheEntry{};
+                det.characterModel = w.characterModel;
+                det.transform = w.transform;
+            }
+            det.stamp = now;
+            auto& s = se[seCount];
+            std::memset(&s, 0, sizeof(s));
+            s.workIdx = static_cast<std::size_t>(&w - work.data());
+            s.entityId = w.entityId;
+            s.characterModel = w.characterModel;
+            seIdx[w.entityId] = seCount;
+            ++seCount;
+            if (seCount >= 8) break;
+        }
+
+        if (seCount > 0) {
+            auto sc = TargetProcess.CreateScatterHandleCached();
+            if (sc) {
+                // Phase 1: characterModel-level pointers
+                for (int i = 0; i < seCount; ++i) {
+                    auto& s = se[i];
+                    const auto cm = s.characterModel;
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::PrivateModel, &s.privateModel, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::Data, &s.data, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::IsDeadWrapper, &s.isDeadWrapper, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::WeaponReload, &s.weaponReload, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::ItemInHands, &s.itemInHands, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::HasArmor, &s.hasArmorWrapper, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::InVehicle, &s.inVehicle, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::IsBackgroundReload, &s.isBgReloadWrapper, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::PlayerRole, &s.playerRole, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::RobberInventoryCost, &s.costModel, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::Knockout, &s.knockout, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::Knockdown, &s.knockdown, 8);
+                    TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::KnockdownLeaveState, &s.kdLeaveModel, 8);
+                }
+                TargetProcess.ExecuteScatterReadCached(sc);
+
+                // Phase 2: second-level pointers
+                for (int i = 0; i < seCount; ++i) {
+                    auto& s = se[i];
+                    if (s.privateModel > 0x10000) {
+                        TargetProcess.AddScatterReadRequest(sc, s.privateModel + rr::BattleCharacterPrivateModel::HealthModel, &s.healthModel, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.privateModel + rr::BattleCharacterPrivateModel::InitArmorModel, &s.initArmorModel, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.privateModel + rr::BattleCharacterPrivateModel::Stamina, &s.staminaModel, 8);
+                    }
+                    if (s.data > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.data + rr::BattleData::Common, &s.common, 8);
+                    if (s.inVehicle > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.inVehicle + rr::InVehicleModel::EntityId, &s.vehicleWrapper, 8);
+                    if (s.weaponReload > 0x10000) {
+                        TargetProcess.AddScatterReadRequest(sc, s.weaponReload + rr::WeaponReloadModel::State, &s.reloadState, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.weaponReload + rr::WeaponReloadModel::EndTs, &s.reloadEndTsW, 8);
+                    }
+                    if (s.knockdown > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.knockdown + rr::KnockdownModel::EndTs, &s.kdEndTsW, 8);
+                    if (s.knockout > 0x10000) {
+                        TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::Phase, &s.koPhase, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::EndTs, &s.koEndTsW, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::IsSurrendered, &s.koSurrendered, 1);
+                        TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::IsHandcuffed, &s.koHandcuffed, 1);
+                    }
+                    if (s.itemInHands > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.itemInHands + rr::ItemInHandsModel::Current, &s.weaponCurrent, 8);
+                }
+                TargetProcess.ExecuteScatterReadCached(sc);
+
+                // Phase 3: third-level pointers + block reads
+                for (int i = 0; i < seCount; ++i) {
+                    auto& s = se[i];
+                    if (s.healthModel > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.healthModel + rr::HealthModel::Health, &s.hb, sizeof(s.hb));
+                    if (s.staminaModel > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.staminaModel + rr::StaminaModel::Amount, &s.staminaW, 8);
+                    if (s.initArmorModel > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.initArmorModel + rr::InitArmorModel::Amount, &s.armorW, 8);
+                    if (s.common > 0x10000) {
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::Role, &s.commonRole, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::IsFiring, &s.firingW, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::IsSprinting, &s.sprintingW, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::IsCrouching, &s.crouchingW, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::IsDead, &s.deadCommonW, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::VehicleEntityId, &s.vehIdW, 8);
+                    }
+                    if (s.reloadState > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.reloadState + rr::ReferenceData::Value, &s.reloadDesc, 8);
+                    if (s.koPhase > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.koPhase + rr::ReferenceData::Value, &s.koPhaseDesc, 8);
+                    if (s.weaponCurrent > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.weaponCurrent + rr::EquipItemModel::Data, &s.weaponData, 8);
+                    if (s.costModel > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.costModel + rr::RobberInventoryCostModel::CharacterInventory, &s.costs, sizeof(s.costs));
+                }
+                TargetProcess.ExecuteScatterReadCached(sc);
+
+                // Phase 4: wrapper primitive values (all at +0x18)
+                constexpr std::uintptr_t V = rr::PrimitiveData::value;
+                for (int i = 0; i < seCount; ++i) {
+                    auto& s = se[i];
+                    if (s.hb.hw > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.hb.hw + V, &s.healthVal, 4);
+                    if (s.isDeadWrapper > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.isDeadWrapper + V, &s.deadVal, 1);
+                    if (s.staminaW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.staminaW + V, &s.staminaVal, 4);
+                    if (s.armorW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.armorW + V, &s.armorVal, 4);
+                    if (s.hasArmorWrapper > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.hasArmorWrapper + V, &s.hasArmorVal, 1);
+                    if (s.firingW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.firingW + V, &s.firingVal, 1);
+                    if (s.sprintingW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.sprintingW + V, &s.sprintingVal, 1);
+                    if (s.crouchingW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.crouchingW + V, &s.crouchingVal, 1);
+                    if (s.deadCommonW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.deadCommonW + V, &s.deadCommonVal, 1);
+                    if (s.vehIdW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.vehIdW + V, &s.vehIdCommon, 4);
+                    if (s.vehicleWrapper > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.vehicleWrapper + V, &s.vehIdRole, 4);
+                    if (s.isBgReloadWrapper > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.isBgReloadWrapper + V, &s.bgReloadVal, 1);
+                    if (s.reloadEndTsW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.reloadEndTsW + 0x18, &s.reloadEndTs, 8);
+                    if (s.kdEndTsW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.kdEndTsW + 0x18, &s.kdEndTs, 8);
+                    if (s.kdLeaveModel > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.kdLeaveModel + rr::KnockdownLeaveStateModel::IsActive, &s.kdLeaveActive, 1);
+                    if (s.koEndTsW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.koEndTsW + 0x18, &s.koEndTs, 8);
+                    if (s.weaponData > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.weaponData + rr::ReferenceData::Value, &s.weaponDesc, 8);
+                }
+                TargetProcess.ExecuteScatterReadCached(sc);
+                TargetProcess.CloseScatterHandle(sc);
+            }
+
+            // Distribute scatter results into detail cache
+            constexpr std::int64_t kSentinelTs = 1767225600000LL;
+            for (int i = 0; i < seCount; ++i) {
+                auto& s = se[i];
+                auto& det = detailCache[s.entityId];
+
+                // isDead (top-level wrapper)
+                if (s.isDeadWrapper > 0x10000) det.isDead = s.deadVal != 0;
+
+                // Health
+                if (s.hb.hw > 0x10000 &&
+                    std::isfinite(s.healthVal) && s.healthVal >= 0.f && s.healthVal <= 100000.f) {
+                    det.health = s.healthVal;
+                    det.healthKnown = true;
+                }
+                if (s.hb.maxAmt > 0 && s.hb.maxAmt <= 100000)
+                    det.maxHealth = static_cast<float>(s.hb.maxAmt);
+                if (s.hb.critHp >= 0 && s.hb.critHp <= 100000)
+                    det.criticalHealth = static_cast<float>(s.hb.critHp);
+
+                // Stamina / Armor
+                if (s.staminaW > 0x10000) det.stamina = static_cast<float>(s.staminaVal);
+                if (s.armorW > 0x10000) {
+                    det.armor = static_cast<float>(s.armorVal);
+                    if (s.armorVal > 0) det.hasArmor = true;
+                }
+
+                // Common state flags (overrides armor hasArmor)
+                if (s.firingW > 0x10000) det.isFiring = s.firingVal != 0;
+                if (s.sprintingW > 0x10000) det.isSprinting = s.sprintingVal != 0;
+                if (s.crouchingW > 0x10000) det.isCrouching = s.crouchingVal != 0;
+                if (s.deadCommonW > 0x10000 && s.deadCommonVal != 0) det.isDead = true;
+                if (s.hasArmorWrapper > 0x10000) det.hasArmor = s.hasArmorVal != 0;
+
+                // Vehicle (from ReadRoleAndVehicle path)
+                if (s.vehicleWrapper > 0x10000 && s.vehIdRole > 0) {
+                    det.inVehicle = true;
+                    det.vehicleId = s.vehIdRole;
+                }
+                // Vehicle (from ReadCommonState path, takes priority)
+                if (s.vehIdW > 0x10000) {
+                    det.inVehicle = s.vehIdCommon > 0;
+                    det.vehicleId = s.vehIdCommon > 0 ? s.vehIdCommon : 0;
+                }
+
+                // Role (sequential — uses cache, usually hits)
+                EntityData roleScratch{};
+                ApplyRoleFromWrapper(s.playerRole, roleScratch);
+                if (roleScratch.roleName.empty() && roleScratch.role == 0)
+                    ApplyRoleFromWrapper(s.commonRole, roleScratch);
+                if (roleScratch.role != 0) det.role = roleScratch.role;
+                if (!roleScratch.roleName.empty()) det.roleName = std::move(roleScratch.roleName);
+
+                // Reload
+                det.isReloading = false;
+                det.reloadPhase.clear();
+                if (s.reloadDesc > 0x10000) {
+                    det.isReloading = true;
+                    const std::uintptr_t nameStr = ReadPtr(s.reloadDesc + rr::Description::Name);
+                    if (nameStr > 0x10000) {
+                        std::wstring w;
+                        RobRunMemory::ReadString(nameStr, w);
+                        det.reloadPhase = RobRunMemory::WideToUtf8(w);
+                    }
+                }
+                if (!det.isReloading && battleNowMs > 0 &&
+                    s.reloadEndTs > kSentinelTs && s.reloadEndTs > battleNowMs)
+                    det.isReloading = true;
+                if (!det.isReloading && s.bgReloadVal != 0)
+                    det.isReloading = true;
+
+                // Knockdown
+                det.isKnockedDown = false;
+                if (battleNowMs > 0 && s.kdEndTs > kSentinelTs && s.kdEndTs > battleNowMs &&
+                    s.kdLeaveActive == 0)
+                    det.isKnockedDown = true;
+
+                // Knockout
+                det.isKnockedOut = false;
+                if (s.koPhaseDesc > 0x10000)
+                    det.isKnockedOut = true;
+                else if (battleNowMs > 0 && s.koEndTs > kSentinelTs && s.koEndTs > battleNowMs)
+                    det.isKnockedOut = true;
+                det.isSurrendered = s.koSurrendered != 0;
+                det.isHandcuffed = s.koHandcuffed != 0;
+
+                // Weapon (uses cache — only reads strings on miss)
+                if (s.weaponDesc > 0x10000) {
+                    const auto wit = g_weaponDescCache.find(s.weaponDesc);
+                    if (wit != g_weaponDescCache.end() && wit->second.valid) {
+                        det.weaponName = wit->second.name;
+                        det.weaponIndex = wit->second.index;
+                    } else {
+                        const std::uintptr_t nameStr = ReadPtr(s.weaponDesc + rr::Description::Name);
+                        std::wstring wn;
+                        if (nameStr > 0x10000) RobRunMemory::ReadString(nameStr, wn);
+                        if (!wn.empty()) {
+                            std::wstring cleaned = CleanWeaponName(wn);
+                            if (!cleaned.empty()) wn = std::move(cleaned);
+                        }
+                        const std::int32_t idx = RobRunMemory::ReadInt32(
+                            s.weaponDesc + rr::InventoryItemDescription::Index);
+                        det.weaponName = wn;
+                        det.weaponIndex = idx >= 0 ? idx : -1;
+                        if (!wn.empty() || idx >= 0)
+                            g_weaponDescCache[s.weaponDesc] = WeaponDescCache{ wn, det.weaponIndex, true };
+                    }
+                } else {
+                    det.weaponName.clear();
+                    det.weaponIndex = -1;
+                }
+
+                // Slot identity (sequential, cached)
+                if (det.publicId == 0 || det.nickname.empty()) {
+                    const auto slotIt = slots.find(s.entityId);
+                    if (slotIt != slots.end()) {
+                        EntityData slotScratch{};
+                        ReadSlotIdentity(slotIt->second, slotScratch);
+                        det.nickname = std::move(slotScratch.nickname);
+                        det.clanTag = std::move(slotScratch.clanTag);
+                        det.publicId = slotScratch.publicId;
+                    }
+                }
+
+                // Cost block (already scatter-read)
+                if (s.costModel > 0x10000) {
+                    det.bagValue = s.costs.charInv;
+                    det.bagCash = s.costs.charInvCash;
+                    det.bagItems = s.costs.charInvItems;
+                    det.equipValue = s.costs.charEquip;
+                }
+            }
+        }
+
         for (auto& w : work) {
             if (!w.positionValid) continue;
             if (uiCount <= 3) DLOG("UpdateInternal #%d: entity id=%d, cp=A (init)", uiCount, w.entityId);
@@ -2589,92 +3006,6 @@ static void UpdateInternal()
 
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B (detail cache)", uiCount);
             auto& detail = detailCache[entity.entityId];
-            const bool detailModelChanged =
-                detail.characterModel != w.characterModel;
-            const bool detailExpired = now - detail.stamp > 500;
-            if (detailModelChanged ||
-                (detailExpired && detailBudget > 0))
-            {
-                if (!detailModelChanged) --detailBudget;
-                if (detailModelChanged) {
-                    detail = DetailCacheEntry{};
-                    detail.characterModel = w.characterModel;
-                    detail.transform = w.transform;
-                }
-                detail.stamp = now;
-
-                EntityData scratch{};
-                scratch.entityId = entity.entityId;
-
-                const std::uintptr_t deadWrapper = ReadPtr(
-                    w.characterModel + rr::BattleCharacterModel::IsDeadWrapper);
-                bool dead = false;
-                if (Il2Cpp::ReadPrimitiveBool(deadWrapper, dead))
-                    detail.isDead = dead;
-
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B1 (isDead done)", uiCount);
-                ReadHealth(w.characterModel, scratch);
-                detail.health = scratch.health;
-                detail.maxHealth = scratch.maxHealth;
-                detail.criticalHealth = scratch.criticalHealth;
-                detail.healthKnown = scratch.healthKnown;
-                detail.armor = scratch.armor;
-                detail.stamina = scratch.stamina;
-
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B2 (health done)", uiCount);
-                scratch.isDead = detail.isDead;
-                ReadRoleAndVehicle(w.characterModel, scratch);
-                ReadCommonState(w.characterModel, scratch);
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B3 (role+common done)", uiCount);
-                ReadReloadAndKnockdownState(w.characterModel, battleNowMs, scratch);
-                detail.isReloading = scratch.isReloading;
-                detail.isKnockedDown = scratch.isKnockedDown;
-                detail.isKnockedOut = scratch.isKnockedOut;
-                detail.isSurrendered = scratch.isSurrendered;
-                detail.isHandcuffed = scratch.isHandcuffed;
-                detail.reloadPhase = std::move(scratch.reloadPhase);
-                detail.isDead = scratch.isDead;
-                detail.isSprinting = scratch.isSprinting;
-                detail.isCrouching = scratch.isCrouching;
-                detail.hasArmor = scratch.hasArmor;
-                detail.isFiring = scratch.isFiring;
-                if (scratch.role != 0) detail.role = scratch.role;
-                if (!scratch.roleName.empty()) detail.roleName = std::move(scratch.roleName);
-                detail.inVehicle = scratch.inVehicle;
-                detail.vehicleId = scratch.vehicleId;
-
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B4 (reload+knockdown done)", uiCount);
-                ReadWeaponName(w.characterModel, detail.weaponName, detail.weaponIndex);
-
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=B5 (weapon done)", uiCount);
-                if (detail.publicId == 0 || detail.nickname.empty()) {
-                    const auto slotIt = slots.find(w.entityId);
-                    if (slotIt != slots.end()) {
-                        ReadSlotIdentity(slotIt->second, scratch);
-                        detail.nickname = std::move(scratch.nickname);
-                        detail.clanTag = std::move(scratch.clanTag);
-                        detail.publicId = scratch.publicId;
-                    }
-                }
-
-                const std::uintptr_t costModel = ReadPtr(
-                    w.characterModel + rr::BattleCharacterModel::RobberInventoryCost);
-                if (costModel > 0x10000) {
-                    struct CostBlock {
-                        std::int32_t characterInventory;
-                        std::int32_t vehicleInventory;
-                        std::int32_t characterEquip;
-                        std::int32_t characterInventoryCash;
-                        std::int32_t characterInventoryItems;
-                    } costs{};
-                    if (RobRunMemory::ReadBytes(costModel + rr::RobberInventoryCostModel::CharacterInventory, &costs, sizeof(costs))) {
-                        detail.bagValue = costs.characterInventory;
-                        detail.bagCash = costs.characterInventoryCash;
-                        detail.bagItems = costs.characterInventoryItems;
-                        detail.equipValue = costs.characterEquip;
-                    }
-                }
-            }
 
             entity.isDead = detail.isDead;
             entity.health = detail.health;
@@ -2727,16 +3058,28 @@ static void UpdateInternal()
                     DLOG("RobRunReader: needsPose, layout.count=%d, poseOffset=%zu, poseSize=%zu",
                         rig.layout.count, (size_t)w.poseOffset, (size_t)w.poseSize);
                 }
+                Skeleton::PoseStats pst{};
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
                     rig.bones, &rig.points, rig.curLocal.data(),
-                    rig.worldMatrices.data());
+                    rig.worldMatrices.data(), &pst);
 
-                if (!sampled) {
+                if (sampled) {
+                    ++poseScatterOkAcc;
+                } else {
+                    ++poseScatterFailAcc;
+                    pst = {};
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
                         rig.bones, &rig.points, rig.curLocal.data(),
-                        rig.worldMatrices.data());
+                        rig.worldMatrices.data(), &pst);
+                    if (sampled) ++poseFreshOkAcc;
                 }
+                boneTotalAcc += pst.total;
+                boneInvalidAcc += pst.invalid;
+                boneNormZeroAcc += pst.normZero;
+                boneNormBadAcc += pst.normBad;
+                bonePosInfAcc += pst.posInf;
+                boneChainDropAcc += pst.chainDrop;
                 if (!loggedPose) {
                     DLOG("RobRunReader: pose sampled=%d, worldMatrices.size=%zu",
                         sampled, rig.worldMatrices.size());

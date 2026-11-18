@@ -24,6 +24,7 @@ struct Field {
 };
 
 void Init(std::uintptr_t gameAssemblyBase);
+void ResetCaches();
 std::uintptr_t Base();
 
 // PE fingerprint and accessor-byte validation. Call once after attach and

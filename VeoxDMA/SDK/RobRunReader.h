@@ -109,6 +109,16 @@ struct Snapshot {
     // Players whose fresh pose read failed on the last pass. They keep their
     // previous bones instead of accepting a cached (visibly trailing) pose.
     std::uint32_t poseFailures = 0;
+    // Bone jitter diagnostics: per-pass aggregate across all entities.
+    std::uint32_t boneTotal = 0;        // total bones evaluated
+    std::uint32_t boneInvalid = 0;      // failed TRS validation
+    std::uint32_t boneNormZero = 0;     // quaternion norm ~0 (unread/zeroed)
+    std::uint32_t boneNormBad = 0;      // quaternion norm outside [0.5,1.5] but > 0
+    std::uint32_t bonePosInf = 0;       // non-finite position
+    std::uint32_t boneChainDrop = 0;    // valid TRS but parent invalid (chain break)
+    std::uint32_t poseScatterOk = 0;    // ProcessPoseData succeeded
+    std::uint32_t poseScatterFail = 0;  // ProcessPoseData failed, tried fresh
+    std::uint32_t poseFreshOk = 0;      // SampleLayout fallback succeeded
     Matrix4x4 fallbackViewProjection{};
     bool fallbackViewProjectionValid = false;
     // Publish time (GetTickCount64). Lets the overlay report how old the pose

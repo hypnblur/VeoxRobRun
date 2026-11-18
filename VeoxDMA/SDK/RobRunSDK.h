@@ -363,8 +363,19 @@ inline constexpr std::uintptr_t Correction = 0x28;
 inline constexpr std::uintptr_t BlockTimer = 0x34;
 }
 
+namespace CharacterClientModel {
+inline constexpr std::uintptr_t FireModel = 0xB8;
+}
+
+namespace CharacterFireModel {
+inline constexpr std::uintptr_t IsFiring   = 0x10;
+inline constexpr std::uintptr_t HasShot    = 0x11;
+inline constexpr std::uintptr_t ShotIndex  = 0x14;
+inline constexpr std::uintptr_t ShotTime   = 0x18;
+}
+
 namespace RecoilModel {
-inline constexpr std::uintptr_t OffsetVec = 0x10;
+inline constexpr std::uintptr_t OffsetVec = 0x10; // Vector2 (8 bytes)
 }
 
 namespace FakeSpreadModel {

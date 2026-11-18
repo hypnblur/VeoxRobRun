@@ -827,12 +827,29 @@ void DrawPlayers()
 			return y + fullSize.y;
 		};
 
+		// Resolve role color once — used for name and role tag
+		const std::string roleLabel =
+			RobRunReader::RoleLabel(ent.role, ent.roleName);
+		ImU32 roleBasedCol = nameCol;
+		if (pcfg.NameByRole && !roleLabel.empty()) {
+			if (roleLabel == "Criminal")
+				roleBasedCol = Esp::D2DColorToImU32(pcfg.CriminalColour);
+			else if (roleLabel == "Police Officer")
+				roleBasedCol = Esp::D2DColorToImU32(pcfg.PoliceColour);
+			else if (roleLabel == "Civilian")
+				roleBasedCol = Esp::D2DColorToImU32(pcfg.CivilianColour);
+			else if (roleLabel == "Hubber")
+				roleBasedCol = Esp::D2DColorToImU32(pcfg.HubberColour);
+			if (alphaMult < 1.f)
+				roleBasedCol = Esp::ScaleAlpha(roleBasedCol, alphaMult);
+		}
+
 		// Top: name + clan tag
 		std::vector<TextSeg> topSegs;
 		if (!ent.nickname.empty())
-			topSegs.push_back({ RobRunMemory::WideToUtf8(ent.nickname), nameCol });
+			topSegs.push_back({ RobRunMemory::WideToUtf8(ent.nickname), roleBasedCol });
 		if (!ent.clanTag.empty())
-			topSegs.push_back({ " <" + RobRunMemory::WideToUtf8(ent.clanTag) + ">", nameCol });
+			topSegs.push_back({ " <" + RobRunMemory::WideToUtf8(ent.clanTag) + ">", roleBasedCol });
 
 		float topY = boxValid ? (minY - 6.f) : screenPos.y;
 		if (!topSegs.empty()) {
@@ -938,18 +955,17 @@ void DrawPlayers()
 		if (pcfg.ShowRole)
 		{
 			ImU32 roleTextCol = roleCol;
-			const std::string roleLabel =
-				RobRunReader::RoleLabel(ent.role, ent.roleName);
-			if (pcfg.ExpRoleColors && !roleLabel.empty())
-			{
+			if (pcfg.ExpRoleColors && !roleLabel.empty()) {
 				if (roleLabel == "Criminal")
-					roleTextCol = IM_COL32(255, 85, 85, 255);
+					roleTextCol = Esp::D2DColorToImU32(pcfg.CriminalColour);
 				else if (roleLabel == "Police Officer")
-					roleTextCol = IM_COL32(80, 175, 255, 255);
+					roleTextCol = Esp::D2DColorToImU32(pcfg.PoliceColour);
 				else if (roleLabel == "Civilian")
-					roleTextCol = IM_COL32(100, 235, 130, 255);
+					roleTextCol = Esp::D2DColorToImU32(pcfg.CivilianColour);
 				else if (roleLabel == "Hubber")
-					roleTextCol = IM_COL32(150, 175, 225, 255);
+					roleTextCol = Esp::D2DColorToImU32(pcfg.HubberColour);
+				if (alphaMult < 1.f)
+					roleTextCol = Esp::ScaleAlpha(roleTextCol, alphaMult);
 			}
 			if (!roleLabel.empty())
 				stateSegs.push_back({ "[" + roleLabel + "]", roleTextCol });

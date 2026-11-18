@@ -763,7 +763,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
 
 static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
     std::vector<BoneSegment>& out, BonePoints* points, BoneLocal* localOut,
-    Matrix4x4* worldMatricesOut = nullptr)
+    Matrix4x4* worldMatricesOut = nullptr, PoseStats* stats = nullptr)
 {
     const int count = layout.count;
     std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
@@ -771,12 +771,20 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
         auto& t = local[b];
         const float n = t.q.x*t.q.x+t.q.y*t.q.y+t.q.z*t.q.z+t.q.w*t.q.w;
         if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) ||
-            n < 0.5f || n > 1.5f)
+            n < 0.5f || n > 1.5f) {
+            if (stats) {
+                ++stats->invalid;
+                if (!Finite(t.p) || !Finite(t.s)) ++stats->posInf;
+                else if (n < 0.01f) ++stats->normZero;
+                else ++stats->normBad;
+            }
             continue;
+        }
         const float inv = 1.0f/std::sqrt(n);
         t.q = {t.q.x*inv,t.q.y*inv,t.q.z*inv,t.q.w*inv};
         boneValid[b] = 1;
     }
+    if (stats) stats->total += count;
 
     std::vector<Vec> world(static_cast<std::size_t>(count));
     std::vector<Quat> worldRot(static_cast<std::size_t>(count));
@@ -814,6 +822,11 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
                 worldValid[b] = 1;
             }
         }
+    }
+
+    if (stats) {
+        for (int b = 0; b < count; ++b)
+            if (boneValid[b] && !worldValid[b]) ++stats->chainDrop;
     }
 
     if (worldMatricesOut) {
@@ -915,7 +928,8 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
 
 bool SampleLayout(const RigLayout& layout, const Read& read,
     std::vector<BoneSegment>& out, BonePoints* points,
-    BoneLocal* localOut, Matrix4x4* worldMatricesOut)
+    BoneLocal* localOut, Matrix4x4* worldMatricesOut,
+    PoseStats* stats)
 {
     const int count = layout.count;
     if (!read || layout.matrices <= 0x10000 || count < 2 ||
@@ -932,13 +946,14 @@ bool SampleLayout(const RigLayout& layout, const Read& read,
         if (!read(layout.matrices + offset, poseBytes + offset, chunk))
             return false;
     }
-    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut);
+    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut, stats);
 }
 
 bool ProcessPoseData(const RigLayout& layout, const void* poseData,
     std::size_t poseSize, std::vector<BoneSegment>& out,
     BonePoints* points, BoneLocal* localOut,
-    Matrix4x4* worldMatricesOut)
+    Matrix4x4* worldMatricesOut,
+    PoseStats* stats)
 {
     const int count = layout.count;
     if (!poseData || count < 2 ||
@@ -950,7 +965,7 @@ bool ProcessPoseData(const RigLayout& layout, const void* poseData,
 
     std::vector<TRS> local(static_cast<std::size_t>(count));
     std::memcpy(local.data(), poseData, static_cast<std::size_t>(count) * sizeof(TRS));
-    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut);
+    return BuildPoseOutput(layout, local, out, points, localOut, worldMatricesOut, stats);
 }
 
 std::vector<BoneSegment> BuildFromView(U view, const Read& read)

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Radar.h"
+#include "EspDraw.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
@@ -157,29 +158,17 @@ struct RoleMarker {
 
 RoleMarker GetRoleMarker(int role, const std::string& roleName)
 {
-	std::string label = RobRunReader::RoleLabel(role, roleName);
-	std::string lower;
-	lower.reserve(label.size());
-	for (char c : label) lower.push_back((char)::tolower((unsigned char)c));
+	const auto& pcfg = ConfigInstance.Player;
+	const std::string label = RobRunReader::RoleLabel(role, roleName);
 
-	if (lower.find("crim") != std::string::npos || lower.find("rob") != std::string::npos ||
-		lower.find("thief") != std::string::npos || lower.find("bandit") != std::string::npos ||
-		lower.find("gang") != std::string::npos || role == 1257638368)
-	{
-		return { "C", IM_COL32(255, 75, 75, 255) }; // Criminal - Red
-	}
-	if (lower.find("polic") != std::string::npos || lower.find("cop") != std::string::npos ||
-		lower.find("officer") != std::string::npos || lower.find("swat") != std::string::npos ||
-		lower.find("guard") != std::string::npos || lower.find("sheriff") != std::string::npos)
-	{
-		return { "P", IM_COL32(75, 160, 255, 255) }; // Police - Blue
-	}
-	if (lower.find("civil") != std::string::npos || lower.find("citizen") != std::string::npos ||
-		lower.find("bystander") != std::string::npos || lower.find("hub") != std::string::npos ||
-		lower.find("npc") != std::string::npos || role == 6)
-	{
-		return { "CI", IM_COL32(90, 235, 120, 255) }; // Civilian - Green
-	}
+	if (label == "Criminal")
+		return { "C", Esp::D2DColorToImU32(pcfg.CriminalColour) };
+	if (label == "Police Officer")
+		return { "P", Esp::D2DColorToImU32(pcfg.PoliceColour) };
+	if (label == "Civilian")
+		return { "CI", Esp::D2DColorToImU32(pcfg.CivilianColour) };
+	if (label == "Hubber")
+		return { "CI", Esp::D2DColorToImU32(pcfg.HubberColour) };
 
 	return { "CI", IM_COL32(220, 220, 100, 255) };
 }
