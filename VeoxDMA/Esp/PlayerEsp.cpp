@@ -954,6 +954,13 @@ void DrawPlayers()
 			if (!roleLabel.empty())
 				stateSegs.push_back({ "[" + roleLabel + "]", roleTextCol });
 		}
+		if (ent.bagValue > 0) {
+			const char* bagTag = (ent.role != 0 && ent.roleName == "Police Officer")
+				? "CBAG" : "RBAG";
+			stateSegs.push_back({ "[" + std::string(bagTag) + ":$"
+				+ std::to_string(ent.bagValue) + "]",
+				IM_COL32(120, 255, 140, 255) });
+		}
 		if (ent.inVehicle) stateSegs.push_back({ "[V]", stateCol });
 		else if (ent.isCrouching) stateSegs.push_back({ "[C]", stateCol });
 		else if (ent.isSprinting) stateSegs.push_back({ "[S]", stateCol });

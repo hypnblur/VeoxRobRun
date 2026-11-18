@@ -834,7 +834,12 @@ namespace StaticLootObjectModel {
 inline constexpr std::uintptr_t Description = 0x18; // V3 position at +0x30
 }
 
+namespace StaticLootObjectDescription {
+inline constexpr std::uintptr_t LootItemFunc = 0x28; // Func<LootObjectItemDescription> delegate
+}
+
 namespace RandomLootObjectModel {
+inline constexpr std::uintptr_t Item        = 0x18; // IPrimitiveData<LootObjectItemDescription>
 inline constexpr std::uintptr_t Description = 0x20; // V3 position at +0x24
 }
 
@@ -949,11 +954,14 @@ inline constexpr std::uintptr_t Value               = 0x18; // int32
 namespace DroppedBagModel {
 inline constexpr std::uintptr_t Transform        = 0x20;
 inline constexpr std::uintptr_t InteractPosition = 0x28;
+inline constexpr std::uintptr_t BagDescription   = 0x30; // IPrimitiveModel<CharacterBagDescription>
+inline constexpr std::uintptr_t Role             = 0x38; // IPrimitiveModel<PlayerRoleDescription>
 }
 
 namespace VehicleLootModel {
 inline constexpr std::uintptr_t Transform        = 0x20;
 inline constexpr std::uintptr_t InteractPosition = 0x28;
+inline constexpr std::uintptr_t HasCargo         = 0x38; // IPrimitiveModel<bool>
 }
 
 namespace CargoModel {
