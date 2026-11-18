@@ -101,6 +101,12 @@ static std::unordered_map<std::uintptr_t, WeaponDescCache> g_weaponDescCache;
 static void MarkSessionChanged()
 {
     ++sessionGeneration;
+    DLOG("SessionChange: gen=%llu bm=0x%llx be=0x%llx lc=0x%llx game=0x%llx",
+         (unsigned long long)sessionGeneration,
+         (unsigned long long)cachedBattleModel,
+         (unsigned long long)cachedBattleEntities,
+         (unsigned long long)cachedLocalCharacter,
+         (unsigned long long)cachedGame);
     sessionChangedMs = GetTickCount64();
     cachedSlots.clear();
     cachedViews.clear();
@@ -313,6 +319,11 @@ static Matrix4x4 g_nativeProjection{};
 static bool g_nativeViewProjectionValid = false;
 static float g_nativePositionError = -1.f;
 static float g_nativeForwardDot = -1.f;
+// World pose parsed from the native view matrix. Aim uses it as its angle and
+// occlusion origin so the origin and the projection come from one camera read.
+static Vector3 g_nativeCameraPosition{};
+static Vector3 g_nativeCameraForward{};
+static bool g_nativeCameraPoseValid = false;
 
 static CollisionBVH::Scene g_bvhScene;
 static std::string g_bvhLoadedPath;
@@ -696,6 +707,13 @@ void Shutdown()
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         g_freshCamera = RobRunCamera::CameraState{};
     }
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        g_nativeViewProjectionValid = false;
+        g_nativeCameraPoseValid = false;
+        g_nativeCameraPosition = Vector3{};
+        g_nativeCameraForward = Vector3{};
+    }
     gaBase = 0;
     upBase = 0;
 }
@@ -800,13 +818,19 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         DLOG("World worker thread started");
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
             try {
+                static int wwCount = 0;
+                ++wwCount;
                 const std::uint64_t gen = sessionGeneration;
                 const std::uintptr_t bm = cachedBattleModel;
                 const std::uintptr_t be = cachedBattleEntities;
                 const std::uintptr_t lc = cachedLocalCharacter;
                 if (bm > 0x10000) {
                     auto state = std::make_shared<RobRunWorld::State>();
-                    if (RobRunWorld::Read(bm, be, *state) && sessionGeneration == gen) {
+                    const bool worldOk = RobRunWorld::Read(bm, be, *state);
+                    if ((wwCount % 100) == 1)
+                        DLOG("WorldWorker #%d: Read=%d entities=%zu gen=%llu",
+                             wwCount, worldOk, state->entities.size(), (unsigned long long)gen);
+                    if (worldOk && sessionGeneration == gen) {
                         std::lock_guard<std::mutex> lock(g_worldMutex);
                         g_worldState = std::move(state);
                         UpdateDynamicOccluders(g_worldState);
@@ -828,12 +852,18 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 }
                 // Session changed while we were reading — clear stale published state
                 if (sessionGeneration != gen) {
+                    DLOG("WorldWorker #%d: session changed mid-read (was %llu, now %llu)",
+                         wwCount, (unsigned long long)gen, (unsigned long long)sessionGeneration.load());
                     std::lock_guard<std::mutex> lock(g_worldMutex);
                     g_worldState = std::make_shared<RobRunWorld::State>();
                     g_plotState = std::make_shared<RobRunWorld::PlotState>();
                     g_inventoryState = std::make_shared<RobRunInventory::State>();
                 }
-            } catch (...) {}
+            } catch (const std::exception& e) {
+                DLOG("WorldWorker EXCEPTION #%d: %s", wwCount, e.what());
+            } catch (...) {
+                DLOG("WorldWorker UNKNOWN EXCEPTION #%d", wwCount);
+            }
             for (int i = 0; i < 25 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(10);
         }
@@ -1937,6 +1967,13 @@ static void UpdateInternal()
 
     if (!gaBase) { if (uiCount <= 3) DLOG("UpdateInternal #%d: no gaBase", uiCount); return; }
 
+    if ((uiCount % 200) == 1)
+        DLOG("UpdateInternal #%d: game=0x%llx bm=0x%llx be=0x%llx entities=%zu gen=%llu",
+             uiCount, (unsigned long long)cachedGame,
+             (unsigned long long)cachedBattleModel,
+             (unsigned long long)cachedBattleEntities,
+             entities.size(), (unsigned long long)sessionGeneration.load());
+
     ++updateCounter;
     if ((updateCounter % 120) == 0)
         RevalidateSession();
@@ -2031,6 +2068,8 @@ static void UpdateInternal()
                 if (RobRunMemory::ReadString(idStr, wide)) {
                     std::string id = RobRunMemory::WideToUtf8(wide);
                     std::lock_guard<std::mutex> lk(locationMutex);
+                    if (id != cachedLocationId)
+                        DLOG("Location: '%s' -> '%s'", cachedLocationId.c_str(), id.c_str());
                     cachedLocationId = std::move(id);
                 }
             }
@@ -2619,10 +2658,8 @@ static void UpdateInternal()
         // snapshot; using it keeps "visible from the camera" in step with the
         // frame the overlay draws over.
         RobRunCamera::CameraState visCamera = cameraState;
-        {
-            std::lock_guard<std::mutex> lock(g_freshCameraMutex);
-            if (g_freshCamera.valid) visCamera = g_freshCamera;
-        }
+        RobRunCamera::CameraState freshVisCamera{};
+        if (GetFreshCamera(freshVisCamera)) visCamera = freshVisCamera;
         if (uiCount <= 3) DLOG("UpdateInternal #%d: entering entity detail loop", uiCount);
         int detailBudget = 8;
         const std::int64_t battleNowMs = ReadBattleNowMs(cachedBattleEntities);
@@ -2750,7 +2787,8 @@ static void UpdateInternal()
                     TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::Knockdown, &s.knockdown, 8);
                     TargetProcess.AddScatterReadRequest(sc, cm + rr::BattleCharacterModel::KnockdownLeaveState, &s.kdLeaveModel, 8);
                 }
-                TargetProcess.ExecuteScatterReadCached(sc);
+                if (!TargetProcess.ExecuteScatterReadCached(sc))
+                    DLOG("ScatterFail: detail phase 1 (seCount=%d)", seCount);
 
                 // Phase 2: second-level pointers
                 for (int i = 0; i < seCount; ++i) {
@@ -2779,7 +2817,8 @@ static void UpdateInternal()
                     if (s.itemInHands > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.itemInHands + rr::ItemInHandsModel::Current, &s.weaponCurrent, 8);
                 }
-                TargetProcess.ExecuteScatterReadCached(sc);
+                if (!TargetProcess.ExecuteScatterReadCached(sc))
+                    DLOG("ScatterFail: detail phase 2 (seCount=%d)", seCount);
 
                 // Phase 3: third-level pointers + block reads
                 for (int i = 0; i < seCount; ++i) {
@@ -2807,7 +2846,8 @@ static void UpdateInternal()
                     if (s.costModel > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.costModel + rr::RobberInventoryCostModel::CharacterInventory, &s.costs, sizeof(s.costs));
                 }
-                TargetProcess.ExecuteScatterReadCached(sc);
+                if (!TargetProcess.ExecuteScatterReadCached(sc))
+                    DLOG("ScatterFail: detail phase 3 (seCount=%d)", seCount);
 
                 // Phase 4: wrapper primitive values (all at +0x18)
                 constexpr std::uintptr_t V = rr::PrimitiveData::value;
@@ -2848,7 +2888,8 @@ static void UpdateInternal()
                     if (s.weaponData > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.weaponData + rr::ReferenceData::Value, &s.weaponDesc, 8);
                 }
-                TargetProcess.ExecuteScatterReadCached(sc);
+                if (!TargetProcess.ExecuteScatterReadCached(sc))
+                    DLOG("ScatterFail: detail phase 4 (seCount=%d)", seCount);
                 TargetProcess.CloseScatterHandle(sc);
             }
 
@@ -3023,6 +3064,10 @@ static void UpdateInternal()
             entity.publicId = detail.publicId;
             entity.isPartyMember = IsPartyMember(entity.entityId, entity.publicId);
             entity.weaponName = detail.weaponName;
+            // Built once here (worker pass) instead of on every ESP frame.
+            entity.nicknameUtf8 = RobRunMemory::WideToUtf8(entity.nickname);
+            entity.clanTagUtf8 = RobRunMemory::WideToUtf8(entity.clanTag);
+            entity.weaponNameUtf8 = RobRunMemory::WideToUtf8(entity.weaponName);
             entity.weaponIndex = detail.weaponIndex;
             entity.isFiring = detail.isFiring;
             entity.isReloading = detail.isReloading;
@@ -3524,6 +3569,18 @@ void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
 void RefreshCamera()
 {
+    // Both the render thread and the aim worker call this. Each call is a DMA
+    // device transaction, and the two consumers only need the newest camera, so
+    // collapse calls that land within 3 ms of each other. The loser simply uses
+    // the camera the winner just published.
+    static std::atomic<std::int64_t> lastRefreshUs{ 0 };
+    const std::int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::int64_t previous = lastRefreshUs.load(std::memory_order_relaxed);
+    if (nowUs - previous < 3000) return;
+    if (!lastRefreshUs.compare_exchange_strong(previous, nowUs, std::memory_order_relaxed))
+        return;
+
     // Fast path: when the native camera was valid last frame, skip the
     // managed read entirely and scatter-read just view+projection in one
     // device transaction (~2ms instead of ~8ms).
@@ -3536,12 +3593,21 @@ void RefreshCamera()
         if (nativeWasValid) {
             CameraFinder::CameraData fast = CameraFinder::GetCameraMatricesFast();
             if (fast.valid) {
-                std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-                g_nativeViewProjectionValid = true;
-                g_nativeView = fast.view;
-                g_nativeProjection = fast.projection;
-                g_nativePositionError = -1.f;
-                g_nativeForwardDot = -1.f;
+                {
+                    std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+                    g_nativeViewProjectionValid = true;
+                    g_nativeView = fast.view;
+                    g_nativeProjection = fast.projection;
+                    g_nativePositionError = -1.f;
+                    g_nativeForwardDot = -1.f;
+                    // Keep the aim/occlusion origin glued to the rendered
+                    // camera too, not just the projection.
+                    g_nativeCameraPoseValid = !fast.position.IsZero();
+                    if (g_nativeCameraPoseValid) {
+                        g_nativeCameraPosition = fast.position;
+                        g_nativeCameraForward = fast.forward;
+                    }
+                }
                 return;
             }
         }
@@ -3583,7 +3649,42 @@ void RefreshCamera()
         }
         g_nativePositionError = native.positionError;
         g_nativeForwardDot = native.forwardDot;
+        g_nativeCameraPoseValid = native.valid && !native.position.IsZero();
+        if (g_nativeCameraPoseValid) {
+            g_nativeCameraPosition = native.position;
+            g_nativeCameraForward = native.forward;
+        }
     }
+}
+
+bool GetFreshCamera(RobRunCamera::CameraState& out)
+{
+    RobRunCamera::CameraState managed{};
+    {
+        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+        managed = g_freshCamera;
+    }
+
+    // The native camera is the one the frame was rendered with. When its pose
+    // is known it wins; the managed camera stays as the fallback (and supplies
+    // the FOV, which the native fast path does not re-read).
+    Vector3 nativePosition{};
+    Vector3 nativeForward{};
+    bool haveNativePose = false;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
+        haveNativePose = g_nativeCameraPoseValid;
+        nativePosition = g_nativeCameraPosition;
+        nativeForward = g_nativeCameraForward;
+    }
+
+    out = managed;
+    if (haveNativePose) {
+        out.position = nativePosition;
+        out.forward = nativeForward;
+        out.valid = true;
+    }
+    return out.valid;
 }
 
 bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
@@ -3754,10 +3855,8 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
 {
     if (!g_bvhScene.valid) return false;
     RobRunCamera::CameraState cam = cameraState;
-    {
-        std::lock_guard<std::mutex> lock(g_freshCameraMutex);
-        if (g_freshCamera.valid) cam = g_freshCamera;
-    }
+    RobRunCamera::CameraState fresh{};
+    if (GetFreshCamera(fresh)) cam = fresh;
     if (!cam.valid) return false;
     const CollisionBVH::Float3 o{ cam.position.x, cam.position.y, cam.position.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };

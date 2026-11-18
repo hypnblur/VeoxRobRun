@@ -4,6 +4,7 @@
 #include "RobRunMemory.h"
 #include "Il2Cpp.h"
 #include "Memory.h"
+#include "DebugLog.h"
 #include <cmath>
 #include <functional>
 #include <unordered_map>
@@ -385,7 +386,13 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         if (WorldLooksValid(candidate))
             world = candidate;
     }
-    if (world <= 0x10000) return false;
+    if (world <= 0x10000) {
+        static int failCount = 0;
+        if ((++failCount % 50) == 1)
+            DLOG("WorldRead: no valid world ptr (bm=0x%llx be=0x%llx) fails=%d",
+                 (unsigned long long)battleModel, (unsigned long long)battleEntities, failCount);
+        return false;
+    }
 
     out.worldPtr = world;
     out.valid = true;
@@ -914,6 +921,12 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             }
         }
     }
+
+    static int readCount = 0;
+    if ((++readCount % 50) == 1)
+        DLOG("WorldRead #%d: world=0x%llx entities=%zu (cont=%d loot=%d veh=%d gren=%d)",
+             readCount, (unsigned long long)world, out.entities.size(),
+             out.containers, out.loots, out.vehicles, out.grenades);
 
     return out.valid;
 }
