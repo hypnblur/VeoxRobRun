@@ -1219,24 +1219,6 @@ static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity
         characterModel + rr::BattleCharacterModel::PlayerRole);
     ApplyRoleFromWrapper(roleWrapper, entity);
 
-    // Catch civ→criminal the moment BecomeRobber starts, before the
-    // role primitive updates and the cache gets a chance to go stale.
-    if (entity.roleName != "Criminal") {
-        const std::uintptr_t brm = ReadPtr(
-            characterModel + rr::BattleCharacterModel::BecomeRobberModel);
-        if (brm > 0x10000) {
-            const std::uintptr_t tsW = ReadPtr(brm + rr::BecomeRobberModel::_ts);
-            if (tsW > 0x10000) {
-                std::int64_t ts = 0;
-                if (Il2Cpp::ReadPrimitiveInt64(tsW, ts) && ts > 0) {
-                    entity.roleName = "Criminal";
-                    entity.role = 1257638368;
-                    g_roleCache.erase(roleWrapper);
-                }
-            }
-        }
-    }
-
     const std::uintptr_t inVehicle = ReadPtr(
         characterModel + rr::BattleCharacterModel::InVehicle);
     if (inVehicle <= 0x10000) return;
