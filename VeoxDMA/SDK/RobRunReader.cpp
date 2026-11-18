@@ -1344,14 +1344,22 @@ static void ReadReloadAndKnockdownState(std::uintptr_t characterModel,
         }
     }
 
-    // 2) KnockdownModel._endTs (active while after the sentinel and now).
+    // 2) KnockdownModel._endTs (active while after the sentinel and now),
+    //    gated by KnockdownLeaveStateModel — once the leave phase starts
+    //    the player is getting up and should no longer count as knocked.
     const std::uintptr_t kdModel = ReadPtr(
         characterModel + rr::BattleCharacterModel::Knockdown);
     if (kdModel > 0x10000 && battleNowMs > 0) {
         const std::int64_t kdEndTs = ReadTimestampData(
             ReadPtr(kdModel + rr::KnockdownModel::EndTs));
-        if (kdEndTs > kSentinelTs && kdEndTs > battleNowMs)
-            entity.isKnockedDown = true;
+        if (kdEndTs > kSentinelTs && kdEndTs > battleNowMs) {
+            const std::uintptr_t leaveModel = ReadPtr(
+                characterModel + rr::BattleCharacterModel::KnockdownLeaveState);
+            const bool leaving = leaveModel > 0x10000 &&
+                RobRunMemory::ReadUInt8(leaveModel + rr::KnockdownLeaveStateModel::IsActive) != 0;
+            if (!leaving)
+                entity.isKnockedDown = true;
+        }
     }
 
     // 3) KnockoutModel (phase non-null, active endTs, surrendered / handcuffed).

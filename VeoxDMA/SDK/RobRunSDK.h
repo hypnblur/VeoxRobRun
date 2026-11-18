@@ -255,6 +255,7 @@ inline constexpr std::uintptr_t BecomeRobberModel       = 0x260;
 inline constexpr std::uintptr_t CenterPosition          = 0x290;
 inline constexpr std::uintptr_t Revival                 = 0x2A0;
 inline constexpr std::uintptr_t Knockdown               = 0x2D0;
+inline constexpr std::uintptr_t KnockdownLeaveState     = 0x2D8;
 inline constexpr std::uintptr_t CapsuleColliderParams   = 0x318;
 }
 
@@ -984,6 +985,10 @@ inline constexpr std::uintptr_t EndTs = 0x18; // TimestampData (+0x18 i64)
 namespace KnockdownModel {
 inline constexpr std::uintptr_t EndTs           = 0x10; // TimestampData (+0x18 i64)
 inline constexpr std::uintptr_t IsKnockedForward = 0x18; // BoolData (+0x18 u8)
+}
+
+namespace KnockdownLeaveStateModel {
+inline constexpr std::uintptr_t IsActive = 0x10; // bool (plain stored field)
 }
 
 namespace CoinsByDataModel {

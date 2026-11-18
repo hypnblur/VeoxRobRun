@@ -177,12 +177,12 @@ class Backend final : public DeviceBackend {
     bool ReadSerial() {
         DWORD errors = 0; COMSTAT status{};
         if (!ClearCommError(serial, &errors, &status)) return Fail("Serial link unavailable", GetLastError());
-        if (errors & (CE_BREAK | CE_FRAME | CE_RXPARITY | CE_OVERRUN | CE_RXOVER)) {
-            if (errors & (CE_OVERRUN | CE_RXOVER)) {
-                PurgeComm(serial, PURGE_RXCLEAR);
-                makcu = {};
-                medius.Reset();
-            }
+        if (errors & (CE_OVERRUN | CE_RXOVER)) {
+            // Reset parsers so partial frames don't corrupt state, but do NOT
+            // purge the buffer — the pre-overrun bytes are still valid and may
+            // contain heartbeat replies that keep the link alive under load.
+            makcu = {};
+            medius.Reset();
         }
         for (int batch = 0; batch < 8 && status.cbInQue; ++batch) {
             unsigned char bytes[512]; DWORD count = 0;
@@ -270,7 +270,7 @@ class Backend final : public DeviceBackend {
         serial = CreateFileA(("\\\\.\\" + selected).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (serial == INVALID_HANDLE_VALUE) return Fail("Cannot open COM port; check cable and other applications", GetLastError());
         COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = 250;
-        if (!SetupComm(serial, 8192, 4096) || !SetCommTimeouts(serial, &timeouts)) return Fail("Cannot configure COM buffers/timeouts", GetLastError());
+        if (!SetupComm(serial, 32768, 4096) || !SetCommTimeouts(serial, &timeouts)) return Fail("Cannot configure COM buffers/timeouts", GetLastError());
         PurgeComm(serial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
         if (IsMakcu(config.kind)) {
             const int rates[] = {config.baud, lastBaud, 115200, 4000000, 921600, 1500000, 2000000, 3000000};
