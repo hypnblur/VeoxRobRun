@@ -81,9 +81,12 @@ Write-Host "MSBuild: $MSBuild" -ForegroundColor DarkGray
 if (Test-Path $PublishDir) { Remove-Item $PublishDir -Recurse -Force }
 
 Write-Step "Building Release|x64 ..."
-# PlatformToolset is NOT overridden: the vcxproj pins v143, and forcing a
-# value here would fail on machines whose VS install lacks that toolset.
-& $MSBuild $Sln /p:Configuration=Release /p:Platform=x64 /m /nologo /v:m
+$extraArgs = @()
+$v145Check = "${env:ProgramFiles}\Microsoft Visual Studio\18\Community\MSBuild\Microsoft\VC\v180\Platforms\x64\PlatformToolsets\v145"
+if (Test-Path $v145Check) {
+    $extraArgs = @("/p:PlatformToolset=v145")
+}
+& $MSBuild $Sln /p:Configuration=Release /p:Platform=x64 $extraArgs /m /nologo /v:m
 if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
 if (-not (Test-Path $PublishExe)) { throw "Build did not produce '$PublishExe'" }
 

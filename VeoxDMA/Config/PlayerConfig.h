@@ -29,11 +29,9 @@ public:
 	bool ShowBvh = false;
 	int BvhDrawDist = 100;
 	// Project the ESP with the Unity render camera instead of the managed
-	// BattleCameraModel block. The managed block is read *after* memory aim
-	// writes its angles, so it already matches the frame being rendered; the
-	// native matrices are the previous rendered frame and visibly trail when
-	// the camera moves, so this stays off by default.
-	bool NativeEspCamera = false;
+	// BattleCameraModel block. When enabled, this uses the hardware-synchronized
+	// native matrices to eliminate mouse-turn projection jitter.
+	bool NativeEspCamera = true;
 	bool WeaponEsp = true;
 	bool LookingAtYou = true;
 	bool LookingAlert = true;
@@ -52,6 +50,12 @@ public:
 	bool WeaponSprite = true;
 	bool HideTeammates = false;
 	bool HiddenPlayerEsp = true;
+	float HiddenAlpha = 0.35f;
+	float VisMaxDistance = 150.0f;
+	int VisRayCount = 6;
+	bool CarCabinSolid = false;
+	bool VisRing = true;
+	bool StatusRing = true;
 
 	D2D1::ColorF NameColour = Colour(255, 255, 255);
 	D2D1::ColorF DistanceColour = Colour(200, 200, 200);
@@ -65,6 +69,8 @@ public:
 	D2D1::ColorF ReloadColour = Colour(255, 200, 50);
 	D2D1::ColorF ArmorColour = Colour(100, 180, 255);
 	D2D1::ColorF StaminaColour = Colour(60, 220, 100);
+	D2D1::ColorF VisRingColour = Colour(0, 255, 128);
+	D2D1::ColorF StatusRingColour = Colour(0, 255, 128);
 
 	// Worker-side pose smoothing. The reader blends every new pose sample into
 	// the previous one before publishing, so the overlay draws the smoothed
@@ -178,6 +184,14 @@ public:
         j[ConfigName][LIT("Skeleton")] = Skeleton;
         j[ConfigName][LIT("SkeletonThickness")] = SkeletonThickness;
         j[ConfigName][LIT("HeadCircle")] = HeadCircle;
+        j[ConfigName][LIT("HiddenAlpha")] = HiddenAlpha;
+        j[ConfigName][LIT("VisMaxDistance")] = VisMaxDistance;
+        j[ConfigName][LIT("VisRayCount")] = VisRayCount;
+        j[ConfigName][LIT("CarCabinSolid")] = CarCabinSolid;
+        j[ConfigName][LIT("VisRing")] = VisRing;
+        j[ConfigName][LIT("StatusRing")] = StatusRing;
+        ToJsonColour(&j, LIT("VisRingColour"), &VisRingColour);
+        ToJsonColour(&j, LIT("StatusRingColour"), &StatusRingColour);
         j[ConfigName][LIT("Snaplines")] = Snaplines;
         j[ConfigName][LIT("SnaplineOrigin")] = SnaplineOrigin;
         ToJsonColour(&j, LIT("SnaplineColour"), &SnaplineColour);
@@ -251,6 +265,14 @@ public:
         Skeleton = j[ConfigName].value(LIT("Skeleton"), Skeleton);
         SkeletonThickness = j[ConfigName].value(LIT("SkeletonThickness"), SkeletonThickness);
         HeadCircle = j[ConfigName].value(LIT("HeadCircle"), HeadCircle);
+        HiddenAlpha = j[ConfigName].value(LIT("HiddenAlpha"), HiddenAlpha);
+        VisMaxDistance = j[ConfigName].value(LIT("VisMaxDistance"), VisMaxDistance);
+        VisRayCount = j[ConfigName].value(LIT("VisRayCount"), VisRayCount);
+        CarCabinSolid = j[ConfigName].value(LIT("CarCabinSolid"), CarCabinSolid);
+        VisRing = j[ConfigName].value(LIT("VisRing"), VisRing);
+        StatusRing = j[ConfigName].value(LIT("StatusRing"), StatusRing);
+        FromJsonColour(j, LIT("VisRingColour"), &VisRingColour);
+        FromJsonColour(j, LIT("StatusRingColour"), &StatusRingColour);
         Snaplines = j[ConfigName].value(LIT("Snaplines"), Snaplines);
         SnaplineOrigin = j[ConfigName].value(LIT("SnaplineOrigin"), SnaplineOrigin);
         FromJsonColour(j, LIT("SnaplineColour"), &SnaplineColour);

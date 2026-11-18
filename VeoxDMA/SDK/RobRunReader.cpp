@@ -307,6 +307,49 @@ static float g_nativeForwardDot = -1.f;
 
 static CollisionBVH::Scene g_bvhScene;
 static std::string g_bvhLoadedPath;
+static CollisionBVH::DynamicOccluders g_dynOccluders;
+static std::mutex g_dynOccludersMutex;
+
+static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::State>& world)
+{
+    if (!world) return;
+    CollisionBVH::DynamicOccluders dyn;
+    dyn.vehicles.reserve(world->entities.size());
+    dyn.smokes.reserve(world->entities.size());
+
+    for (const auto& e : world->entities) {
+        if (e.kind == RobRunWorld::Kind::Vehicle ||
+            e.kind == RobRunWorld::Kind::Car ||
+            e.kind == RobRunWorld::Kind::Helicopter)
+        {
+            CollisionBVH::VehicleOBB v;
+            v.center = { e.position.x, e.position.y + 0.95f, e.position.z };
+            v.yawRad = e.yaw * (3.14159265f / 180.0f);
+            v.isHelicopter = (e.kind == RobRunWorld::Kind::Helicopter);
+            if (v.isHelicopter) {
+                v.halfExtents = { 1.5f, 1.8f, 4.0f };
+                v.center.y = e.position.y + 1.8f;
+            } else {
+                v.halfExtents = { 1.1f, 0.95f, 2.4f };
+            }
+            dyn.vehicles.push_back(v);
+        }
+        else if (e.kind == RobRunWorld::Kind::Grenade) {
+            CollisionBVH::SmokeSphere smk;
+            smk.center = { e.position.x, e.position.y + 0.5f, e.position.z };
+            smk.radius = 4.5f;
+            dyn.smokes.push_back(smk);
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
+    g_dynOccluders = std::move(dyn);
+}
+
+const CollisionBVH::DynamicOccluders& GetDynamicOccluders()
+{
+    return g_dynOccluders;
+}
 
 static void TryLoadBvh(bool force = false)
 {
@@ -727,6 +770,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 if (RobRunWorld::Read(bm, be, *state)) {
                     std::lock_guard<std::mutex> lock(g_worldMutex);
                     g_worldState = std::move(state);
+                    UpdateDynamicOccluders(g_worldState);
                 }
                 if (be > 0x10000) {
                     auto plots = std::make_shared<RobRunWorld::PlotState>();
@@ -1173,6 +1217,24 @@ static void ReadRoleAndVehicle(std::uintptr_t characterModel, EntityData& entity
     const std::uintptr_t roleWrapper = ReadPtr(
         characterModel + rr::BattleCharacterModel::PlayerRole);
     ApplyRoleFromWrapper(roleWrapper, entity);
+
+    // Catch civ→criminal the moment BecomeRobber starts, before the
+    // role primitive updates and the cache gets a chance to go stale.
+    if (entity.roleName != "Criminal") {
+        const std::uintptr_t brm = ReadPtr(
+            characterModel + rr::BattleCharacterModel::BecomeRobberModel);
+        if (brm > 0x10000) {
+            const std::uintptr_t tsW = ReadPtr(brm + rr::BecomeRobberModel::_ts);
+            if (tsW > 0x10000) {
+                std::int64_t ts = 0;
+                if (Il2Cpp::ReadPrimitiveInt64(tsW, ts) && ts > 0) {
+                    entity.roleName = "Criminal";
+                    entity.role = 1257638368;
+                    g_roleCache.erase(roleWrapper);
+                }
+            }
+        }
+    }
 
     const std::uintptr_t inVehicle = ReadPtr(
         characterModel + rr::BattleCharacterModel::InVehicle);
@@ -2756,24 +2818,21 @@ static void UpdateInternal()
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
 
-                    // Vehicles & moving players: bypass exponential smoothing when moving (> 0.05m / pass, ~1.5 m/s)
-                    // so the skeleton never trails behind running models. Stationary players retain smoothing to damp DMA jitter.
-                    const bool isFastMoving = entity.inVehicle ||
-                        (Distance(rig.lastSampledPos, entity.position) > 0.05f);
+                    // Velocity-adaptive smoothing: smoothly scale alpha with movement distance
+                    // to prevent binary toggle chatter while snapping on high-speed displacement / vehicles.
+                    const float moveDist = Distance(rig.lastSampledPos, entity.position);
                     rig.lastSampledPos = entity.position;
+                    const bool snapPose = entity.inVehicle || (moveDist > 0.40f);
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
-                    // the weight of the new sample: 1 publishes the raw pose,
+                    // the base weight of the new sample: 1 publishes the raw pose,
                     // lower values damp the per-frame jitter that partial or
-                    // stale DMA reads add to the sample. Doing it here (and
-                    // drawing the result directly) means the overlay never
-                    // extrapolates past the newest pose, which is what made
-                    // the old render-side blend shake.
-                    if (!isFastMoving && ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
+                    // stale DMA reads add to the sample.
+                    if (!snapPose && ConfigInstance.Player.PoseSmoothing && rig.smoothedValid &&
                         rig.smoothedBones.size() == rig.bones.size() &&
                         (rig.worldMatrices.empty() || rig.smoothedWorldMatrices.size() == rig.worldMatrices.size())) {
-                        const float alpha = std::clamp(
-                            ConfigInstance.Player.PoseSmoothAlpha, 0.1f, 1.0f);
+                        const float baseAlpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.10f, 1.0f);
+                        const float alpha = std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
                         const float inv = 1.0f - alpha;
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];
@@ -2782,6 +2841,8 @@ static void UpdateInternal()
                             const float dbx = r.b.x-s.b.x, dby = r.b.y-s.b.y, dbz = r.b.z-s.b.z;
                             if (dax*dax+day*day+daz*daz > 0.25f ||
                                 dbx*dbx+dby*dby+dbz*dbz > 0.25f) {
+                                s.a = r.a;
+                                s.b = r.b;
                                 s.visible = r.visible;
                                 continue;
                             }
@@ -2795,7 +2856,10 @@ static void UpdateInternal()
                         }
                         auto lerpVec = [&](Skeleton::Vec& dst, const Skeleton::Vec& src) {
                             const float dx = src.x-dst.x, dy = src.y-dst.y, dz = src.z-dst.z;
-                            if (dx*dx+dy*dy+dz*dz > 0.25f) return;
+                            if (dx*dx+dy*dy+dz*dz > 0.25f) {
+                                dst = src;
+                                return;
+                            }
                             dst.x = dst.x * inv + src.x * alpha;
                             dst.y = dst.y * inv + src.y * alpha;
                             dst.z = dst.z * inv + src.z * alpha;
@@ -2828,7 +2892,10 @@ static void UpdateInternal()
                             const float dx = rm.matrix[3][0]-sm.matrix[3][0];
                             const float dy = rm.matrix[3][1]-sm.matrix[3][1];
                             const float dz = rm.matrix[3][2]-sm.matrix[3][2];
-                            if (dx*dx+dy*dy+dz*dz > 0.25f) continue;
+                            if (dx*dx+dy*dy+dz*dz > 0.25f) {
+                                sm = rm;
+                                continue;
+                            }
                             for (int r = 0; r < 4; ++r) {
                                 for (int c = 0; c < 4; ++c) {
                                     sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
@@ -2892,7 +2959,16 @@ static void UpdateInternal()
             // the aim gate when every bone is occluded. Both need the BVH, so
             // without it the animator fallback above stays in effect and the
             // menu says the occluder file is missing.
-            if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
+            // Distance gate per item 9:
+            const bool haveLocalPos = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+            const float entDist = haveLocalPos ? Distance(entity.position, localPosition) : 0.f;
+            if (ConfigInstance.Player.VisMaxDistance > 0.f && entDist > ConfigInstance.Player.VisMaxDistance) {
+                entity.visible = false;
+                for (auto& seg : entity.bones) {
+                    seg.visible = false;
+                }
+            }
+            else if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
                 g_bvhScene.valid && visCamera.valid &&
                 entity.entityId != localEntityId)
             {
@@ -2900,20 +2976,19 @@ static void UpdateInternal()
                     visCamera.position.x,
                     visCamera.position.y,
                     visCamera.position.z };
+
+                const bool carCabinSolid = ConfigInstance.Player.CarCabinSolid;
+                CollisionBVH::DynamicOccluders dynCopy;
+                {
+                    std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
+                    dynCopy = g_dynOccluders;
+                }
+
                 bool anyVisible = false;
-                if (!entity.bones.empty()) {
-                    for (auto& seg : entity.bones) {
-                        const CollisionBVH::Float3 mid = {
-                            (seg.a.x + seg.b.x) * 0.5f,
-                            (seg.a.y + seg.b.y) * 0.5f,
-                            (seg.a.z + seg.b.z) * 0.5f };
-                        seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid);
-                        if (seg.visible)
-                            anyVisible = true;
-                    }
-                } else {
-                    // Fallback when entity lacks skeleton segments (rig not yet built or culled at distance):
-                    // Automatically cast rays to torso (y + halfHeight) and head (y + headHeight)
+                const int rayCount = ConfigInstance.Player.VisRayCount;
+
+                if (rayCount <= 2 || entity.bones.empty()) {
+                    // Level 1: 2 Rays (Torso + Head). Lowest CPU load.
                     const CollisionBVH::Float3 torso = {
                         entity.position.x,
                         entity.position.y + 0.95f,
@@ -2923,9 +2998,62 @@ static void UpdateInternal()
                         entity.position.y + 1.65f,
                         entity.position.z };
 
-                    bool torsoVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, torso);
-                    bool headVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, head);
+                    bool torsoVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, torso, &dynCopy, carCabinSolid);
+                    bool headVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, head, &dynCopy, carCabinSolid);
                     anyVisible = torsoVis || headVis;
+                    for (auto& seg : entity.bones) {
+                        seg.visible = anyVisible;
+                    }
+                } else if (rayCount <= 6) {
+                    // Level 2: 6 Rays (Head, Chest, Pelvis, Left Hand, Right Hand, Feet)
+                    const auto& bp = entity.bonePoints;
+                    const CollisionBVH::Float3 pHead = bp.hasHead ?
+                        CollisionBVH::Float3{ bp.head.x, bp.head.y, bp.head.z } :
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 1.70f, entity.position.z };
+                    const CollisionBVH::Float3 pChest = bp.hasChest ?
+                        CollisionBVH::Float3{ bp.chest.x, bp.chest.y, bp.chest.z } :
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 1.25f, entity.position.z };
+                    const CollisionBVH::Float3 pPelvis = bp.hasPelvis ?
+                        CollisionBVH::Float3{ bp.pelvis.x, bp.pelvis.y, bp.pelvis.z } :
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 0.85f, entity.position.z };
+                    const CollisionBVH::Float3 pLHand = (std::abs(bp.leftHand.x) > 0.01f) ?
+                        CollisionBVH::Float3{ bp.leftHand.x, bp.leftHand.y, bp.leftHand.z } :
+                        CollisionBVH::Float3{ entity.position.x - 0.40f, entity.position.y + 1.0f, entity.position.z };
+                    const CollisionBVH::Float3 pRHand = (std::abs(bp.rightHand.x) > 0.01f) ?
+                        CollisionBVH::Float3{ bp.rightHand.x, bp.rightHand.y, bp.rightHand.z } :
+                        CollisionBVH::Float3{ entity.position.x + 0.40f, entity.position.y + 1.0f, entity.position.z };
+                    const CollisionBVH::Float3 pFeet = { entity.position.x, entity.position.y + 0.15f, entity.position.z };
+
+                    bool vHead   = !CollisionBVH::IsOccluded(g_bvhScene, cam, pHead, &dynCopy, carCabinSolid);
+                    bool vChest  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pChest, &dynCopy, carCabinSolid);
+                    bool vPelvis = !CollisionBVH::IsOccluded(g_bvhScene, cam, pPelvis, &dynCopy, carCabinSolid);
+                    bool vLHand  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pLHand, &dynCopy, carCabinSolid);
+                    bool vRHand  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pRHand, &dynCopy, carCabinSolid);
+                    bool vFeet   = !CollisionBVH::IsOccluded(g_bvhScene, cam, pFeet, &dynCopy, carCabinSolid);
+
+                    anyVisible = (vHead || vChest || vPelvis || vLHand || vRHand || vFeet);
+
+                    for (auto& seg : entity.bones) {
+                        const CollisionBVH::Float3 mid = {
+                            (seg.a.x + seg.b.x) * 0.5f,
+                            (seg.a.y + seg.b.y) * 0.5f,
+                            (seg.a.z + seg.b.z) * 0.5f };
+                        if (mid.y >= entity.position.y + 1.40f) seg.visible = vHead;
+                        else if (mid.y >= entity.position.y + 1.05f) seg.visible = (vChest || vLHand || vRHand);
+                        else if (mid.y >= entity.position.y + 0.65f) seg.visible = vPelvis;
+                        else seg.visible = vFeet;
+                    }
+                } else {
+                    // Level 3: 18+ Rays (Full Rig segment evaluation for exact per-limb highlights)
+                    for (auto& seg : entity.bones) {
+                        const CollisionBVH::Float3 mid = {
+                            (seg.a.x + seg.b.x) * 0.5f,
+                            (seg.a.y + seg.b.y) * 0.5f,
+                            (seg.a.z + seg.b.z) * 0.5f };
+                        seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid, &dynCopy, carCabinSolid);
+                        if (seg.visible)
+                            anyVisible = true;
+                    }
                 }
                 entity.visible = anyVisible;
             }
@@ -3274,15 +3402,22 @@ const CollisionBVH::Scene& GetBvhScene()
     return g_bvhScene;
 }
 
-bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin)
+bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool checkDynamic)
 {
     if (!g_bvhScene.valid) return false;
     const CollisionBVH::Float3 o{ origin.x, origin.y, origin.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
-    return CollisionBVH::IsOccluded(g_bvhScene, o, t, tMin);
+    CollisionBVH::DynamicOccluders dynCopy;
+    const CollisionBVH::DynamicOccluders* dyn = nullptr;
+    if (checkDynamic) {
+        std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
+        dynCopy = g_dynOccluders;
+        dyn = &dynCopy;
+    }
+    return CollisionBVH::IsOccluded(g_bvhScene, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
 }
 
-bool IsCameraOccluded(const Vector3& target, float tMin)
+bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
 {
     if (!g_bvhScene.valid) return false;
     RobRunCamera::CameraState cam = cameraState;
@@ -3293,7 +3428,14 @@ bool IsCameraOccluded(const Vector3& target, float tMin)
     if (!cam.valid) return false;
     const CollisionBVH::Float3 o{ cam.position.x, cam.position.y, cam.position.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
-    return CollisionBVH::IsOccluded(g_bvhScene, o, t, tMin);
+    CollisionBVH::DynamicOccluders dynCopy;
+    const CollisionBVH::DynamicOccluders* dyn = nullptr;
+    if (checkDynamic) {
+        std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
+        dynCopy = g_dynOccluders;
+        dyn = &dynCopy;
+    }
+    return CollisionBVH::IsOccluded(g_bvhScene, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
 }
 
 } // namespace RobRunReader

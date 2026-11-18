@@ -15,6 +15,7 @@
 #include <thread>
 #include <timeapi.h>
 #include <vector>
+#include <intrin.h>
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
@@ -205,8 +206,9 @@ void WaitForFrameCap()
 	const auto spin = std::chrono::milliseconds(1);
 	if (remain > spin)
 		std::this_thread::sleep_for(remain - spin);
-	while (clock::now() < next)
-		std::this_thread::yield();
+	while (clock::now() < next) {
+		_mm_pause();
+	}
 }
 
 bool KeyJustPressed(int vk)

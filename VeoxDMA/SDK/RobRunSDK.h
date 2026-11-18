@@ -249,7 +249,9 @@ inline constexpr std::uintptr_t HasArmor                = 0x1B8;
 inline constexpr std::uintptr_t InVehicle               = 0x1C8;
 inline constexpr std::uintptr_t State                   = 0x1E0;
 inline constexpr std::uintptr_t PlayerRole              = 0x208;
+inline constexpr std::uintptr_t ChangeRoleTickIndex     = 0x218;
 inline constexpr std::uintptr_t Pbm                     = 0x258;
+inline constexpr std::uintptr_t BecomeRobberModel       = 0x260;
 inline constexpr std::uintptr_t CenterPosition          = 0x290;
 inline constexpr std::uintptr_t Revival                 = 0x2A0;
 inline constexpr std::uintptr_t Knockdown               = 0x2D0;
@@ -312,6 +314,15 @@ inline constexpr std::uintptr_t VehicleEntityId = 0xF0;
 
 namespace ReferenceData {
 inline constexpr std::uintptr_t Value = 0x18;
+}
+
+namespace BecomeRobberModel {
+inline constexpr std::uintptr_t _ts                       = 0x10; // IPrimitiveData<long>
+inline constexpr std::uintptr_t _mutuallyExclusiveProcess = 0x18;
+}
+
+namespace ChangeRoleTickIndexModel {
+inline constexpr std::uintptr_t Value                     = 0x10; // long
 }
 
 namespace Description {

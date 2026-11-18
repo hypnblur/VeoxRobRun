@@ -609,17 +609,27 @@ def build_bvh(triangles: list):
 # 7.  Save binary
 # ---------------------------------------------------------------------------
 
-def save_bvh_binary(path: str, nodes: list[BVHNode], triangles: list):
+# Surface classification tags (matching CollisionBVH::SurfaceType)
+SURFACE_DEFAULT_OPAQUE = 0
+SURFACE_HOUSE_GLASS    = 1
+SURFACE_VEHICLE_GLASS  = 2
+SURFACE_THIN_WOOD      = 3
+
+def save_bvh_binary(path: str, nodes: list[BVHNode], triangles: list, surface_types: list[int] = None):
     """
     Binary format:
-      Header:  "BVH1" (4 bytes) + numNodes(u32) + numTris(u32) = 12 bytes
+      Header:  "BVH1" or "BVH2" (4 bytes) + numNodes(u32) + numTris(u32) = 12 bytes
       Nodes[]:  aabbMin(3f) + aabbMax(3f) + left_or_triStart(u32) + right_or_triCount(u32) = 32 bytes each
         - if tri_count > 0 -> leaf node; left_or_triStart = tri_start, right_or_triCount = tri_count
         - else              -> interior;  left_or_triStart = left child idx, right_or_triCount = right child idx
       Tris[]:   v0(3f) + v1(3f) + v2(3f) = 36 bytes each
+      SurfaceTypes[]: (BVH2 only) u16 per triangle = 2 bytes each
     """
+    is_bvh2 = surface_types is not None and len(surface_types) == len(triangles)
+    magic = b"BVH2" if is_bvh2 else b"BVH1"
+
     with open(path, "wb") as f:
-        f.write(b"BVH1")
+        f.write(magic)
         f.write(struct.pack("<II", len(nodes), len(triangles)))
 
         for node in nodes:
@@ -635,9 +645,12 @@ def save_bvh_binary(path: str, nodes: list[BVHNode], triangles: list):
     with open(path, "ab") as f:
         for v0, v1, v2 in triangles:
             f.write(struct.pack("<fffffffff", *v0, *v1, *v2))
+        if is_bvh2:
+            for st in surface_types:
+                f.write(struct.pack("<H", st))
 
     file_size = os.path.getsize(path)
-    print(f"  Saved {path} ({file_size / 1024 / 1024:.1f} MB)")
+    print(f"  Saved {path} [{magic.decode()}] ({file_size / 1024 / 1024:.1f} MB)")
 
 
 # ---------------------------------------------------------------------------

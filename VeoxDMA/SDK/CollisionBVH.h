@@ -10,6 +10,13 @@
 
 namespace CollisionBVH {
 
+enum SurfaceType : uint16_t {
+    Surface_DefaultOpaque  = 0,
+    Surface_HouseGlass     = 1,
+    Surface_VehicleGlass   = 2,
+    Surface_ThinWood       = 3
+};
+
 struct Float3 {
     float x, y, z;
     Float3 operator-(const Float3& o) const { return {x-o.x, y-o.y, z-o.z}; }
@@ -47,8 +54,27 @@ struct BVHNode {
 struct Scene {
     std::vector<BVHNode> nodes;
     std::vector<Triangle> tris;
+    std::vector<uint16_t> surfaceTypes; // Optional surface tags (BVH2)
     std::string loadedPath;
     bool valid = false;
+};
+
+// Dynamic volume definitions for secondary occlusion passes
+struct VehicleOBB {
+    Float3 center;
+    Float3 halfExtents;
+    float yawRad;
+    bool isHelicopter;
+};
+
+struct SmokeSphere {
+    Float3 center;
+    float radius;
+};
+
+struct DynamicOccluders {
+    std::vector<VehicleOBB> vehicles;
+    std::vector<SmokeSphere> smokes;
 };
 
 inline std::string ResolvePath(const std::string& requestedPath)
@@ -106,10 +132,12 @@ inline bool Load(const std::string& path, Scene& scene) {
 
     char magic[4];
     f.read(magic, 4);
-    if (magic[0]!='B' || magic[1]!='V' || magic[2]!='H' || magic[3]!='1')
+    const bool isBvh1 = (magic[0]=='B' && magic[1]=='V' && magic[2]=='H' && magic[3]=='1');
+    const bool isBvh2 = (magic[0]=='B' && magic[1]=='V' && magic[2]=='H' && magic[3]=='2');
+    if (!isBvh1 && !isBvh2)
         return false;
 
-    uint32_t numNodes, numTris;
+    uint32_t numNodes = 0, numTris = 0;
     f.read(reinterpret_cast<char*>(&numNodes), 4);
     f.read(reinterpret_cast<char*>(&numTris), 4);
 
@@ -120,6 +148,14 @@ inline bool Load(const std::string& path, Scene& scene) {
     scene.tris.resize(numTris);
     f.read(reinterpret_cast<char*>(scene.tris.data()),
            numTris * sizeof(Triangle));
+
+    if (isBvh2) {
+        scene.surfaceTypes.resize(numTris);
+        f.read(reinterpret_cast<char*>(scene.surfaceTypes.data()),
+               numTris * sizeof(uint16_t));
+    } else {
+        scene.surfaceTypes.clear();
+    }
 
     scene.valid = f.good() && numNodes > 0;
     if (scene.valid)
@@ -175,29 +211,118 @@ inline bool RayAABB(
     return tmax >= std::max(tmin, 0.f) && tmin < tMax;
 }
 
-inline bool IsOccluded(const Scene& scene,
-    const Float3& origin, const Float3& target, float tMin = 0.20f)
+// Ray-Sphere intersection for spherical smoke volume decay checks
+inline bool RaySphere(
+    const Float3& orig, const Float3& dir,
+    const Float3& center, float radius, float tMax)
 {
-    if (!scene.valid || scene.nodes.empty()) return false;
+    const Float3 oc = orig - center;
+    const float b = dot(oc, dir);
+    const float c = dot(oc, oc) - radius * radius;
+    if (c <= 0.0f) return true; // Origin inside smoke volume
+    if (b > 0.0f) return false;
+    const float disc = b * b - c;
+    if (disc < 0.0f) return false;
+    const float t = -b - std::sqrt(disc);
+    return t >= 0.0f && t <= tMax;
+}
 
+// Ray-OBB intersection for vehicles with optional car cabin solid mode
+inline bool RayVehicleOBB(
+    const Float3& orig, const Float3& dir,
+    const VehicleOBB& v, float tMax, bool carCabinSolid, float tMin = 0.20f)
+{
+    const float cosY = std::cos(-v.yawRad);
+    const float sinY = std::sin(-v.yawRad);
+
+    const Float3 rel = orig - v.center;
+    const Float3 localOrig = {
+        rel.x * cosY - rel.z * sinY,
+        rel.y,
+        rel.x * sinY + rel.z * cosY
+    };
+    const Float3 localDir = {
+        dir.x * cosY - dir.z * sinY,
+        dir.y,
+        dir.x * sinY + dir.z * cosY
+    };
+
+    const Float3 invDir = {
+        std::abs(localDir.x) > 1e-8f ? 1.0f / localDir.x : std::copysign(1e8f, localDir.x),
+        std::abs(localDir.y) > 1e-8f ? 1.0f / localDir.y : std::copysign(1e8f, localDir.y),
+        std::abs(localDir.z) > 1e-8f ? 1.0f / localDir.z : std::copysign(1e8f, localDir.z)
+    };
+
+    // If cabin is solid or target is a helicopter, test the full outer bounding box
+    if (carCabinSolid || v.isHelicopter) {
+        const Float3 mn = { -v.halfExtents.x, -v.halfExtents.y, -v.halfExtents.z };
+        const Float3 mx = {  v.halfExtents.x,  v.halfExtents.y,  v.halfExtents.z };
+        return RayAABB(localOrig, invDir, mn, mx, tMax);
+    }
+
+    // Car Cabin Not Solid: split vehicle into solid chassis/engine block and roof plate,
+    // allowing rays to pass through the window plane (y between ~0.35 and 0.85 above center)
+    const float hx = v.halfExtents.x;
+    const float hy = v.halfExtents.y;
+    const float hz = v.halfExtents.z;
+
+    // 1. Lower chassis / engine block (solid base)
+    const Float3 baseMn = { -hx, -hy, -hz };
+    const Float3 baseMx = {  hx, -hy * 0.15f, hz };
+    if (RayAABB(localOrig, invDir, baseMn, baseMx, tMax))
+        return true;
+
+    // 2. Roof plate (top surface)
+    const Float3 roofMn = { -hx * 0.85f, hy * 0.75f, -hz * 0.55f };
+    const Float3 roofMx = {  hx * 0.85f, hy,          hz * 0.45f };
+    if (RayAABB(localOrig, invDir, roofMn, roofMx, tMax))
+        return true;
+
+    return false;
+}
+
+inline bool IsOccluded(
+    const Scene& scene,
+    const Float3& origin, const Float3& target,
+    const DynamicOccluders* dyn = nullptr,
+    bool carCabinSolid = false,
+    float tMin = 0.20f)
+{
     const Float3 dir = target - origin;
     const float len = std::sqrt(dot(dir, dir));
     if (len < 1e-6f) return false;
 
     const float invLen = 1.0f / len;
     const Float3 d = dir * invLen;
+    const float tMax = len - 0.05f;
+    if (tMax <= tMin) return false;
+
+    // 1. Dynamic Occlusion Pass (Smokes & Vehicles)
+    if (dyn) {
+        for (const auto& smk : dyn->smokes) {
+            if (RaySphere(origin, d, smk.center, smk.radius, tMax))
+                return true;
+        }
+        for (const auto& v : dyn->vehicles) {
+            if (RayVehicleOBB(origin, d, v, tMax, carCabinSolid, tMin))
+                return true;
+        }
+    }
+
+    // 2. Static BVH Scene Pass
+    if (!scene.valid || scene.nodes.empty()) return false;
+
     const Float3 invDir = {
         std::abs(d.x) > 1e-8f ? 1.0f / d.x : std::copysign(1e8f, d.x),
         std::abs(d.y) > 1e-8f ? 1.0f / d.y : std::copysign(1e8f, d.y),
         std::abs(d.z) > 1e-8f ? 1.0f / d.z : std::copysign(1e8f, d.z),
     };
 
-    const float tMax = len - 0.05f;
-    if (tMax <= tMin) return false;
-
     uint32_t stack[128];
     int sp = 0;
     stack[sp++] = 0;
+
+    const bool hasSurfaces = !scene.surfaceTypes.empty();
 
     while (sp > 0) {
         const BVHNode& node = scene.nodes[stack[--sp]];
@@ -210,8 +335,16 @@ inline bool IsOccluded(const Scene& scene,
             const uint32_t count = node.triCount();
             float t;
             for (uint32_t i = start; i < start + count; ++i) {
-                if (RayTriangle(origin, d, scene.tris[i], tMax, t, tMin))
+                if (RayTriangle(origin, d, scene.tris[i], tMax, t, tMin)) {
+                    if (hasSurfaces && i < scene.surfaceTypes.size()) {
+                        const uint16_t surf = scene.surfaceTypes[i];
+                        if (surf == Surface_VehicleGlass && !carCabinSolid) {
+                            // Vehicle glass see-through allowed when car cabin solid mode is disabled
+                            continue;
+                        }
+                    }
                     return true;
+                }
             }
         } else {
             if (sp < 126) {
@@ -221,6 +354,15 @@ inline bool IsOccluded(const Scene& scene,
         }
     }
     return false;
+}
+
+// Overload for backward compatibility
+inline bool IsOccluded(
+    const Scene& scene,
+    const Float3& origin, const Float3& target,
+    float tMin)
+{
+    return IsOccluded(scene, origin, target, nullptr, false, tMin);
 }
 
 } // namespace CollisionBVH

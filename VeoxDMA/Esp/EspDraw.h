@@ -87,6 +87,13 @@ bool ProjectWorldAABB(const Projector& project, const Vector3& worldPos,
 // Shade a D2D1 colour to ImU32, with an optional extra alpha multiplier.
 ImU32 ShadeColour(const D2D1::ColorF& c, float extraAlpha = 1.f);
 
+// Scale alpha of an already-packed ImU32 colour.
+inline ImU32 ScaleAlpha(ImU32 col, float alphaMult) {
+	uint32_t a = (col >> IM_COL32_A_SHIFT) & 0xFF;
+	a = static_cast<uint32_t>(a * std::clamp(alphaMult, 0.0f, 1.0f));
+	return (col & ~IM_COL32_A_MASK) | (a << IM_COL32_A_SHIFT);
+}
+
 // Convert a D2D1 colour into the ImGui packed ImU32 colour. Shared by every
 // ESP module (player boxes, world entities, radar, menu previews) so the whole
 // overlay cannot carry private copies of the same conversion.
