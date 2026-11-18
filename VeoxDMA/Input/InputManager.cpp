@@ -382,6 +382,12 @@ bool Keyboard::InitKeyboard()
 		return false;
 	}
 
+	if (!VMMDLL_ConfigSet(TargetProcess.vHandle, VMMDLL_OPT_REFRESH_ALL, 1))
+	{
+		INPUT_LOG("[Input] could not refresh dma cache [FULL]\n");
+		return false;
+	}
+
 	// Find the interactive session by checking the game process first,
 	// then pick a winlogon in that session. On some 25H2 setups the only
 	// winlogon is session 0 so we fall back to the game PID for kernel reads.
