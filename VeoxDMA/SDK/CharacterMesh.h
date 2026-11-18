@@ -189,6 +189,7 @@ inline void Skin(const Mesh& mesh,
     const float rootX = boneWorld[0].matrix[3][0];
     const float rootY = boneWorld[0].matrix[3][1];
     const float rootZ = boneWorld[0].matrix[3][2];
+    if (rootX == 0.f && rootY == 0.f && rootZ == 0.f) return;
     for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
         if (std::isnan(outPos[v].x)) continue;
         const float dx = outPos[v].x - rootX;

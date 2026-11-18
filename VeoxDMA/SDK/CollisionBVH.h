@@ -304,6 +304,15 @@ inline bool IsOccluded(
                 return true;
         }
         for (const auto& v : dyn->vehicles) {
+            // Skip vehicles the ray originates inside (self-occlusion)
+            const Float3 rel = origin - v.center;
+            const float cosY = std::cos(-v.yawRad);
+            const float sinY = std::sin(-v.yawRad);
+            const Float3 lo = { rel.x*cosY - rel.z*sinY, rel.y, rel.x*sinY + rel.z*cosY };
+            if (std::abs(lo.x) <= v.halfExtents.x &&
+                std::abs(lo.y) <= v.halfExtents.y &&
+                std::abs(lo.z) <= v.halfExtents.z)
+                continue;
             if (RayVehicleOBB(origin, d, v, tMax, carCabinSolid, tMin))
                 return true;
         }

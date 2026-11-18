@@ -1020,7 +1020,8 @@ void DrawVisuals()
 		}
 
 		if (MatchAny({ "Skeleton", "Draw Skeleton", "Chams", "Character Chams", "Limb Thickness",
-			"VisCheck", "WallCheck", "BVH", "Interpolate", "Lead", "Native Camera" }))
+			"VisCheck", "WallCheck", "BVH", "Interpolate", "Lead", "Native Camera",
+				"Vis Ray", "Vis Max", "Hidden Alpha", "Car Cabin", "Vis Ring", "Status Ring" }))
 		{
 			BeginCard("SKELETON & CHAMS", kCardW);
 			ToggleRow("Draw Skeleton", &ConfigInstance.Player.Skeleton);
@@ -1072,6 +1073,17 @@ void DrawVisuals()
 				if (ConfigInstance.Player.ShowBvh)
 					SliderIntRow("Draw Dist", &ConfigInstance.Player.BvhDrawDist, 10, 500, "m");
 			}
+
+			SliderIntRow("Vis Ray Count", &ConfigInstance.Player.VisRayCount, 2, 12);
+			SliderFloatRow("Vis Max Dist", &ConfigInstance.Player.VisMaxDistance, 0.f, 500.f, "m");
+			SliderFloatRow("Hidden Alpha", &ConfigInstance.Player.HiddenAlpha, 0.f, 1.f);
+			ToggleRow("Car Cabin Solid", &ConfigInstance.Player.CarCabinSolid);
+			ToggleRow("Vis Ring", &ConfigInstance.Player.VisRing);
+			if (ConfigInstance.Player.VisRing)
+				ColorRow("Vis Ring Colour", ConfigInstance.Player.VisRingColour);
+			ToggleRow("Status Ring", &ConfigInstance.Player.StatusRing);
+			if (ConfigInstance.Player.StatusRing)
+				ColorRow("Status Ring Colour", ConfigInstance.Player.StatusRingColour);
 
 			ToggleRow("Pose Smoothing", &ConfigInstance.Player.PoseSmoothing);
 			if (ConfigInstance.Player.PoseSmoothing)

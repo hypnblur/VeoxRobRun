@@ -177,7 +177,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 		}
 	}
 	if (g_charMesh.valid && ent.boneWorldMatrices.size() >= 2) {
-		static std::vector<Vector3> skinned;
+		thread_local std::vector<Vector3> skinned;
 		static bool loggedOnce = false;
 		if (!loggedOnce) {
 			DLOG("PlayerEsp: mesh chams path entered, boneWorldMatrices.size=%zu, boneMap.size=%zu",

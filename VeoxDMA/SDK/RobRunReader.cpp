@@ -346,8 +346,9 @@ static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::Stat
     g_dynOccluders = std::move(dyn);
 }
 
-const CollisionBVH::DynamicOccluders& GetDynamicOccluders()
+CollisionBVH::DynamicOccluders GetDynamicOccluders()
 {
+    std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
     return g_dynOccluders;
 }
 
@@ -2572,6 +2573,12 @@ static void UpdateInternal()
         if (uiCount <= 3) DLOG("UpdateInternal #%d: entering entity detail loop", uiCount);
         int detailBudget = 8;
         const std::int64_t battleNowMs = ReadBattleNowMs(cachedBattleEntities);
+        const bool carCabinSolid = ConfigInstance.Player.CarCabinSolid;
+        CollisionBVH::DynamicOccluders dynCopy;
+        {
+            std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
+            dynCopy = g_dynOccluders;
+        }
         for (auto& w : work) {
             if (!w.positionValid) continue;
             if (uiCount <= 3) DLOG("UpdateInternal #%d: entity id=%d, cp=A (init)", uiCount, w.entityId);
@@ -2976,13 +2983,6 @@ static void UpdateInternal()
                     visCamera.position.x,
                     visCamera.position.y,
                     visCamera.position.z };
-
-                const bool carCabinSolid = ConfigInstance.Player.CarCabinSolid;
-                CollisionBVH::DynamicOccluders dynCopy;
-                {
-                    std::lock_guard<std::mutex> lock(g_dynOccludersMutex);
-                    dynCopy = g_dynOccluders;
-                }
 
                 bool anyVisible = false;
                 const int rayCount = ConfigInstance.Player.VisRayCount;
