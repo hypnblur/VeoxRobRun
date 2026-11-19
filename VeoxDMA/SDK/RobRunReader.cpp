@@ -1872,17 +1872,7 @@ static void RefreshParty(std::uintptr_t game, std::int32_t localId,
         }
     }
 
-    bool localPresent = false;
-    if (localPublicId > 0) {
-        localPresent = std::find(ids.publicIds.begin(), ids.publicIds.end(),
-            localPublicId) != ids.publicIds.end();
-    }
-    if (!localPresent && localId > 0) {
-        localPresent = std::find(ids.entityIds.begin(), ids.entityIds.end(),
-            localId) != ids.entityIds.end();
-    }
-
-    if (!any || !localPresent)
+    if (!any)
         ids = PartyMemberIds{};
     else
         ids.valid = true;
