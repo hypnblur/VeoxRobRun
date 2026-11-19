@@ -816,9 +816,9 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_worldWorkerStop.store(false, std::memory_order_relaxed);
     g_worldWorkerThread = std::thread([] {
         DLOG("World worker thread started");
+        static int wwCount = 0;
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
             try {
-                static int wwCount = 0;
                 ++wwCount;
                 const std::uint64_t gen = sessionGeneration;
                 const std::uintptr_t bm = cachedBattleModel;
@@ -853,7 +853,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 // Session changed while we were reading — clear stale published state
                 if (sessionGeneration != gen) {
                     DLOG("WorldWorker #%d: session changed mid-read (was %llu, now %llu)",
-                         wwCount, (unsigned long long)gen, (unsigned long long)sessionGeneration.load());
+                         wwCount, (unsigned long long)gen, (unsigned long long)sessionGeneration);
                     std::lock_guard<std::mutex> lock(g_worldMutex);
                     g_worldState = std::make_shared<RobRunWorld::State>();
                     g_plotState = std::make_shared<RobRunWorld::PlotState>();
