@@ -15,7 +15,6 @@ namespace Keyboard
 {
 	uint64_t gafAsyncKeyStateExport = 0;
 	uint8_t state_bitmap[64]{ };
-	uint8_t previous_state_bitmap[256 / 8]{ };
 	uint64_t win32kbase = 0;
 	int win_logon_pid = 0;
 	uint64_t cursorSessionBase = 0; // Win11 user session state, 0 on Win10
@@ -455,9 +454,6 @@ namespace
 
 void Keyboard::UpdateKeys()
 {
-	uint8_t previous_key_state_bitmap[64] = { 0 };
-	memcpy(previous_key_state_bitmap, state_bitmap, 64);
-
 	uint8_t fresh[64] = {};
 	DWORD read = 0;
 	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, VMMDLL_FLAG_NOCACHE) || read != 64)
@@ -474,9 +470,6 @@ void Keyboard::UpdateKeys()
 		}
 	}
 	memcpy(state_bitmap, fresh, 64);
-	for (int vk = 0; vk < 256; ++vk)
-		if ((state_bitmap[(vk * 2 / 8)] & (1 << ((vk % 4) * 2))) && !(previous_key_state_bitmap[(vk * 2 / 8)] & (1 << ((vk % 4) * 2))))
-			previous_state_bitmap[vk / 8] |= 1 << vk % 8;
 }
 
 bool Keyboard::IsKeyDown(uint32_t virtual_key_code)

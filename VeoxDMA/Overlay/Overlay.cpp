@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <d3d11.h>
 #include <dwmapi.h>
+#include <exception>
 #include <thread>
 #include <timeapi.h>
 #include <vector>
@@ -201,9 +202,10 @@ void WaitForFrameCap()
 		return;
 
 	// timeBeginPeriod(1) is already active in the render loop, but sleep_for
-	// still rounds up to the timer tick. Sleep the bulk, then spin the last
-	// millisecond so the cap is honoured within a frame at 240+ fps.
-	const auto spin = std::chrono::milliseconds(1);
+	// still rounds up to the timer tick. Sleep the bulk, then spin briefly so
+	// the cap is honoured within a frame at 240+ fps. The spin is kept to
+	// 200 us: a 1 ms spin at 144 fps burns roughly 14% of a core for nothing.
+	const auto spin = std::chrono::microseconds(200);
 	if (remain > spin)
 		std::this_thread::sleep_for(remain - spin);
 	while (clock::now() < next) {
@@ -509,7 +511,35 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	io.IniFilename = nullptr;
 	io.ConfigFlags &= ~(ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad);
 
-	if (callbacks.init) callbacks.init();
+	// Font/asset loading happens in init(); an exception there used to take the
+	// process down with no message and no chance to clean up the window.
+	if (callbacks.init)
+	{
+		try
+		{
+			callbacks.init();
+		}
+		catch (const std::exception& e)
+		{
+			MessageBoxA(nullptr, e.what(), "VeoxDMA - UI Init Failed",
+				MB_OK | MB_ICONERROR | MB_TOPMOST);
+			ImGui::DestroyContext();
+			CleanupDeviceD3D();
+			DestroyWindow(hWnd);
+			UnregisterClass(windowClass, instance);
+			return -1;
+		}
+		catch (...)
+		{
+			MessageBoxA(nullptr, "Unknown exception while initialising the UI.",
+				"VeoxDMA - UI Init Failed", MB_OK | MB_ICONERROR | MB_TOPMOST);
+			ImGui::DestroyContext();
+			CleanupDeviceD3D();
+			DestroyWindow(hWnd);
+			UnregisterClass(windowClass, instance);
+			return -1;
+		}
+	}
 	ImGui_ImplWin32_Init(hWnd);
 	ImGui_ImplDX11_Init(g_device, g_context);
 

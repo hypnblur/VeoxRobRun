@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Memory.h"
 
+#include <atomic>
 #include <thread>
 #include <iostream>
 #include <chrono>
@@ -34,7 +35,13 @@ Memory::Memory()
 
 Memory::~Memory()
 {
-	VMMDLL_Close(this->vHandle);
+	// Init() closes the handle on some failure paths; never close a stale one
+	// again here (VMMDLL_Close on a freed handle is a use-after-free).
+	if (this->vHandle)
+	{
+		VMMDLL_Close(this->vHandle);
+		this->vHandle = nullptr;
+	}
 	DMA_INITIALIZED = false;
 	PROCESS_INITIALIZED = false;
 }
@@ -107,6 +114,23 @@ bool Memory::DumpMemoryMap(bool debug)
 
 unsigned char abort2[4] = { 0x10, 0x00, 0x10, 0x00 };
 
+// A physical map written during a previous boot describes memory that no longer
+// exists (different driver, different card placement). Reuse it only if it was
+// produced since the machine booted.
+static bool MemoryMapIsFromThisBoot(const std::string& path)
+{
+	std::error_code ec;
+	const auto written = std::filesystem::last_write_time(path, ec);
+	if (ec)
+		return false;
+
+	const auto now = std::filesystem::file_time_type::clock::now();
+	const auto boot = now - std::chrono::milliseconds(GetTickCount64());
+	// file_time_type::clock and last_write_time share an epoch, so the two are
+	// directly comparable.
+	return written >= boot;
+}
+
 bool Memory::SetFPGA()
 {
 	bool result;
@@ -164,7 +188,7 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 				auto temp_path = std::filesystem::temp_directory_path();
 				path = (temp_path.string() + "\\mmap.txt");
 				bool dumped = false;
-				if (!std::filesystem::exists(path))
+				if (!std::filesystem::exists(path) || !MemoryMapIsFromThisBoot(path))
 					dumped = this->DumpMemoryMap(debug);
 				else
 					dumped = true;
@@ -224,6 +248,7 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 		{
 			LOG("[!] Could not set FPGA!\n");
 			VMMDLL_Close(this->vHandle);
+			this->vHandle = nullptr;
 			return false;
 		}
 
@@ -320,6 +345,7 @@ std::vector<std::string> Memory::GetModuleList(std::string process_name)
 		list.push_back(module.uszText);
 	}
 
+	VMMDLL_MemFree(module_info);
 	return list;
 }
 
@@ -649,6 +675,46 @@ static uint8_t GetByte(const char* hex)
 	return (uint8_t)((hexdigits[hex[0]] << 4) | (hexdigits[hex[1]]));
 }
 
+namespace
+{
+	struct SignatureToken
+	{
+		std::uint8_t value = 0;
+		bool wildcard = false;
+	};
+
+	// Accepts "48 8B ? ? E8" style patterns. "?" and "??" are one-byte
+	// wildcards; whitespace between tokens is optional.
+	bool ParseSignature(const char* signature, std::vector<SignatureToken>& tokens)
+	{
+		tokens.clear();
+		for (const char* p = signature; *p; )
+		{
+			const unsigned char c = static_cast<unsigned char>(*p);
+			if (c == ' ' || c == '\t')
+			{
+				++p;
+				continue;
+			}
+			if (c == '?')
+			{
+				tokens.push_back({ 0, true });
+				++p;
+				if (*p == '?') ++p;
+				continue;
+			}
+			// p[1] is safe to read: if p[0] is the terminator the loop ends, and
+			// otherwise p[1] is at worst the terminator itself.
+			if (!std::isxdigit(static_cast<unsigned char>(p[0])) ||
+				!std::isxdigit(static_cast<unsigned char>(p[1])))
+				return false;
+			tokens.push_back({ GetByte(p), false });
+			p += 2;
+		}
+		return !tokens.empty();
+	}
+} // namespace
+
 uint64_t Memory::FindSignature(const char* signature, uint64_t range_start, uint64_t range_end, int PID)
 {
 	if (!signature || signature[0] == '\0' || range_start >= range_end)
@@ -657,32 +723,79 @@ uint64_t Memory::FindSignature(const char* signature, uint64_t range_start, uint
 	if (PID == 0)
 		PID = this->current_process.PID;
 
-	std::vector<uint8_t> buffer(range_end - range_start);
-	if (!VMMDLL_MemReadEx(this->vHandle, PID, range_start, buffer.data(), buffer.size(), 0, VMMDLL_FLAG_NOCACHE))
+	std::vector<SignatureToken> tokens;
+	if (!ParseSignature(signature, tokens))
 		return 0;
 
-	const char* pat = signature;
-	uint64_t first_match = 0;
-	for (uint64_t i = range_start; i < range_end; i++)
+	// Scan in bounded windows. One read of the whole range fails as soon as it
+	// spans a single unmapped page, and a module-sized buffer is hundreds of MB.
+	// Each window keeps (tokens - 1) bytes of overlap so a match straddling a
+	// boundary is still found.
+	constexpr std::size_t kWindow = 1u << 20;
+	const std::size_t overlap = tokens.size() - 1;
+	std::vector<std::uint8_t> buffer(kWindow + overlap);
+
+	for (std::uint64_t base = range_start; base < range_end; )
 	{
-		if (*pat == '?' || buffer[i - range_start] == GetByte(pat))
-		{
-			if (!first_match)
-				first_match = i;
+		const std::uint64_t remaining = range_end - base;
+		const std::size_t want = static_cast<std::size_t>(
+			(std::min)(remaining, static_cast<std::uint64_t>(buffer.size())));
 
-			if (!pat[2])
+		DWORD cbRead = 0;
+		if (!VMMDLL_MemReadEx(this->vHandle, PID, base, buffer.data(),
+			static_cast<DWORD>(want), &cbRead, VMMDLL_FLAG_NOCACHE))
+		{
+			// A hole in the range (unmapped page) must not abort the scan;
+			// skip this window and keep looking further on.
+			if (want <= overlap)
 				break;
-
-			pat += (*pat == '?') ? 2 : 3;
+			base += want - overlap;
+			continue;
 		}
-		else
+		if (cbRead == 0)
 		{
-			pat = signature;
-			first_match = 0;
+			if (want <= overlap)
+				break;
+			base += want - overlap;
+			continue;
 		}
+
+		if (cbRead >= tokens.size())
+		{
+			for (std::size_t i = 0; i + tokens.size() <= cbRead; ++i)
+			{
+				std::size_t t = 0;
+				for (; t < tokens.size(); ++t)
+				{
+					if (!tokens[t].wildcard && buffer[i + t] != tokens[t].value)
+						break;
+				}
+				if (t == tokens.size())
+					return base + i;
+			}
+		}
+
+		if (base + cbRead >= range_end)
+			break;
+		// Keep the last (tokens - 1) bytes so a match on the boundary is not
+		// missed. A short read still advances by at least one byte.
+		base += (cbRead > overlap) ? cbRead - overlap : cbRead;
 	}
 
-	return first_match;
+	return 0;
+}
+
+// The aim path retries a failing write at frame rate. Log the first failure
+// and then at most one every 5 s: a synchronous console write per attempt
+// stalls the caller badly.
+static bool ShouldLogWriteFailure()
+{
+	static std::atomic<std::uint64_t> lastLogMs{ 0 };
+	const std::uint64_t now = GetTickCount64();
+	std::uint64_t previous = lastLogMs.load(std::memory_order_relaxed);
+	if (now - previous < 5000)
+		return false;
+	return lastLogMs.compare_exchange_strong(previous, now, std::memory_order_relaxed);
 }
 
 bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
@@ -691,7 +804,8 @@ bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
 		return false;
 	if (!VMMDLL_MemWrite(this->vHandle, this->current_process.PID, address, (PBYTE)buffer, size))
 	{
-		LOG("[!] Failed to write Memory at 0x%p\n", address);
+		if (ShouldLogWriteFailure())
+			LOG("[!] Failed to write Memory at 0x%p (further failures suppressed)\n", address);
 		return false;
 	}
 	return true;
@@ -703,7 +817,8 @@ bool Memory::Write(uintptr_t address, void* buffer, size_t size, int pid) const
 		return false;
 	if (!VMMDLL_MemWrite(this->vHandle, pid, address, (PBYTE)buffer, size))
 	{
-		LOG("[!] Failed to write Memory at 0x%p\n", address);
+		if (ShouldLogWriteFailure())
+			LOG("[!] Failed to write Memory at 0x%p (further failures suppressed)\n", address);
 		return false;
 	}
 	return true;

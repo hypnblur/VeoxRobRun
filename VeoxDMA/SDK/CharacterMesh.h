@@ -111,9 +111,41 @@ inline bool Load(const std::string& path, Mesh& mesh)
     mesh.indices.resize(numTris * 3);
     f.read(reinterpret_cast<char*>(mesh.indices.data()), numTris * 3 * 2);
 
-    mesh.valid = f.good();
-    DLOG("  Load %s (valid=%d)", mesh.valid ? "OK" : "FAIL: stream error", mesh.valid);
-    return mesh.valid;
+    if (!f.good()) {
+        DLOG("  FAIL: stream error (truncated file)");
+        mesh.valid = false;
+        return false;
+    }
+
+    // character_mesh.bin is a generated asset, so its indices are untrusted
+    // input. Skin() and Draw() use them to index fixed-size arrays; a bone
+    // index past numBones or a triangle index past numVerts reads out of
+    // bounds on the render thread. Reject the file once, here.
+    for (const Vertex& v : mesh.vertices) {
+        for (int j = 0; j < 4; ++j) {
+            // Skin() skips zero-weight slots, so only the bones it will
+            // actually dereference have to be in range.
+            if (v.weights[j] <= 1e-6f) continue;
+            if (v.bones[j] >= numBones) {
+                DLOG("  FAIL: bone index %u out of range (%u bones)",
+                     (unsigned)v.bones[j], numBones);
+                mesh.valid = false;
+                return false;
+            }
+        }
+    }
+    for (std::uint16_t idx : mesh.indices) {
+        if (idx >= numVerts) {
+            DLOG("  FAIL: triangle index %u out of range (%u verts)",
+                 (unsigned)idx, numVerts);
+            mesh.valid = false;
+            return false;
+        }
+    }
+
+    mesh.valid = true;
+    DLOG("  Load OK");
+    return true;
 }
 
 // Skin all vertices given per-bone world matrices.
@@ -127,8 +159,17 @@ inline void Skin(const Mesh& mesh,
                  const int* boneMap,
                  Vector3* outPos)
 {
-    std::vector<Matrix4x4> skin(mesh.numBones);
-    std::vector<uint8_t> mapped(mesh.numBones, 0);
+    // Called once per player per frame; reuse scratch instead of allocating
+    // two vectors for every entity. numBones is validated at load time.
+    thread_local std::vector<Matrix4x4> s_skin;
+    thread_local std::vector<uint8_t> s_mapped;
+    if (s_skin.size() < mesh.numBones) {
+        s_skin.resize(mesh.numBones);
+        s_mapped.resize(mesh.numBones);
+    }
+    Matrix4x4* skin = s_skin.data();
+    std::uint8_t* mapped = s_mapped.data();
+    std::memset(mapped, 0, mesh.numBones);
     for (std::uint32_t b = 0; b < mesh.numBones; ++b) {
         int skel = boneMap ? boneMap[b] : -1;
         if (skel < 0 || skel >= skeletonBoneCount) {

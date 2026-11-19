@@ -16,6 +16,10 @@ struct CameraData {
     // aspect while keeping the camera's real vertical FOV.
     Matrix4x4 view;
     Matrix4x4 projection;
+    // World position and forward parsed from the view matrix, so callers can
+    // use the rendered camera as an aim/occlusion origin directly.
+    Vector3 position{};
+    Vector3 forward{};
     bool valid = false;
     // Validation against the managed camera (the aim never writes its
     // position): distance in metres and forward-vector dot product. Negative

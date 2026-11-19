@@ -520,7 +520,17 @@ void DrawPlayers()
 	// projects exactly the points it is given. There is no render-thread
 	// interpolation or extrapolation: extrapolating past the newest sample was
 	// what made bones overshoot and spring back every frame.
-	std::vector<std::string> lookingNames;
+	thread_local std::vector<std::string> lookingNames;
+	lookingNames.clear();
+
+	// Text segments are rebuilt every frame for every player. Keep the buffers
+	// (and the joined-line scratch) alive across frames instead of allocating
+	// them per entity per frame.
+	struct TextSeg { std::string text; ImU32 col; };
+	thread_local std::vector<TextSeg> topSegs;
+	thread_local std::vector<TextSeg> stateSegs;
+	thread_local std::vector<TextSeg> lookSeg;
+	thread_local std::string segFull;
 
 	for (const auto& ent : snapshot->entities)
 	{
@@ -794,7 +804,6 @@ void DrawPlayers()
 		}
 
 		// --- colored text segments ---
-		struct TextSeg { std::string text; ImU32 col; };
 
 		// Pulse multiplier for active state indicators (0.5..1.0 alpha cycle)
 		const float pulse = 0.6f + 0.4f * std::sin((float)ImGui::GetTime() * 8.f);
@@ -814,10 +823,10 @@ void DrawPlayers()
 			: screenPos.x;
 
 		auto drawSegLine = [&](const std::vector<TextSeg>& segs, float y) {
-			std::string full;
-			for (const auto& s : segs) full += s.text;
-			if (full.empty()) return y;
-			ImVec2 fullSize = MeasureText(full.c_str(), fontSize);
+			segFull.clear();
+			for (const auto& s : segs) segFull += s.text;
+			if (segFull.empty()) return y;
+			ImVec2 fullSize = MeasureText(segFull.c_str(), fontSize);
 			float cx = textX - fullSize.x * 0.5f;
 			for (const auto& s : segs) {
 				ImVec2 sz = MeasureText(s.text.c_str(), fontSize);
@@ -845,17 +854,17 @@ void DrawPlayers()
 		}
 
 		// Top: name + clan tag
-		std::vector<TextSeg> topSegs;
-		if (!ent.nickname.empty())
-			topSegs.push_back({ RobRunMemory::WideToUtf8(ent.nickname), roleBasedCol });
-		if (!ent.clanTag.empty())
-			topSegs.push_back({ " <" + RobRunMemory::WideToUtf8(ent.clanTag) + ">", roleBasedCol });
+		topSegs.clear();
+		if (!ent.nicknameUtf8.empty())
+			topSegs.push_back({ ent.nicknameUtf8, roleBasedCol });
+		if (!ent.clanTagUtf8.empty())
+			topSegs.push_back({ " <" + ent.clanTagUtf8 + ">", roleBasedCol });
 
 		float topY = boxValid ? (minY - 6.f) : screenPos.y;
 		if (!topSegs.empty()) {
-			std::string full;
-			for (const auto& s : topSegs) full += s.text;
-			ImVec2 sz = MeasureText(full.c_str(), fontSize);
+			segFull.clear();
+			for (const auto& s : topSegs) segFull += s.text;
+			ImVec2 sz = MeasureText(segFull.c_str(), fontSize);
 			topY -= sz.y;
 			drawSegLine(topSegs, topY);
 		}
@@ -863,9 +872,7 @@ void DrawPlayers()
 		// Bottom: weapon sprite + weapon name + distance
 		float botY = boxValid ? (maxY + 8.f) : (screenPos.y + 14.f);
 		{
-			const std::string weapStr = ent.weaponName.empty()
-				? std::string()
-				: RobRunMemory::WideToUtf8(ent.weaponName);
+			const std::string& weapStr = ent.weaponNameUtf8;
 			char distBuf[32]{};
 			if (pcfg.Distance)
 				snprintf(distBuf, sizeof(distBuf), "%.1f m", distF);
@@ -917,7 +924,7 @@ void DrawPlayers()
 		}
 
 		// State indicators line
-		std::vector<TextSeg> stateSegs;
+		stateSegs.clear();
 		if (pcfg.VisCheck || pcfg.WallCheck)
 		{
 			const ImU32 visBadgeCol = ent.visible
@@ -1001,14 +1008,15 @@ void DrawPlayers()
 				if (dot > 0.90f)
 				{
 					if (pcfg.LookingAtYou) {
-						std::vector<TextSeg> lookSeg = { { "[LOOKING]", lookCol } };
+						lookSeg.clear();
+						lookSeg.push_back({ "[LOOKING]", lookCol });
 						botY = drawSegLine(lookSeg, botY);
 					}
 					if (pcfg.LookingAlert) {
-						std::string name = ent.nickname.empty()
-							? ("Entity " + std::to_string(ent.entityId))
-							: RobRunMemory::WideToUtf8(ent.nickname);
-						lookingNames.push_back(std::move(name));
+						if (ent.nicknameUtf8.empty())
+							lookingNames.push_back("Entity " + std::to_string(ent.entityId));
+						else
+							lookingNames.push_back(ent.nicknameUtf8);
 					}
 				}
 			}

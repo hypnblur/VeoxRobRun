@@ -995,7 +995,7 @@ void DrawFullMap()
 			dl->AddText(tp, badgeCol, txt);
 
 			if (cfg.ShowPlayerNames && !ent.nickname.empty() && !isLocal) {
-				std::string nm = RobRunMemory::WideToUtf8(ent.nickname);
+				const std::string& nm = ent.nicknameUtf8;
 				ImVec2 ns = ImGui::CalcTextSize(nm.c_str());
 				ImVec2 np(sp.x - ns.x * 0.5f, sp.y + r + 2.f);
 				dl->AddText(ImVec2(np.x + 1.f, np.y + 1.f), IM_COL32(0, 0, 0, 200),

@@ -219,9 +219,16 @@ constexpr float kMinForwardDot = 0.5f;     // 60 degrees
 // Cached render camera and the structurally discovered matrix offsets. Offsets
 // are stable for a Unity build, so they survive scene changes; the node does
 // not, and is re-resolved when it stops matching the managed camera.
-std::atomic<std::uintptr_t> g_cameraNode{ 0 };
-std::atomic<std::uintptr_t> g_viewOff{ 0 };
-std::atomic<std::uintptr_t> g_projOff{ 0 };
+//
+// Node and offsets are one value: as three separate atomics a reader could
+// pair a freshly resolved node with the previous node's offsets and read
+// matrices from the wrong place.
+struct CameraNodeCache {
+    std::uintptr_t node = 0;
+    std::uintptr_t viewOff = 0;
+    std::uintptr_t projOff = 0;
+};
+std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
 std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
 
 bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
@@ -248,6 +255,8 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     data.view = view;
     data.projection = projection;
     data.viewMatrix = view * projection;
+    data.position = position;
+    data.forward = forward;
     data.valid = true;
     data.positionError = -1.f;
     data.forwardDot = -1.f;
@@ -431,9 +440,10 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
     const bool haveExpected = ExpectedFromManaged(expectedPosition, expectedForward);
     const std::uint64_t now = GetTickCount64();
 
-    const std::uintptr_t cachedNode = g_cameraNode.load(std::memory_order_acquire);
-    const std::uintptr_t viewOff = g_viewOff.load(std::memory_order_acquire);
-    const std::uintptr_t projOff = g_projOff.load(std::memory_order_acquire);
+    const CameraNodeCache cache = g_cameraCache.load(std::memory_order_acquire);
+    const std::uintptr_t cachedNode = cache.node;
+    const std::uintptr_t viewOff = cache.viewOff;
+    const std::uintptr_t projOff = cache.projOff;
 
     if (cachedNode && viewOff && projOff) {
         CameraData cached{};
@@ -480,22 +490,20 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
             candidate.forwardDot = Vector3::Dot(forward, expectedForward);
         }
 
-        g_cameraNode.store(node, std::memory_order_release);
-        g_viewOff.store(layout.viewOff, std::memory_order_release);
-        g_projOff.store(layout.projOff, std::memory_order_release);
+        g_cameraCache.store(CameraNodeCache{ node, layout.viewOff, layout.projOff },
+            std::memory_order_release);
         return candidate;
     }
 
-    g_cameraNode.store(0, std::memory_order_release);
-    g_viewOff.store(0, std::memory_order_release);
-    g_projOff.store(0, std::memory_order_release);
+    g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
     return data;
 }
 
 float ReadNativeFov()
 {
-    std::uintptr_t node = g_cameraNode.load(std::memory_order_acquire);
-    std::uintptr_t projOff = g_projOff.load(std::memory_order_acquire);
+    const CameraNodeCache cache = g_cameraCache.load(std::memory_order_acquire);
+    std::uintptr_t node = cache.node;
+    std::uintptr_t projOff = cache.projOff;
 
     if (!node) {
         node = FindMainCamera();
@@ -518,9 +526,10 @@ float ReadNativeFov()
 CameraData GetCameraMatricesFast()
 {
     CameraData data{};
-    const std::uintptr_t node = g_cameraNode.load(std::memory_order_acquire);
-    const std::uintptr_t viewOff = g_viewOff.load(std::memory_order_acquire);
-    const std::uintptr_t projOff = g_projOff.load(std::memory_order_acquire);
+    const CameraNodeCache cache = g_cameraCache.load(std::memory_order_acquire);
+    const std::uintptr_t node = cache.node;
+    const std::uintptr_t viewOff = cache.viewOff;
+    const std::uintptr_t projOff = cache.projOff;
     if (!node || !viewOff || !projOff) return data;
 
     ReadMatricesAt(node, viewOff, projOff, data);

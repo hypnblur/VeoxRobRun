@@ -30,6 +30,11 @@ static HINSTANCE g_hInstance = nullptr;
 static std::mutex g_statusMutex;
 static std::string g_attachStatus = "Waiting for DMA card...";
 
+// Serialises reader lifetime: Init() (attach thread) and Shutdown() (render
+// thread on reattach/exit) reset the same Il2Cpp/RobRunCamera/CameraFinder
+// statics, and the render thread must never be reading them while that runs.
+static std::mutex g_lifecycleMutex;
+
 static void SetAttachStatus(const std::string& text)
 {
 	std::lock_guard<std::mutex> lock(g_statusMutex);
@@ -58,8 +63,11 @@ static bool AttachGame()
 		return false;
 	}
 
-	CameraFinder::Init(unityBase);
-	RobRunReader::Init(gaBase, unityBase);
+	{
+		std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+		CameraFinder::Init(unityBase);
+		RobRunReader::Init(gaBase, unityBase);
+	}
 	printf("GameAssembly @ 0x%llX | UnityPlayer @ 0x%llX\n", gaBase, unityBase);
 	// Resolve the game PC's gafAsyncKeyState once the DMA process context is
 	// live. This can take a few seconds (kernel module scans), so it belongs on
@@ -102,18 +110,31 @@ static void TickOverlay()
 	if (g_pendingReattach.exchange(false))
 	{
 		Overlay::Notify("Re-attaching...", 0xFFFFCC44u, 2.f);
-		Aim::StopAimWorker();
-		StopAttachLoop();
-		RobRunReader::Shutdown();
-		TargetProcess.ResetProcess();
+		// Drop the render thread's reader access before tearing anything down:
+		// RefreshCamera() and the draw callbacks are gated on this flag.
 		g_attached.store(false, std::memory_order_release);
+		Aim::StopAimWorker();
+		// Join the attach thread before taking the lifecycle lock. It may be
+		// inside AttachGame holding that lock, so joining while holding it
+		// would deadlock.
+		StopAttachLoop();
+		// An attach that completed during that join may have flipped the flag
+		// back on and restarted the aim worker; undo both before shutdown.
+		g_attached.store(false, std::memory_order_release);
+		Aim::StopAimWorker();
+		{
+			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+			RobRunReader::Shutdown();
+			TargetProcess.ResetProcess();
+		}
 		SetAttachStatus("Re-attaching...");
 		StartAttachLoop();
 	}
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
-	RobRunReader::RefreshCamera();
+	if (g_attached.load(std::memory_order_acquire))
+		RobRunReader::RefreshCamera();
 
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
@@ -206,13 +227,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		if (frameCount <= 3 || (frameCount % 500) == 0)
 			DLOG("Draw frame #%d", frameCount);
 		try {
-			DrawPlayers();
-			DrawBvhDebug();
-			if (!ConfigInstance.Overlay.BattleMode) {
-				DrawWorldEntities();
-				DrawHouseInfo();
-				Radar::Draw();
-				Radar::DrawFullMap();
+			// Only draw game state while attached: during a reattach the reader
+			// is being shut down and the last snapshot is stale.
+			if (g_attached.load(std::memory_order_acquire)) {
+				DrawPlayers();
+				DrawBvhDebug();
+				if (!ConfigInstance.Overlay.BattleMode) {
+					DrawWorldEntities();
+					DrawHouseInfo();
+					Radar::Draw();
+					Radar::DrawFullMap();
+				}
 			}
 			Aim::Draw();
 			Aim::DrawDebug();
@@ -231,7 +256,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		Radar::Shutdown();
 		Backdrop::Destroy();
 		StopAttachLoop();
-		RobRunReader::Shutdown();
+		{
+			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+			RobRunReader::Shutdown();
+		}
 	};
 	callbacks.status = [] {
 		return g_attached.load(std::memory_order_acquire) ? std::string("Attached") : GetAttachStatus();

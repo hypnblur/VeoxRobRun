@@ -1,9 +1,11 @@
 #include "pch.h"
 #include "ConfigFile.h"
 #include "ConfigInstance.h"
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
+#include <thread>
 
 namespace {
 
@@ -19,13 +21,38 @@ void EnsureDirectoryExists()
     std::filesystem::create_directories(kConfigDirW, ec);
 }
 
+// Config names come straight from the UI, so they are treated as untrusted:
+// "..\..\Startup\x" must not escape the config directory, and ':' or '*' must
+// not reach CreateFile. A name that fails these checks is rejected (returns
+// empty) instead of being rewritten into a different config, so an existing
+// name like "my config (1)" keeps working.
+std::string SanitizeName(std::string name)
+{
+    if (name.size() >= 5 && name.substr(name.size() - 5) == ".json")
+        name = name.substr(0, name.size() - 5);
+
+    if (name.find("..") != std::string::npos) return {};
+
+    for (char c : name)
+    {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F) return {};
+        if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' ||
+            c == '\\' || c == '|' || c == '?' || c == '*')
+            return {};
+    }
+
+    while (!name.empty() && name.front() == ' ') name.erase(name.begin());
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    if (name.size() > 64) name.resize(64);
+    return name;
+}
+
 void UpdateActivePath()
 {
     EnsureDirectoryExists();
-    std::string safeName = g_activeConfig;
+    std::string safeName = SanitizeName(g_activeConfig);
     if (safeName.empty()) safeName = "default";
-    if (safeName.size() >= 5 && safeName.substr(safeName.size() - 5) == ".json")
-        safeName = safeName.substr(0, safeName.size() - 5);
 
     g_activeConfig = safeName;
     std::wstring fullPath = kConfigDirW + L"\\" + std::wstring(safeName.begin(), safeName.end()) + L".json";
@@ -61,12 +88,14 @@ std::string GetActiveConfigName()
 
 void SetActiveConfigName(const std::string& name)
 {
-    if (!name.empty()) {
-        g_activeConfig = name;
-        if (g_activeConfig.size() >= 5 && g_activeConfig.substr(g_activeConfig.size() - 5) == ".json")
-            g_activeConfig = g_activeConfig.substr(0, g_activeConfig.size() - 5);
-        UpdateActivePath();
+    if (name.empty()) return;
+    const std::string safe = SanitizeName(name);
+    if (safe.empty()) {
+        LOG("[Config] rejected config name '%s'\n", name.c_str());
+        return;
     }
+    g_activeConfig = safe;
+    UpdateActivePath();
 }
 
 std::vector<std::string> ListConfigs()
@@ -98,31 +127,64 @@ std::vector<std::string> ListConfigs()
 bool Save(const std::string& name)
 {
     EnsureDirectoryExists();
-    std::string target = name.empty() ? g_activeConfig : name;
-    if (target.empty()) target = "default";
-    if (target.size() >= 5 && target.substr(target.size() - 5) == ".json")
-        target = target.substr(0, target.size() - 5);
+    std::string target = SanitizeName(name.empty() ? g_activeConfig : name);
+    if (target.empty()) {
+        if (!name.empty()) {
+            LOG("[Config] rejected config name '%s'\n", name.c_str());
+            return false;
+        }
+        target = "default";
+    }
 
     g_activeConfig = target;
     UpdateActivePath();
 
-    std::filesystem::path fullPath = std::filesystem::path(kConfigDirW) / (target + ".json");
-    std::ofstream out(fullPath, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        LOG("[Config] cannot open %ls for writing\n", fullPath.c_str());
-        return false;
-    }
+    const std::filesystem::path fullPath =
+        std::filesystem::path(kConfigDirW) / (target + ".json");
+    const std::filesystem::path tmpPath = fullPath.string() + ".tmp";
 
+    // Serialize first: a throw here must leave the live file untouched.
+    std::string text;
     try {
-        out << ConfigInstance.ToJson().dump(2);
+        text = ConfigInstance.ToJson().dump(2);
     }
     catch (const std::exception& e) {
         LOG("[Config] serialize failed: %s\n", e.what());
         return false;
     }
 
-    if (!out.good()) {
-        LOG("[Config] write failed for %ls\n", fullPath.c_str());
+    // Write a temp file, then rename over the target. A crash or power loss
+    // mid-save then leaves the previous config intact instead of a truncated
+    // file that fails to parse (and silently loads a different config).
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            LOG("[Config] cannot open %ls for writing\n", tmpPath.c_str());
+            return false;
+        }
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        out.flush();
+        if (!out.good()) {
+            LOG("[Config] write failed for %ls\n", tmpPath.c_str());
+            out.close();
+            std::error_code ignore;
+            std::filesystem::remove(tmpPath, ignore);
+            return false;
+        }
+    }
+
+    // std::filesystem::rename replaces an existing destination. Retry a couple
+    // of times because an AV scanner can hold the file open briefly. Never
+    // delete the live config: if the swap fails, the old file must survive.
+    std::error_code ec;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::filesystem::rename(tmpPath, fullPath, ec);
+        if (!ec) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (ec) {
+        LOG("[Config] rename %ls -> %ls failed: %s (previous config kept)\n",
+            tmpPath.c_str(), fullPath.c_str(), ec.message().c_str());
         return false;
     }
 
@@ -133,10 +195,14 @@ bool Save(const std::string& name)
 bool Load(const std::string& name)
 {
     EnsureDirectoryExists();
-    std::string target = name.empty() ? g_activeConfig : name;
-    if (target.empty()) target = "default";
-    if (target.size() >= 5 && target.substr(target.size() - 5) == ".json")
-        target = target.substr(0, target.size() - 5);
+    std::string target = SanitizeName(name.empty() ? g_activeConfig : name);
+    if (target.empty()) {
+        if (!name.empty()) {
+            LOG("[Config] rejected config name '%s'\n", name.c_str());
+            return false;
+        }
+        target = "default";
+    }
 
     std::filesystem::path fullPath = std::filesystem::path(kConfigDirW) / (target + ".json");
     std::ifstream in(fullPath, std::ios::binary);
@@ -172,11 +238,11 @@ bool Load(const std::string& name)
 
 bool CreateConfig(const std::string& name)
 {
-    if (name.empty()) return false;
-    std::string safe = name;
-    if (safe.size() >= 5 && safe.substr(safe.size() - 5) == ".json")
-        safe = safe.substr(0, safe.size() - 5);
-
+    const std::string safe = SanitizeName(name);
+    if (safe.empty()) {
+        LOG("[Config] rejected config name '%s'\n", name.c_str());
+        return false;
+    }
     return Save(safe);
 }
 
@@ -185,13 +251,12 @@ bool RenameConfig(const std::string& oldName, const std::string& newName)
     if (oldName.empty() || newName.empty() || oldName == newName) return false;
     EnsureDirectoryExists();
 
-    std::string safeOld = oldName;
-    if (safeOld.size() >= 5 && safeOld.substr(safeOld.size() - 5) == ".json")
-        safeOld = safeOld.substr(0, safeOld.size() - 5);
-
-    std::string safeNew = newName;
-    if (safeNew.size() >= 5 && safeNew.substr(safeNew.size() - 5) == ".json")
-        safeNew = safeNew.substr(0, safeNew.size() - 5);
+    const std::string safeOld = SanitizeName(oldName);
+    const std::string safeNew = SanitizeName(newName);
+    if (safeOld.empty() || safeNew.empty() || safeOld == safeNew) {
+        LOG("[Config] rejected rename '%s' -> '%s'\n", oldName.c_str(), newName.c_str());
+        return false;
+    }
 
     std::filesystem::path oldPath = std::filesystem::path(kConfigDirW) / (safeOld + ".json");
     std::filesystem::path newPath = std::filesystem::path(kConfigDirW) / (safeNew + ".json");
@@ -216,12 +281,12 @@ bool RenameConfig(const std::string& oldName, const std::string& newName)
 
 bool DeleteConfig(const std::string& name)
 {
-    if (name.empty()) return false;
+    const std::string safe = SanitizeName(name);
+    if (safe.empty()) {
+        LOG("[Config] rejected config name '%s'\n", name.c_str());
+        return false;
+    }
     EnsureDirectoryExists();
-
-    std::string safe = name;
-    if (safe.size() >= 5 && safe.substr(safe.size() - 5) == ".json")
-        safe = safe.substr(0, safe.size() - 5);
 
     std::filesystem::path path = std::filesystem::path(kConfigDirW) / (safe + ".json");
     std::error_code ec;

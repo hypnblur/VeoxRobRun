@@ -303,12 +303,17 @@ public:
 		VMMDLL_SCATTER_HANDLE handle = nullptr;
 		Memory* owner = nullptr;
 		ScopedScatter(Memory& mem) : owner(&mem) { handle = mem.CreateScatterHandle(); }
+		// Owning a handle is a unique responsibility: a copy would close it twice.
+		ScopedScatter(const ScopedScatter&) = delete;
+		ScopedScatter& operator=(const ScopedScatter&) = delete;
+		ScopedScatter(ScopedScatter&&) = delete;
+		ScopedScatter& operator=(ScopedScatter&&) = delete;
 		~ScopedScatter() { if (handle) owner->CloseScatterHandle(handle); }
 		operator VMMDLL_SCATTER_HANDLE() const { return handle; }
 	};
 
 	/*the FPGA handle*/
-	VMM_HANDLE vHandle;
+	VMM_HANDLE vHandle = nullptr;
 };
 
 inline Memory TargetProcess;

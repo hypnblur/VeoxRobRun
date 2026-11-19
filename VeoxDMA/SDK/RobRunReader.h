@@ -41,6 +41,11 @@ struct EntityData {
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
+    // UTF-8 copies for the ESP/radar, built once per reader pass. Converting
+    // per entity per rendered frame allocated several strings at 144 Hz.
+    std::string nicknameUtf8;
+    std::string clanTagUtf8;
+    std::string weaponNameUtf8;
     int weaponIndex = -1;
     bool isFiring = false;
     bool isReloading = false;
@@ -172,6 +177,12 @@ void SetReadCatalogEnabled(bool enabled);
 // render thread (e.g. the overlay tick callback) so camera projection stays
 // in sync with the game frame instead of trailing the worker by ~33 ms.
 void RefreshCamera();
+
+// Returns the camera written by the most recent RefreshCamera() call (or the
+// worker's copy when the render path has not run yet). Aim uses this instead of
+// snapshot->camera so its angles are solved from the same camera the on-screen
+// projection was built with; the worker snapshot trails by up to one cycle.
+bool GetFreshCamera(RobRunCamera::CameraState& out);
 
 // Builds the view-projection from the verified BattleCameraModel. Returns
 // false when the camera path is unavailable; callers can then use
