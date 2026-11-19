@@ -1962,7 +1962,7 @@ static void UpdateInternal()
              uiCount, (unsigned long long)cachedGame,
              (unsigned long long)cachedBattleModel,
              (unsigned long long)cachedBattleEntities,
-             entities.size(), (unsigned long long)sessionGeneration.load());
+             entities.size(), (unsigned long long)sessionGeneration);
 
     ++updateCounter;
     if ((updateCounter % 120) == 0)
