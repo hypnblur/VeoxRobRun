@@ -303,7 +303,8 @@ void AddDictionaryDescriptionScatter(std::uintptr_t world, std::uintptr_t dictio
             entity.id = item.id;
             entity.kind = kind;
             entity.position = item.position;
-            entity.label = KindName(kind);
+            std::string name = ReadIdentifiedId(item.desc);
+            entity.label = name.empty() ? KindName(kind) : std::move(name);
             out.entities.push_back(std::move(entity));
             ++kindCounter;
             if (out.entities.size() >= 4096) break;
@@ -682,13 +683,17 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                     hasCash = true;
                 }
 
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(
+                    model + rr::CashLootNodeModel::Description);
+                std::string name = ReadIdentifiedId(desc);
+
                 Entity entity{};
                 entity.id = entry.key;
                 entity.kind = Kind::CashLootNode;
                 entity.position = position;
                 entity.cashAmount = cashAmount;
                 entity.hasCashAmount = hasCash;
-                entity.label = "Cash Node";
+                entity.label = name.empty() ? "Cash Node" : std::move(name);
                 out.entities.push_back(std::move(entity));
                 ++out.valuables;
                 if (out.entities.size() >= 4096) break;
