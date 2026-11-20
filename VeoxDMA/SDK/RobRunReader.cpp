@@ -195,6 +195,13 @@ static int battleEntitiesRetryCountdown = 0;
 static Matrix4x4 fallbackViewProjection{};
 static bool fallbackViewProjectionValid = false;
 
+struct CrosshairState {
+    std::uintptr_t updater  = 0;
+    std::uintptr_t original = 0;
+    bool hidden              = false;
+};
+static CrosshairState g_crosshairState;
+
 // Slow-changing per-entity data (health, role, vehicle, identity). Reading the
 // primitive wrappers and strings costs far more than a position read, so it is
 // refreshed a few times per second and copied into every snapshot.
@@ -685,6 +692,7 @@ static void PublishSnapshot()
 
 void Shutdown()
 {
+    RestoreDefaultCrosshair();
     g_workerStop.store(true, std::memory_order_relaxed);
     g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
@@ -1940,6 +1948,49 @@ static void RevalidateSession()
     }
 }
 
+static bool HideDefaultCrosshair(std::uintptr_t game)
+{
+    if (g_crosshairState.hidden)
+        return true;
+    const std::uintptr_t updater = FindActiveUpdaterByName(game, "PlayerAimPointerUpdater");
+    if (!updater || !IsClass(updater, "PlayerAimPointerUpdater"))
+        return false;
+
+    const std::uintptr_t original = ReadPtr(updater + 0xD8);
+    const std::uintptr_t screenOpenChecker = ReadPtr(updater + 0xB8);
+    if (original <= 0x10000 || !IsClass(screenOpenChecker, "ScreenOpenChecker"))
+        return false;
+
+    const std::uint32_t redirectFlag = RobRunMemory::ReadUInt32(screenOpenChecker + 0x14);
+    if (redirectFlag == 0)
+        return false;
+
+    if (!TargetProcess.Write(updater + 0xD8, &screenOpenChecker, sizeof(screenOpenChecker)))
+        return false;
+
+    g_crosshairState.updater  = updater;
+    g_crosshairState.original = original;
+    g_crosshairState.hidden   = true;
+    return true;
+}
+
+static bool RestoreDefaultCrosshair()
+{
+    if (!g_crosshairState.hidden)
+        return true;
+    if (g_crosshairState.updater <= 0x10000)
+        return false;
+
+    const bool restored = TargetProcess.Write(
+        g_crosshairState.updater + 0xD8,
+        &g_crosshairState.original,
+        sizeof(g_crosshairState.original));
+
+    if (restored)
+        g_crosshairState = {};
+    return restored;
+}
+
 static void UpdateInternal()
 {
     static int uiCount = 0;
@@ -2969,6 +3020,13 @@ static void UpdateInternal()
                 det.isSurrendered = s.koSurrendered != 0;
                 det.isHandcuffed = s.koHandcuffed != 0;
 
+                if (det.isKnockedOut && s.entityId == localEntityId &&
+                    ConfigInstance.Aim.IgnoreKnock && s.knockout > 0x10000) {
+                    std::uintptr_t zero = 0;
+                    TargetProcess.Write(
+                        s.knockout + rr::KnockoutModel::Phase, &zero, sizeof(zero));
+                }
+
                 // Weapon (uses cache — only reads strings on miss)
                 if (s.weaponDesc > 0x10000) {
                     const auto wit = g_weaponDescCache.find(s.weaponDesc);
@@ -3087,26 +3145,34 @@ static void UpdateInternal()
             try {
             if (w.needsPose) {
                 static bool loggedPose = false;
-                rig.curLocal.resize(static_cast<std::size_t>(rig.layout.count));
-                rig.worldMatrices.resize(static_cast<std::size_t>(rig.layout.count));
                 if (!loggedPose) {
                     DLOG("RobRunReader: needsPose, layout.count=%d, poseOffset=%zu, poseSize=%zu",
                         rig.layout.count, (size_t)w.poseOffset, (size_t)w.poseSize);
                 }
+
+                // Sample into temporaries so a failed read never
+                // overwrites the last good frame (async DMA flicker fix).
+                std::vector<Skeleton::BoneSegment> tmpBones;
+                Skeleton::BonePoints tmpPoints{};
+                std::vector<Skeleton::BoneLocal> tmpLocal(static_cast<std::size_t>(rig.layout.count));
+                std::vector<Matrix4x4> tmpWorld(static_cast<std::size_t>(rig.layout.count));
+
                 Skeleton::PoseStats pst{};
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
-                    rig.bones, &rig.points, rig.curLocal.data(),
-                    rig.worldMatrices.data(), &pst);
+                    tmpBones, &tmpPoints, tmpLocal.data(),
+                    tmpWorld.data(), &pst);
 
                 if (sampled) {
                     ++poseScatterOkAcc;
                 } else {
                     ++poseScatterFailAcc;
                     pst = {};
+                    tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
+                    tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                        rig.bones, &rig.points, rig.curLocal.data(),
-                        rig.worldMatrices.data(), &pst);
+                        tmpBones, &tmpPoints, tmpLocal.data(),
+                        tmpWorld.data(), &pst);
                     if (sampled) ++poseFreshOkAcc;
                 }
                 boneTotalAcc += pst.total;
@@ -3126,11 +3192,8 @@ static void UpdateInternal()
                         rig.poseFailureSince = now;
                     ++rig.poseFailures;
                     ++poseFailureCount;
-                    // A pose that cannot be read means the matrix array moved
-                    // (or the character was pooled). Drop the layout so the
-                    // next pass rebuilds; keep the last bones until the
-                    // hierarchy has been unreadable for a while, so a single
-                    // bad read never blanks the skeleton.
+                    // Failed read: keep drawing from cached bones.
+                    // Only drop layout after sustained failure.
                     if (!Skeleton::ValidateHierarchy(rig.layout, DmaReadFresh) ||
                         now - rig.poseFailureSince >= 350) {
                         rig.layoutValid = false;
@@ -3144,6 +3207,11 @@ static void UpdateInternal()
                         rig.smoothedWorldMatrices.clear();
                     }
                 } else {
+                    // Commit the good frame.
+                    rig.bones = std::move(tmpBones);
+                    rig.points = tmpPoints;
+                    rig.curLocal = std::move(tmpLocal);
+                    rig.worldMatrices = std::move(tmpWorld);
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     constexpr float kPosEpsSq  = 1.0e-6f;
@@ -3464,6 +3532,13 @@ static void UpdateInternal()
 
     // World and inventory reading runs on dedicated g_worldWorkerThread
     // so this player pose pass runs at full speed without latency spikes.
+
+    if (cachedGame > 0x10000) {
+        if (ConfigInstance.Aim.HideCrosshair)
+            HideDefaultCrosshair(cachedGame);
+        else
+            RestoreDefaultCrosshair();
+    }
 
     // A root change here means this pass rebuilt the scene identity. Bump the
     // generation so memory aim blocks writes while the new objects settle.

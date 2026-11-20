@@ -1564,6 +1564,8 @@ void DrawAim()
 		ToggleRow("Skip Criminal targets", &ConfigInstance.Aim.ExpIgnoreCriminal);
 		ToggleRow("Skip Civilian targets", &ConfigInstance.Aim.ExpIgnoreCivilian);
 		ToggleRow("Skip Knocked Players", &ConfigInstance.Aim.SkipKnocked);
+		ToggleRow("Ignore Knock (Local)", &ConfigInstance.Aim.IgnoreKnock);
+		ToggleRow("Hide Default Crosshair", &ConfigInstance.Aim.HideCrosshair);
 		ToggleRow("Ignore Teammates", &ConfigInstance.Aim.ExpIgnoreTeammates);
 		if (ConfigInstance.Aim.ExpIgnoreTeammates)
 			Note("Uses party membership, not role: same-role players outside your party stay targetable.");

@@ -75,6 +75,8 @@ public:
 	bool ExpIgnoreCivilian = false;
 	bool ExpIgnoreTeammates = true;
 	bool SkipKnocked = true;
+	bool IgnoreKnock = false;
+	bool HideCrosshair = false;
 
 	// Manually trusted players (by publicId / account id). Aimbot skips these
 	// the same way it skips party members when ExpIgnoreTeammates is on.
@@ -123,6 +125,8 @@ public:
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
 		j[ConfigName][LIT("SkipKnocked")] = SkipKnocked;
+		j[ConfigName][LIT("IgnoreKnock")] = IgnoreKnock;
+		j[ConfigName][LIT("HideCrosshair")] = HideCrosshair;
 		{
 			json arr = json::array();
 			for (auto id : TrustedPlayers) arr.push_back(std::to_string(id));
@@ -173,6 +177,8 @@ public:
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
 		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
 		SkipKnocked = j[ConfigName].value(LIT("SkipKnocked"), SkipKnocked);
+		IgnoreKnock = j[ConfigName].value(LIT("IgnoreKnock"), IgnoreKnock);
+		HideCrosshair = j[ConfigName].value(LIT("HideCrosshair"), HideCrosshair);
 		if (j[ConfigName].contains(LIT("TrustedPlayers"))) {
 			TrustedPlayers.clear();
 			for (const auto& v : j[ConfigName][LIT("TrustedPlayers")])
