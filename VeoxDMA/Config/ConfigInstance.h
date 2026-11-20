@@ -6,7 +6,6 @@
 #include "AimConfig.h"
 #include "RadarConfig.h"
 #include "LootFilterConfig.h"
-#include "SkinConfig.h"
 #include <cassert>
 
 class ConfigInstances
@@ -18,7 +17,6 @@ public:
 	AimConfig Aim = AimConfig(LIT("Aim"));
 	RadarConfig Radar = RadarConfig(LIT("Radar"));
 	LootFilterConfig LootFilter = LootFilterConfig(LIT("LootFilter"));
-	SkinConfig Skin = SkinConfig(LIT("Skin"));
 
 	static_assert(
 		std::string_view("Player") != std::string_view("Overlay") &&
@@ -26,22 +24,16 @@ public:
 		std::string_view("Player") != std::string_view("Aim") &&
 		std::string_view("Player") != std::string_view("Radar") &&
 		std::string_view("Player") != std::string_view("LootFilter") &&
-		std::string_view("Player") != std::string_view("Skin") &&
 		std::string_view("Overlay") != std::string_view("World") &&
 		std::string_view("Overlay") != std::string_view("Aim") &&
 		std::string_view("Overlay") != std::string_view("Radar") &&
 		std::string_view("Overlay") != std::string_view("LootFilter") &&
-		std::string_view("Overlay") != std::string_view("Skin") &&
 		std::string_view("World") != std::string_view("Aim") &&
 		std::string_view("World") != std::string_view("Radar") &&
 		std::string_view("World") != std::string_view("LootFilter") &&
-		std::string_view("World") != std::string_view("Skin") &&
 		std::string_view("Aim") != std::string_view("Radar") &&
 		std::string_view("Aim") != std::string_view("LootFilter") &&
-		std::string_view("Aim") != std::string_view("Skin") &&
-		std::string_view("Radar") != std::string_view("LootFilter") &&
-		std::string_view("Radar") != std::string_view("Skin") &&
-		std::string_view("LootFilter") != std::string_view("Skin"),
+		std::string_view("Radar") != std::string_view("LootFilter"),
 		"Config section names must be unique — merge_patch silently overwrites on collision");
 
 	json ToJson()
@@ -53,7 +45,6 @@ public:
 		jsoned.merge_patch(Aim.ToJson());
 		jsoned.merge_patch(Radar.ToJson());
 		jsoned.merge_patch(LootFilter.ToJson());
-		jsoned.merge_patch(Skin.ToJson());
 		return jsoned;
 	}
 
@@ -65,7 +56,6 @@ public:
 		Aim.FromJson(jsoned);
 		Radar.FromJson(jsoned);
 		LootFilter.FromJson(jsoned);
-		Skin.FromJson(jsoned);
 	}
 };
 inline ConfigInstances ConfigInstance;
