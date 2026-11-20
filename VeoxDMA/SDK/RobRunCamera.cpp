@@ -1,0 +1,307 @@
+#include "pch.h"
+#include "RobRunCamera.h"
+#include "RobRunSDK.h"
+#include "Il2Cpp.h"
+#include "Memory.h"
+#include <cmath>
+#include <cstddef>
+#include <cstring>
+
+namespace RobRunCamera {
+
+static std::uintptr_t gaBase = 0;
+static std::uintptr_t g_cachedBrain = 0;
+
+static bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
+{
+    if (!address || !buffer || !size) return false;
+    return TargetProcess.Read(address, buffer, size);
+}
+
+static bool ReadBytesFresh(std::uintptr_t address, void* buffer, std::size_t size)
+{
+    if (!address || !buffer || !size) return false;
+    return TargetProcess.ReadFresh(address, buffer, size);
+}
+
+static std::uintptr_t ReadPtr(std::uintptr_t address)
+{
+    std::uintptr_t value = 0;
+    return ReadBytes(address, &value, sizeof(value)) ? value : 0;
+}
+
+static bool Finite(const Vector3& v)
+{
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+static bool Normalize(Vector3& v)
+{
+    const float lengthSq = v.x * v.x + v.y * v.y + v.z * v.z;
+    if (!std::isfinite(lengthSq) || lengthSq < 1e-8f) return false;
+    const float inv = 1.f / std::sqrt(lengthSq);
+    v.x *= inv; v.y *= inv; v.z *= inv;
+    return Finite(v);
+}
+
+static Vector3 Cross(const Vector3& a, const Vector3& b)
+{
+    return Vector3(
+        a.y * b.z - a.z * b.y,
+        a.z * b.x - a.x * b.z,
+        a.x * b.y - a.y * b.x);
+}
+
+static Vector3 Rotate(const float q[4], const Vector3& v)
+{
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const Vector3 t{
+        y * v.z - z * v.y,
+        z * v.x - x * v.z,
+        x * v.y - y * v.x
+    };
+    const Vector3 t2{ t.x * 2.f, t.y * 2.f, t.z * 2.f };
+    const Vector3 cross{
+        y * t2.z - z * t2.y,
+        z * t2.x - x * t2.z,
+        x * t2.y - y * t2.x
+    };
+    return Vector3(
+        v.x + w * t2.x + cross.x,
+        v.y + w * t2.y + cross.y,
+        v.z + w * t2.z + cross.z);
+}
+
+void Init(std::uintptr_t gameAssemblyBase)
+{
+    gaBase = gameAssemblyBase;
+    g_cachedBrain = 0;
+    Il2Cpp::Init(gameAssemblyBase);
+}
+
+float ReadCinemachineFov()
+{
+    if (!gaBase) return 0.f;
+
+    // The brain instance is stable for a scene, so it is resolved once and
+    // then only the FOV value is re-read (uncached) each pass.
+    if (g_cachedBrain > 0x10000) {
+        float fov = 0.f;
+        if (ReadBytesFresh(g_cachedBrain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
+            std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
+            return fov;
+        }
+        g_cachedBrain = 0;
+    }
+
+    const std::uintptr_t klass = Il2Cpp::GetClassByIndex(rr::ClassIndex::CinemachineCore);
+    if (!klass) return 0.f;
+
+    const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
+    if (!statics) return 0.f;
+
+    const std::uintptr_t core = ReadPtr(statics + rr::Cinemachine::CoreInstance);
+    if (!core) return 0.f;
+
+    const std::uintptr_t brainList = ReadPtr(core + rr::Cinemachine::BrainList);
+    if (!brainList) return 0.f;
+
+    const std::uintptr_t items = ReadPtr(brainList + rr::List::items);
+    std::int32_t count = 0;
+    if (!items || !ReadBytes(brainList + rr::List::count, &count, sizeof(count)))
+        return 0.f;
+    if (count < 1 || count > 32) return 0.f;
+
+    for (int i = 0; i < count; ++i) {
+        const std::uintptr_t brain = ReadPtr(items + rr::Array::vector +
+            static_cast<std::uintptr_t>(i) * rr::Array::stride);
+        if (!brain || !Il2Cpp::IsClass(brain, "CinemachineBrain")) continue;
+        float fov = 0.f;
+        if (ReadBytesFresh(brain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
+            std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
+            g_cachedBrain = brain;
+            return fov;
+        }
+    }
+    return 0.f;
+}
+
+CameraState Read(std::uintptr_t battleCameraModel)
+{
+    CameraState camera{};
+    if (battleCameraModel <= 0x10000) return camera;
+
+    // The whole camera block (position, both quaternions, basis vectors and
+    // distance) is contiguous. One uncached read keeps the projection aligned
+    // with the frame the game is rendering, instead of a cached sample that
+    // can trail by hundreds of milliseconds.
+    struct CameraBlock {
+        float position[3];    // +0x10
+        float orientation[4]; // +0x1C
+        float look[4];        // +0x2C
+        float forward[3];     // +0x3C
+        float right[3];       // +0x48
+        float up[3];          // +0x54
+        float distance;       // +0x60
+    };
+    static_assert(sizeof(CameraBlock) == 0x54, "camera block layout");
+    static_assert(offsetof(CameraBlock, orientation) == 0x0C, "orientation offset");
+    static_assert(offsetof(CameraBlock, look) == 0x1C, "look offset");
+    static_assert(offsetof(CameraBlock, forward) == 0x2C, "forward offset");
+    static_assert(offsetof(CameraBlock, right) == 0x38, "right offset");
+    static_assert(offsetof(CameraBlock, up) == 0x44, "up offset");
+    static_assert(offsetof(CameraBlock, distance) == 0x50, "distance offset");
+
+    CameraBlock block{};
+    if (!ReadBytesFresh(battleCameraModel + rr::BattleCameraModelOffsets::Position,
+            &block, sizeof(block)) &&
+        !ReadBytes(battleCameraModel + rr::BattleCameraModelOffsets::Position,
+            &block, sizeof(block))) {
+        return camera;
+    }
+
+    camera.position = Vector3(block.position[0], block.position[1], block.position[2]);
+    if (!Finite(camera.position)) return camera;
+    std::memcpy(camera.orientation, block.orientation, sizeof(camera.orientation));
+    std::memcpy(camera.look, block.look, sizeof(camera.look));
+    camera.forward = Vector3(block.forward[0], block.forward[1], block.forward[2]);
+    camera.right = Vector3(block.right[0], block.right[1], block.right[2]);
+    camera.up = Vector3(block.up[0], block.up[1], block.up[2]);
+    if (std::isfinite(block.distance)) camera.distance = block.distance;
+
+    const bool hasForward = Finite(camera.forward);
+    const bool hasRight = Finite(camera.right);
+    const bool hasUp = Finite(camera.up);
+
+    if (!hasForward || !Normalize(camera.forward))
+        camera.forward = Rotate(camera.look, Vector3(0.f, 0.f, 1.f));
+    if (!Normalize(camera.forward)) return camera;
+
+    const bool rightOk = hasRight && Normalize(camera.right);
+    const bool upOk = hasUp && Normalize(camera.up);
+    if (!rightOk || !upOk) {
+        // Rebuild an orthonormal basis around forward. Unity is left-handed
+        // with +Y up, so right = up x forward and up = forward x right.
+        const Vector3 upHint = upOk ? camera.up : Vector3(0.f, 1.f, 0.f);
+        Vector3 right = Cross(upHint, camera.forward);
+        if (!Normalize(right)) return camera;
+        Vector3 up = Cross(camera.forward, right);
+        if (!Normalize(up)) return camera;
+        camera.right = right;
+        camera.up = up;
+    }
+
+    const float fov = ReadCinemachineFov();
+    if (fov > 0.f) {
+        camera.verticalFov = fov;
+        camera.fovFromCinemachine = true;
+    }
+
+    camera.valid = true;
+    return camera;
+}
+
+bool BuildViewProjection(const CameraState& camera, float aspect,
+    Matrix4x4& out, float nearPlane, float farPlane)
+{
+    if (!camera.valid || !std::isfinite(aspect) || aspect <= 0.01f || aspect > 100.f) return false;
+    if (!std::isfinite(nearPlane) || !std::isfinite(farPlane) || !(nearPlane > 0.001f) || !(farPlane > nearPlane)) return false;
+    if (!Finite(camera.position) || !Finite(camera.forward) || !Finite(camera.right) || !Finite(camera.up)) return false;
+    if (!std::isfinite(camera.verticalFov) || camera.verticalFov < 1.0f || camera.verticalFov > 179.0f) return false;
+
+    const Vector3& p = camera.position;
+    const Vector3& r = camera.right;
+    const Vector3& u = camera.up;
+    const Vector3& f = camera.forward;
+
+    // Row-vector convention: clip = [x y z 1] * view * projection, matching
+    // WorldToScreen's column reads and CameraFinder's native-matrix fallback.
+    // Unity stores matrices column-major, so this is the transposed view and
+    // projection in memory order.
+    const float dotRP = r.x * p.x + r.y * p.y + r.z * p.z;
+    const float dotUP = u.x * p.x + u.y * p.y + u.z * p.z;
+    const float dotFP = f.x * p.x + f.y * p.y + f.z * p.z;
+
+    Matrix4x4 view{};
+    view.matrix[0][0] = r.x;    view.matrix[0][1] = u.x;    view.matrix[0][2] = -f.x; view.matrix[0][3] = 0.f;
+    view.matrix[1][0] = r.y;    view.matrix[1][1] = u.y;    view.matrix[1][2] = -f.y; view.matrix[1][3] = 0.f;
+    view.matrix[2][0] = r.z;    view.matrix[2][1] = u.z;    view.matrix[2][2] = -f.z; view.matrix[2][3] = 0.f;
+    view.matrix[3][0] = -dotRP; view.matrix[3][1] = -dotUP; view.matrix[3][2] = dotFP; view.matrix[3][3] = 1.f;
+
+    const float fovRadians = camera.verticalFov * 3.14159265358979323846f / 180.f;
+    const float halfTan = std::tan(fovRadians * 0.5f);
+    if (!std::isfinite(halfTan) || halfTan <= 0.0001f) return false;
+
+    const float yScale = 1.f / halfTan;
+    const float xScale = yScale / aspect;
+    const float a = (farPlane + nearPlane) / (nearPlane - farPlane);
+    const float b = (2.f * farPlane * nearPlane) / (nearPlane - farPlane);
+
+    Matrix4x4 projection{};
+    projection.matrix[0][0] = xScale;
+    projection.matrix[1][1] = yScale;
+    projection.matrix[2][2] = a;
+    projection.matrix[2][3] = -1.f;
+    projection.matrix[3][2] = b;
+
+    Matrix4x4 result = view * projection;
+    for (int row = 0; row < 4; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            if (!std::isfinite(result.matrix[row][col])) return false;
+        }
+    }
+
+    out = result;
+    return true;
+}
+
+bool WorldToScreen(const Matrix4x4& viewProjection, const Vector3& world,
+    int screenWidth, int screenHeight, Vector2& out)
+{
+    if (screenWidth <= 0 || screenHeight <= 0) return false;
+    if (!Finite(world)) return false;
+
+    const float clipX = viewProjection.matrix[0][0] * world.x +
+        viewProjection.matrix[1][0] * world.y +
+        viewProjection.matrix[2][0] * world.z +
+        viewProjection.matrix[3][0];
+    const float clipY = viewProjection.matrix[0][1] * world.x +
+        viewProjection.matrix[1][1] * world.y +
+        viewProjection.matrix[2][1] * world.z +
+        viewProjection.matrix[3][1];
+    const float clipW = viewProjection.matrix[0][3] * world.x +
+        viewProjection.matrix[1][3] * world.y +
+        viewProjection.matrix[2][3] * world.z +
+        viewProjection.matrix[3][3];
+
+    // Gate: reject non-finite and points behind/at the near-clipping plane (< 0.05m)
+    // where perspective divide creates massive coordinate explosions.
+    if (!std::isfinite(clipX) || !std::isfinite(clipY) ||
+        !std::isfinite(clipW) || clipW <= 0.05f) {
+        return false;
+    }
+
+    const float ndcX = clipX / clipW;
+    const float ndcY = clipY / clipW;
+    if (!std::isfinite(ndcX) || !std::isfinite(ndcY)) return false;
+
+    // Reject extreme NDC coordinates far outside the frustum to avoid numerical instability
+    if (std::abs(ndcX) > 35.0f || std::abs(ndcY) > 35.0f) return false;
+
+    const float sx = (screenWidth * 0.5f) * (1.f + ndcX);
+    const float sy = (screenHeight * 0.5f) * (1.f - ndcY);
+    if (!std::isfinite(sx) || !std::isfinite(sy)) return false;
+
+    // Sanity boundary check: protect ImGui / DirectX from overflow
+    constexpr float kMaxCoord = 50000.0f;
+    if (sx < -kMaxCoord || sx > static_cast<float>(screenWidth) + kMaxCoord ||
+        sy < -kMaxCoord || sy > static_cast<float>(screenHeight) + kMaxCoord) {
+        return false;
+    }
+
+    out.x = sx;
+    out.y = sy;
+    return true;
+}
+
+} // namespace RobRunCamera
