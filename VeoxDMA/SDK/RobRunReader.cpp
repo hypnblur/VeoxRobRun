@@ -7,6 +7,7 @@
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include "DebugLog.h"
+#include "SkinChanger.h"
 #include <atomic>
 #include <algorithm>
 #include <cctype>
@@ -696,6 +697,7 @@ static void PublishSnapshot()
 void Shutdown()
 {
     RestoreDefaultCrosshair();
+    SkinChanger::Shutdown();
     g_workerStop.store(true, std::memory_order_relaxed);
     g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
@@ -741,6 +743,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     RobRunCamera::Init(gameAssemblyBase);
     RobRunInventory::Init(gameAssemblyBase);
     RobRunWorld::Init(gameAssemblyBase);
+    SkinChanger::Init(gameAssemblyBase);
     DLOG("RobRunReader::Init: sub-inits done");
     cachedGame = 0;
     cachedBattleModel = 0;
@@ -3540,6 +3543,8 @@ static void UpdateInternal()
             HideDefaultCrosshair(cachedGame);
         else
             RestoreDefaultCrosshair();
+
+        SkinChanger::ApplySelectedSkins();
     }
 
     // A root change here means this pass rebuilt the scene identity. Bump the
