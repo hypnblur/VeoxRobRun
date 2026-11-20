@@ -202,6 +202,9 @@ struct CrosshairState {
 };
 static CrosshairState g_crosshairState;
 
+static bool HideDefaultCrosshair(std::uintptr_t game);
+static bool RestoreDefaultCrosshair();
+
 // Slow-changing per-entity data (health, role, vehicle, identity). Reading the
 // primitive wrappers and strings costs far more than a position read, so it is
 // refreshed a few times per second and copied into every snapshot.
@@ -1965,7 +1968,7 @@ static bool HideDefaultCrosshair(std::uintptr_t game)
     if (redirectFlag == 0)
         return false;
 
-    if (!TargetProcess.Write(updater + 0xD8, &screenOpenChecker, sizeof(screenOpenChecker)))
+    if (!TargetProcess.Write(updater + 0xD8, screenOpenChecker))
         return false;
 
     g_crosshairState.updater  = updater;
@@ -1983,8 +1986,7 @@ static bool RestoreDefaultCrosshair()
 
     const bool restored = TargetProcess.Write(
         g_crosshairState.updater + 0xD8,
-        &g_crosshairState.original,
-        sizeof(g_crosshairState.original));
+        g_crosshairState.original);
 
     if (restored)
         g_crosshairState = {};
@@ -3024,7 +3026,7 @@ static void UpdateInternal()
                     ConfigInstance.Aim.IgnoreKnock && s.knockout > 0x10000) {
                     std::uintptr_t zero = 0;
                     TargetProcess.Write(
-                        s.knockout + rr::KnockoutModel::Phase, &zero, sizeof(zero));
+                        s.knockout + rr::KnockoutModel::Phase, zero);
                 }
 
                 // Weapon (uses cache — only reads strings on miss)
