@@ -176,6 +176,7 @@
     <ClCompile Include="SDK\RobRunCamera.cpp" />
     <ClCompile Include="SDK\Inventory.cpp" />
     <ClCompile Include="SDK\WorldEntities.cpp" />
+    <ClCompile Include="SDK\SkinChanger.cpp" />
     <ClCompile Include="Esp\Radar.cpp" />
     <ClCompile Include="Esp\WeaponSprites.cpp" />
     <ClCompile Include="Esp\WorldEsp.cpp" />
@@ -221,6 +222,7 @@
     <ClInclude Include="Config\AimConfig.h" />
     <ClInclude Include="Config\RadarConfig.h" />
     <ClInclude Include="Config\LootFilterConfig.h" />
+    <ClInclude Include="Config\SkinConfig.h" />
     <ClInclude Include="Esp\PlayerEsp.h" />
     <ClInclude Include="Esp\Radar.h" />
     <ClInclude Include="Esp\WeaponSprites.h" />
@@ -245,6 +247,7 @@
     <ClInclude Include="SDK\RobRunCamera.h" />
     <ClInclude Include="SDK\Inventory.h" />
     <ClInclude Include="SDK\WorldEntities.h" />
+    <ClInclude Include="SDK\SkinChanger.h" />
     <ClInclude Include="Security\XorStr.h" />
     <ClInclude Include="UI\VeoxMenu.h" />
     <ClInclude Include="UI\imgui_edited.hpp" />
