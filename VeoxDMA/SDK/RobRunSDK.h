@@ -16,8 +16,8 @@
 namespace rr {
 
 inline constexpr const char* kBuild = "26549963";
-inline constexpr std::uint32_t kPeTimestamp = 0x6AF2C76Fu;
-inline constexpr std::uint32_t kPeSizeOfImage = 0x08FF3000u;
+inline constexpr std::uint32_t kPeTimestamp = 0x6B00114Du;
+inline constexpr std::uint32_t kPeSizeOfImage = 0x0904F000u;
 inline constexpr const char* kGameAssemblySha256 =
     "ecd0a4275325fce38c9794576c541891cb8dfaa0b0ac3a38fdd2dc9711ecb81e";
 inline constexpr std::uint32_t kUnityPlayerPeTimestamp = 0x6A28669Fu;
@@ -133,7 +133,7 @@ inline constexpr std::int32_t entry_allocated_min = -1;
 // ------------------------------------------------------------------
 namespace Game {
 inline constexpr std::uintptr_t ActiveUpdaters = 0x20; // List<reference>
-inline constexpr std::uintptr_t GameModel      = 0xD0;
+inline constexpr std::uintptr_t GameModel      = 0xD8;
 }
 
 namespace GameModel {
@@ -1247,9 +1247,12 @@ inline constexpr std::uintptr_t BattleEntitiesModel        = 0x81C2048;
 inline constexpr std::uintptr_t BattleEntitiesUpdater      = 0x81C2510;
 inline constexpr std::uintptr_t BattleCharacterEntityModel = 0x81BB720;
 inline constexpr std::uintptr_t PlayerEntityModel          = 0x81F8398;
-inline constexpr std::uintptr_t BattleCameraModel          = 0x81B8DB8;
+inline constexpr std::uintptr_t BattleCameraModel          = 0x823C210;
 inline constexpr std::uintptr_t ClientCharacterSlotsModel  = 0x816E270;
 inline constexpr std::uintptr_t GlobalModel                = 0x813B310;
+inline constexpr std::uintptr_t WorldEntitiesModel         = 0x82295C8;
+inline constexpr std::uintptr_t BattleCharacterModel       = 0x823FFD0;
+inline constexpr std::uintptr_t GameModels                 = 0x81B8870;
 inline constexpr std::uintptr_t BlindedEffect              = 0x81DC358; // new offset set
 }
 
