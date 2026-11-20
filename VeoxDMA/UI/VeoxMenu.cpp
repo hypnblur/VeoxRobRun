@@ -9,7 +9,6 @@
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../Esp/Radar.h"
-#include "SkinChanger.h"
 #include "../Overlay/Backdrop.h"
 #include "imgui_internal.h"
 #include "imgui_settings.h"
@@ -2265,55 +2264,6 @@ void DrawMisc()
 			Note("No money model entries found in the current scene.");
 		}
 
-		EndCard();
-	}
-
-	// --- Skin changer card (full width) ---
-	{
-		BeginCard("SKIN CHANGER", kCardW * 2.f + kGap);
-		ToggleRow("Enable Skin Changer", &ConfigInstance.Skin.Enabled, true);
-		Note("Local preview only. Writes to CustomizationLoader over DMA.");
-
-		if (ConfigInstance.Skin.Enabled)
-		{
-			SectionLabel("WEAPON SKINS");
-			for (int w = 0; w < SkinChanger::kWeaponCount; ++w) {
-				const auto& cat = SkinChanger::kWeaponCatalogs[w];
-				if (cat.count <= 1) continue; // skip single-skin weapons
-
-				// Build name list: "Off" + each skin name.
-				static thread_local std::vector<const char*> names;
-				names.clear();
-				names.push_back("Off");
-				for (int s = 0; s < cat.count; ++s)
-					names.push_back(cat.skins[s].name);
-
-				ComboRow(SkinChanger::WeaponNames[w],
-					&ConfigInstance.Skin.WeaponSkin[w],
-					names.data(), (int)names.size());
-			}
-
-			SectionLabel("COSMETICS");
-			auto cosmeticCombo = [](const char* label, int* sel,
-				SkinChanger::Cosmetic cat)
-			{
-				const auto& c = SkinChanger::kCosmeticCatalogs[cat];
-				static thread_local std::vector<const char*> names;
-				names.clear();
-				names.push_back("Off");
-				for (int s = 0; s < c.count; ++s)
-					names.push_back(c.skins[s].name);
-				ComboRow(label, sel, names.data(), (int)names.size());
-			};
-
-			cosmeticCombo("Outfit (Male)",   &ConfigInstance.Skin.OutfitMale,   SkinChanger::OutfitMale);
-			cosmeticCombo("Outfit (Female)", &ConfigInstance.Skin.OutfitFemale, SkinChanger::OutfitFemale);
-			cosmeticCombo("Mask",            &ConfigInstance.Skin.MaskSkin,     SkinChanger::Mask);
-			cosmeticCombo("Bag",             &ConfigInstance.Skin.BagSkin,      SkinChanger::Bag);
-			cosmeticCombo("Keychain",        &ConfigInstance.Skin.KeychainSkin, SkinChanger::Keychain);
-
-			Note("TODO: Fill TypeInfo RVAs and CustomizationLoader path from game dump.");
-		}
 		EndCard();
 	}
 }
