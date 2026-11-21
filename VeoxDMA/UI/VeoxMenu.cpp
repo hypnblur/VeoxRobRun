@@ -1223,10 +1223,9 @@ void DrawRadar()
 		ToggleRow("Fullscreen Map (M)", &ConfigInstance.Radar.InGameFullMap);
 		ToggleRow("Hide 3D ESP on Full Map", &ConfigInstance.Radar.Hide3DEspOnFullMap);
 		SectionLabel("MARKERS");
-		ToggleRow("Player Dots", &ConfigInstance.Radar.InGameMapPlayers);
+		ToggleRow("Player Arrows", &ConfigInstance.Radar.InGameMapPlayers);
 		ToggleRow("Vehicle Icons", &ConfigInstance.Radar.InGameMapVehicles);
-		ToggleRow("Player Heading", &ConfigInstance.Radar.InGameMapPlayerHeading);
-		ToggleRow("Player Names", &ConfigInstance.Radar.InGameMapPlayerNames);
+		ToggleRow("Player Names (Full Map)", &ConfigInstance.Radar.InGameMapPlayerNames);
 		ToggleRow("Dropped Bags", &ConfigInstance.Radar.InGameMapDroppedBags);
 		ToggleRow("Valuables & Cargo", &ConfigInstance.Radar.InGameMapValuables);
 		SliderFloatRow("Icon Scale", &ConfigInstance.Radar.InGameMapScale, 0.5f, 2.0f, "x");

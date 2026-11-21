@@ -170,6 +170,26 @@ static void TickOverlay()
 	wasMenuOpen = menuOpen;
 }
 
+static std::atomic<bool> g_shutdownComplete{ false };
+
+static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
+{
+	switch (ctrlType) {
+	case CTRL_C_EVENT:
+	case CTRL_BREAK_EVENT:
+	case CTRL_CLOSE_EVENT:
+	case CTRL_SHUTDOWN_EVENT:
+		// Signal the overlay loop to exit cleanly so worker threads stop and
+		// VMMDLL_Close() runs instead of abandoning an in-flight FPGA read.
+		Overlay::RequestExit();
+		for (int i = 0; i < 40 && !g_shutdownComplete.load(std::memory_order_acquire); ++i)
+			Sleep(50);
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
 	g_hInstance = hInstance;
@@ -178,15 +198,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	freopen_s(&fDummy, "CONIN$", "r", stdin);
 	freopen_s(&fDummy, "CONOUT$", "w", stderr);
 	freopen_s(&fDummy, "CONOUT$", "w", stdout);
+	SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 	printf("VeoxDMA - Starting...\n");
 	DLOG("=== WinMain entry ===");
 
-	StartAttachLoop();
-	DLOG("AttachLoop started");
-
-	// Apply saved settings before the menu is first drawn.
+	// Apply saved settings before starting background threads or drawing the menu.
 	ConfigFile::Load();
 	DLOG("Config loaded");
+
+	StartAttachLoop();
+	DLOG("AttachLoop started");
 
 	// Auto-connect saved aim device so it's ready before the first frame.
 	{
@@ -297,5 +318,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	StopAttachLoop();
 	SkinChanger::Stop();
 	RobRunReader::Shutdown();
+	g_shutdownComplete.store(true, std::memory_order_release);
 	return result;
 }
