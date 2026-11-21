@@ -443,7 +443,14 @@ namespace
 	std::mutex g_keyMutex;      // held for the DMA read
 	std::mutex g_keySnapMutex;  // held only to copy the snapshot
 	std::atomic<int64_t> g_keyLastUpdateUs{ 0 };
+	std::atomic<bool> g_asyncKeyPolling{ false };
 	uint8_t g_keySnapshot[64]{};
+
+	constexpr DWORD kKeyReadFlags =
+		VMMDLL_FLAG_NOCACHE |
+		VMMDLL_FLAG_NOCACHEPUT |
+		VMMDLL_FLAG_NOPAGING_IO |
+		VMMDLL_FLAG_NO_PREDICTIVE_READ;
 
 	int64_t KeyNowUs()
 	{
@@ -456,12 +463,12 @@ void Keyboard::UpdateKeys()
 {
 	uint8_t fresh[64] = {};
 	DWORD read = 0;
-	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, VMMDLL_FLAG_NOCACHE) || read != 64)
+	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, kKeyReadFlags) || read != 64)
 	{
 		const int altPid = TargetProcess.GetPID();
 		if (altPid && altPid != win_logon_pid)
 		{
-			if (!VMMDLL_MemReadEx(TargetProcess.vHandle, altPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, VMMDLL_FLAG_NOCACHE) || read != 64)
+			if (!VMMDLL_MemReadEx(TargetProcess.vHandle, altPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, kKeyReadFlags) || read != 64)
 				return;
 		}
 		else
@@ -472,20 +479,44 @@ void Keyboard::UpdateKeys()
 	memcpy(state_bitmap, fresh, 64);
 }
 
+void Keyboard::SetAsyncKeyPolling(bool active)
+{
+	g_asyncKeyPolling.store(active, std::memory_order_release);
+}
+
+void Keyboard::PollKeysAsync()
+{
+	if (gafAsyncKeyStateExport < 0x7FFFFFFFFFFF)
+		return;
+	const int64_t now = KeyNowUs();
+	if (now - g_keyLastUpdateUs.load(std::memory_order_relaxed) < 4000)
+		return;
+	std::unique_lock<std::mutex> lock(g_keyMutex, std::try_to_lock);
+	if (!lock.owns_lock())
+		return;
+	UpdateKeys();
+	std::lock_guard<std::mutex> snap(g_keySnapMutex);
+	memcpy(g_keySnapshot, state_bitmap, sizeof(g_keySnapshot));
+	g_keyLastUpdateUs.store(KeyNowUs(), std::memory_order_relaxed);
+}
+
 bool Keyboard::IsKeyDown(uint32_t virtual_key_code)
 {
 	if (gafAsyncKeyStateExport < 0x7FFFFFFFFFFF || virtual_key_code >= 256)
 		return false;
-	const int64_t now = KeyNowUs();
-	if (now - g_keyLastUpdateUs.load(std::memory_order_relaxed) > 2000)
+	if (!g_asyncKeyPolling.load(std::memory_order_acquire))
 	{
-		std::unique_lock<std::mutex> lock(g_keyMutex, std::try_to_lock);
-		if (lock.owns_lock())
+		const int64_t now = KeyNowUs();
+		if (now - g_keyLastUpdateUs.load(std::memory_order_relaxed) > 2000)
 		{
-			UpdateKeys();
-			std::lock_guard<std::mutex> snap(g_keySnapMutex);
-			memcpy(g_keySnapshot, state_bitmap, sizeof(g_keySnapshot));
-			g_keyLastUpdateUs.store(KeyNowUs(), std::memory_order_relaxed);
+			std::unique_lock<std::mutex> lock(g_keyMutex, std::try_to_lock);
+			if (lock.owns_lock())
+			{
+				UpdateKeys();
+				std::lock_guard<std::mutex> snap(g_keySnapMutex);
+				memcpy(g_keySnapshot, state_bitmap, sizeof(g_keySnapshot));
+				g_keyLastUpdateUs.store(KeyNowUs(), std::memory_order_relaxed);
+			}
 		}
 	}
 	std::lock_guard<std::mutex> lock(g_keySnapMutex);

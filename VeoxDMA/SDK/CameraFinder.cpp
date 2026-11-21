@@ -1,9 +1,12 @@
 #include "pch.h"
 #include "CameraFinder.h"
 #include "Memory.h"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cfloat>
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace CameraFinder {
@@ -12,6 +15,7 @@ static uintptr_t unityPlayer = 0;
 
 void Init(uintptr_t unityPlayerBase) {
     unityPlayer = unityPlayerBase;
+    InvalidateCache();
 }
 
 uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
@@ -231,6 +235,18 @@ struct CameraNodeCache {
 std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
 std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
 
+// Cached virtual->physical translation for the contiguous view+projection block
+// when it fits inside one 4 KB page. Direct LcRead on the physical address
+// skips VMMDLL's process/TLB locks and 4 KB page alignment for sub-ms reads.
+struct PhysCamCache {
+    std::uintptr_t va = 0;
+    std::size_t span = 0;
+    std::uint64_t pa = 0;
+    std::uint64_t stampMs = 0;
+};
+std::mutex g_physCamMutex;
+PhysCamCache g_physCam{};
+
 bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     std::uintptr_t projOff, CameraData& data) {
     if (!node || !viewOff || !projOff)
@@ -238,18 +254,79 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
 
     Matrix4x4 view{};
     Matrix4x4 projection{};
-    Memory::ScopedScatter scatter(TargetProcess);
-    if (!scatter) return false;
-    TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
-    TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
-    TargetProcess.ExecuteReadScatter(scatter);
-
     Vector3 position{};
     Vector3 forward{};
-    if (!ParseViewMatrix(&view.matrix[0][0], position, forward))
-        return false;
-    if (!ParseProjectionMatrix(&projection.matrix[0][0]))
-        return false;
+    bool parsed = false;
+    bool usedPhys = false;
+
+    const std::uintptr_t minOff = (std::min)(viewOff, projOff);
+    const std::uintptr_t maxEnd = (std::max)(viewOff, projOff) + sizeof(Matrix4x4);
+    const std::size_t span = static_cast<std::size_t>(maxEnd - minOff);
+    const std::uintptr_t va = node + minOff;
+
+    // Fastest path: contiguous block within one 4 KB page -> cached PA + direct
+    // LeechCore physical read (~150-300 us, single 128-byte TLP).
+    const bool singlePage = (span <= 512) &&
+        ((va & ~static_cast<std::uintptr_t>(0xFFF)) ==
+         ((va + span - 1) & ~static_cast<std::uintptr_t>(0xFFF)));
+    if (singlePage) {
+        std::uint64_t pa = 0;
+        const std::uint64_t nowMs = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lock(g_physCamMutex);
+            if (g_physCam.va == va && g_physCam.span == span &&
+                g_physCam.pa != 0 && (nowMs - g_physCam.stampMs) < 3000) {
+                pa = g_physCam.pa;
+            }
+        }
+        if (!pa) {
+            std::uint64_t translated = 0;
+            if (TargetProcess.VirtToPhys(va, translated) && translated != 0) {
+                pa = translated;
+                std::lock_guard<std::mutex> lock(g_physCamMutex);
+                g_physCam = PhysCamCache{ va, span, pa, nowMs };
+            }
+        }
+        if (pa) {
+            unsigned char raw[512];
+            if (TargetProcess.ReadPhysicalFast(pa, raw, span)) {
+                std::memcpy(&view, raw + (viewOff - minOff), sizeof(view));
+                std::memcpy(&projection, raw + (projOff - minOff), sizeof(projection));
+                if (ParseViewMatrix(&view.matrix[0][0], position, forward) &&
+                    ParseProjectionMatrix(&projection.matrix[0][0])) {
+                    parsed = true;
+                    usedPhys = true;
+                }
+            }
+            if (!parsed) {
+                // Physical frame may have migrated or scene changed: drop the
+                // cached PA and fall through to a virtual uncached read.
+                std::lock_guard<std::mutex> lock(g_physCamMutex);
+                g_physCam = PhysCamCache{};
+            }
+        }
+    }
+
+    if (!parsed) {
+        if (span <= 512) {
+            unsigned char raw[512];
+            if (!TargetProcess.ReadFresh(va, raw, span))
+                return false;
+            std::memcpy(&view, raw + (viewOff - minOff), sizeof(view));
+            std::memcpy(&projection, raw + (projOff - minOff), sizeof(projection));
+        } else {
+            Memory::ScopedScatter scatter(TargetProcess);
+            if (!scatter) return false;
+            TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
+            TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
+            if (!TargetProcess.ExecuteReadScatter(scatter))
+                return false;
+        }
+        if (!ParseViewMatrix(&view.matrix[0][0], position, forward))
+            return false;
+        if (!ParseProjectionMatrix(&projection.matrix[0][0]))
+            return false;
+    }
 
     data.view = view;
     data.projection = projection;
@@ -257,6 +334,7 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     data.position = position;
     data.forward = forward;
     data.valid = true;
+    data.usedPhysical = usedPhys;
     data.positionError = -1.f;
     data.forwardDot = -1.f;
     return true;
@@ -520,6 +598,14 @@ float ReadNativeFov()
     const float fovDeg = fovRad * 180.f / 3.14159265358979323846f;
     if (fovDeg < 1.f || fovDeg > 179.f) return 0.f;
     return fovDeg;
+}
+
+void InvalidateCache()
+{
+    g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
+    g_lastResolveTick.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_physCamMutex);
+    g_physCam = PhysCamCache{};
 }
 
 CameraData GetCameraMatricesFast()

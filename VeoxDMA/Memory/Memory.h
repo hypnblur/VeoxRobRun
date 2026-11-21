@@ -204,6 +204,22 @@ public:
 	bool ReadFresh(uintptr_t address, void* buffer, size_t size) const;
 	bool ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) const;
 
+	// Translates a target-process virtual address to its physical address
+	// using VMM's cached page tables. Pair with ReadPhysicalFast() for hot
+	// sub-millisecond reads (e.g. Unity's native camera matrices).
+	bool VirtToPhys(uintptr_t va, uint64_t& pa) const;
+
+	// Direct physical read via the underlying LeechCore handle, bypassing
+	// VMMDLL's process/TLB locks and 4 KB page alignment for small bursts.
+	bool ReadPhysicalFast(uint64_t pa, void* buffer, size_t size) const;
+
+	// Controlled manual MemProcFS cache refreshes used with -norefresh so
+	// background VMM refreshes never stall the FPGA bus unexpectedly.
+	void RefreshMemCachePartial() const;
+	void RefreshTlbCachePartial() const;
+	void RefreshAllCaches() const;
+	void RefreshProcessesFast() const;
+
 	/**
 	* brief Reads memory from the process using a template
 	* @param address The address to read from
@@ -332,6 +348,8 @@ public:
 
 	/*the FPGA handle*/
 	VMM_HANDLE vHandle = nullptr;
+	/*underlying LeechCore handle owned by vHandle (do not close)*/
+	HANDLE lcHandle = nullptr;
 };
 
 inline Memory TargetProcess;
