@@ -81,6 +81,29 @@ struct EntityData {
     int boneCount = 0;
 };
 
+// Live state of one in-game map viewport (top-left minimap or fullscreen 'M'
+// map), read directly from BattleModel.MapConfigModel.
+struct InGameMapVariance {
+    bool valid = false;
+    Vector2 position{};    // World (X, Z) center of the orthographic map camera
+    float rotation = 0.f;  // Live map camera rotation
+    float cameraSize = 0.f; // Orthographic half-height in world metres
+    bool rectValid = false;
+    // Screen-space bounding box in Unity UI pixels (Y=0 at bottom) and
+    // transform center/scale so the overlay converts with current display height.
+    float uiMinX = 0.f, uiMinY = 0.f, uiMaxX = 0.f, uiMaxY = 0.f;
+    float uiCenterX = 0.f, uiCenterY = 0.f;
+    float uiScaleX = 1.f, uiScaleY = 1.f;
+};
+
+struct InGameMapState {
+    bool valid = false;
+    bool fullscreenOpen = false;
+    float normalizedZoom = 0.f;
+    InGameMapVariance minimap;
+    InGameMapVariance fullscreen;
+};
+
 // Immutable view of the last completed read pass. The worker publishes a new
 // snapshot every cycle; the overlay thread only ever reads one. This is what
 // keeps DMA latency off the render thread.
@@ -93,6 +116,7 @@ struct Snapshot {
     std::shared_ptr<const RobRunWorld::PlotState> plots;
     std::shared_ptr<const RobRunInventory::State> inventory;
     RobRunCamera::CameraState camera;
+    InGameMapState inGameMap;
     std::int32_t localEntityId = -1;
     Vector3 localPosition{};
     float localYaw = 0.f;

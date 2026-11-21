@@ -7,6 +7,7 @@ namespace Radar {
 void Init();
 void Draw();
 void DrawFullMap();
+void DrawInGameMapOverlay();
 void Shutdown();
 
 const std::vector<std::string>& GetMapFiles();

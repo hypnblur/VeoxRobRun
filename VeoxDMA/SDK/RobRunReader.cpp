@@ -218,6 +218,7 @@ static std::shared_ptr<const RobRunWorld::PlotState> g_plotState =
 static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
+static InGameMapState inGameMapState;
 static Vector3 localPosition{};
 static float localYaw = 0.f;
 static float localPitch = 0.f;
@@ -345,10 +346,35 @@ struct RigCacheEntry {
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
+struct RectTransformCache {
+    std::uintptr_t managed = 0;
+    std::uint64_t stampMs = 0;
+    bool valid = false;
+    float uiMinX = 0.f, uiMinY = 0.f, uiMaxX = 0.f, uiMaxY = 0.f;
+    float uiCenterX = 0.f, uiCenterY = 0.f;
+    float uiScaleX = 1.f, uiScaleY = 1.f;
+};
+static std::uintptr_t cachedMapDialogModel = 0;
+static std::uintptr_t cachedMapConfigModel = 0;
+static std::uintptr_t cachedMapFullVar = 0;
+static std::uintptr_t cachedMapMiniVar = 0;
+static std::uintptr_t cachedMapModelPtr = 0;
+static RectTransformCache g_miniRectCache{};
+static RectTransformCache g_fullRectCache{};
+static std::int32_t s_rectTransformRectOffset = -1;
+
 static void ClearEntityCaches()
 {
     rigCache.clear();
     detailCache.clear();
+    cachedMapDialogModel = 0;
+    cachedMapConfigModel = 0;
+    cachedMapFullVar = 0;
+    cachedMapMiniVar = 0;
+    cachedMapModelPtr = 0;
+    g_miniRectCache = RectTransformCache{};
+    g_fullRectCache = RectTransformCache{};
+    inGameMapState = InGameMapState{};
 }
 
 static void PruneCaches()
@@ -753,6 +779,7 @@ static void PublishSnapshot()
         snapshot->inventory = g_inventoryState;
     }
     snapshot->camera = cameraState;
+    snapshot->inGameMap = inGameMapState;
     snapshot->localEntityId = localEntityId;
     snapshot->localPosition = localPosition;
     snapshot->localYaw = localYaw;
@@ -2176,6 +2203,319 @@ static bool RestoreDefaultCrosshair()
     return restored;
 }
 
+static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache, bool forceRefresh)
+{
+    if (managedRect <= 0x10000) {
+        cache.valid = false;
+        return false;
+    }
+    const std::uint64_t now = GetTickCount64();
+    if (!forceRefresh && cache.managed == managedRect && cache.valid && (now - cache.stampMs) < 500)
+        return true;
+
+    cache.managed = managedRect;
+    cache.stampMs = now;
+
+    const std::uintptr_t native = ReadPtr(managedRect + rr::UnityTransform::native);
+    if (native <= 0x10000) { cache.valid = false; return false; }
+    const std::uintptr_t hierarchy = ReadPtr(native + rr::UnityTransform::hierarchy);
+    if (hierarchy <= 0x10000) { cache.valid = false; return false; }
+
+    const std::uintptr_t matrices = ReadPtr(hierarchy + rr::UnityTransform::matrices);
+    const std::uintptr_t parents  = ReadPtr(hierarchy + rr::UnityTransform::parents);
+    const std::uintptr_t pointers = ReadPtr(hierarchy + rr::UnityTransform::pointers);
+    std::int32_t count = RobRunMemory::ReadInt32(hierarchy + rr::UnityTransform::count);
+    if (count < 1 || count > 4096)
+        count = RobRunMemory::ReadInt32(hierarchy + 0x10);
+    if (matrices <= 0x10000 || parents <= 0x10000 || pointers <= 0x10000 ||
+        count < 1 || count > 4096) {
+        cache.valid = false;
+        return false;
+    }
+
+    // Locate native Transform index inside hierarchy.pointers
+    std::vector<std::uintptr_t> ptrs(static_cast<std::size_t>(count), 0);
+    if (!TargetProcess.Read(pointers, ptrs.data(), ptrs.size() * sizeof(std::uintptr_t))) {
+        cache.valid = false;
+        return false;
+    }
+    int idx = -1;
+    for (int i = 0; i < count; ++i) {
+        if (ptrs[static_cast<std::size_t>(i)] == native) { idx = i; break; }
+    }
+    if (idx < 0) { cache.valid = false; return false; }
+
+    std::vector<std::int32_t> par(static_cast<std::size_t>(count), -1);
+    if (!TargetProcess.Read(parents, par.data(), par.size() * sizeof(std::int32_t))) {
+        cache.valid = false;
+        return false;
+    }
+
+    // Collect ancestor chain from idx up to canvas root (typically 4-12 nodes)
+    std::vector<int> chain;
+    chain.reserve(16);
+    for (int cur = idx, steps = 0; cur >= 0 && cur < count && steps < 64; cur = par[static_cast<std::size_t>(cur)], ++steps)
+        chain.push_back(cur);
+    if (chain.empty()) { cache.valid = false; return false; }
+    std::reverse(chain.begin(), chain.end());
+
+    struct UiTRS {
+        float px, py, pz, padP;
+        float qx, qy, qz, qw;
+        float sx, sy, sz, padS;
+    };
+    static_assert(sizeof(UiTRS) == 48);
+
+    std::vector<UiTRS> chainTrs(chain.size());
+    {
+        Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+        if (sc.handle) {
+            for (std::size_t i = 0; i < chain.size(); ++i) {
+                TargetProcess.AddScatterReadRequest(sc,
+                    matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
+                    &chainTrs[i], sizeof(UiTRS));
+            }
+            TargetProcess.ExecuteScatterReadCached(sc);
+        } else {
+            for (std::size_t i = 0; i < chain.size(); ++i) {
+                TargetProcess.Read(
+                    matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
+                    &chainTrs[i], sizeof(UiTRS));
+            }
+        }
+    }
+
+    auto rotateV = [](float qx, float qy, float qz, float qw, float vx, float vy, float vz,
+                      float& ox, float& oy, float& oz) {
+        const float tx = 2.f * (qy * vz - qz * vy);
+        const float ty = 2.f * (qz * vx - qx * vz);
+        const float tz = 2.f * (qx * vy - qy * vx);
+        ox = vx + qw * tx + (qy * tz - qz * ty);
+        oy = vy + qw * ty + (qz * tx - qx * tz);
+        oz = vz + qw * tz + (qx * ty - qy * tx);
+    };
+    auto mulQ = [](float ax, float ay, float az, float aw,
+                   float bx, float by, float bz, float bw,
+                   float& ox, float& oy, float& oz, float& ow) {
+        ox = aw * bx + ax * bw + ay * bz - az * by;
+        oy = aw * by - ax * bz + ay * bw + az * bx;
+        oz = aw * bz + ax * by - ay * bx + az * bw;
+        ow = aw * bw - ax * bx - ay * by - az * bz;
+    };
+
+    float wx = 0.f, wy = 0.f, wz = 0.f;
+    float rqx = 0.f, rqy = 0.f, rqz = 0.f, rqw = 1.f;
+    float wsx = 1.f, wsy = 1.f, wsz = 1.f;
+    for (std::size_t i = 0; i < chainTrs.size(); ++i) {
+        const auto& t = chainTrs[i];
+        const float n = t.qx*t.qx + t.qy*t.qy + t.qz*t.qz + t.qw*t.qw;
+        if (!std::isfinite(t.px) || !std::isfinite(t.py) || !std::isfinite(t.sx) || !std::isfinite(t.sy) ||
+            !std::isfinite(n) || n < 0.5f || n > 1.5f) {
+            cache.valid = false;
+            return false;
+        }
+        const float inv = 1.f / std::sqrt(n);
+        const float qx = t.qx * inv, qy = t.qy * inv, qz = t.qz * inv, qw = t.qw * inv;
+        if (i == 0) {
+            wx = t.px; wy = t.py; wz = t.pz;
+            rqx = qx; rqy = qy; rqz = qz; rqw = qw;
+            wsx = t.sx; wsy = t.sy; wsz = t.sz;
+        } else {
+            float dx = 0.f, dy = 0.f, dz = 0.f;
+            rotateV(rqx, rqy, rqz, rqw, wsx * t.px, wsy * t.py, wsz * t.pz, dx, dy, dz);
+            wx += dx; wy += dy; wz += dz;
+            float nqx, nqy, nqz, nqw;
+            mulQ(rqx, rqy, rqz, rqw, qx, qy, qz, qw, nqx, nqy, nqz, nqw);
+            rqx = nqx; rqy = nqy; rqz = nqz; rqw = nqw;
+            wsx *= t.sx; wsy *= t.sy; wsz *= t.sz;
+        }
+    }
+
+    cache.uiCenterX = wx;
+    cache.uiCenterY = wy;
+    cache.uiScaleX = (std::fabs(wsx) > 1e-4f) ? std::fabs(wsx) : 1.f;
+    cache.uiScaleY = (std::fabs(wsy) > 1e-4f) ? std::fabs(wsy) : 1.f;
+
+    // Probe native RectTransform::m_Rect (x, y, width, height) in +0x50..+0x150.
+    constexpr std::uintptr_t kScanBase = 0x50;
+    constexpr std::size_t kScanFloats = 64; // 0x100 bytes (+0x50..+0x150)
+    float raw[kScanFloats]{};
+    if (!TargetProcess.Read(native + kScanBase, raw, sizeof(raw))) {
+        cache.valid = false;
+        return false;
+    }
+
+    auto validRectAt = [&](int fi, float& rx, float& ry, float& rw, float& rh) -> int {
+        if (fi < 0 || fi + 3 >= static_cast<int>(kScanFloats)) return 0;
+        rx = raw[fi]; ry = raw[fi + 1]; rw = raw[fi + 2]; rh = raw[fi + 3];
+        if (!std::isfinite(rx) || !std::isfinite(ry) || !std::isfinite(rw) || !std::isfinite(rh)) return 0;
+        if (rw < 60.f || rw > 4000.f || rh < 60.f || rh > 4000.f) return 0;
+        if (rx > 2.f || rx < -rw - 2.f || ry > 2.f || ry < -rh - 2.f) return 0;
+        const float sw = rw * cache.uiScaleX;
+        const float sh = rh * cache.uiScaleY;
+        if (sw < 60.f || sw > 4200.f || sh < 60.f || sh > 2600.f) return 0;
+        // Centered pivot (0.5, 0.5): x == -w/2, y == -h/2
+        if (std::fabs(rx + 0.5f * rw) < 2.f && std::fabs(ry + 0.5f * rh) < 2.f)
+            return 100;
+        // Corner pivot (0,0) / (1,1) / etc.
+        if ((std::fabs(rx) < 1.f || std::fabs(rx + rw) < 1.f) &&
+            (std::fabs(ry) < 1.f || std::fabs(ry + rh) < 1.f))
+            return 60;
+        return 30;
+    };
+
+    float rx = 0.f, ry = 0.f, rw = 0.f, rh = 0.f;
+    bool foundRect = false;
+    if (s_rectTransformRectOffset >= static_cast<std::int32_t>(kScanBase)) {
+        const int fi = (s_rectTransformRectOffset - static_cast<std::int32_t>(kScanBase)) / 4;
+        if (validRectAt(fi, rx, ry, rw, rh) > 0)
+            foundRect = true;
+    }
+    if (!foundRect) {
+        int bestScore = 0;
+        int bestFi = -1;
+        for (int fi = 0; fi + 3 < static_cast<int>(kScanFloats); ++fi) {
+            float tx, ty, tw, th;
+            const int score = validRectAt(fi, tx, ty, tw, th);
+            if (score > bestScore) {
+                bestScore = score;
+                bestFi = fi;
+                rx = tx; ry = ty; rw = tw; rh = th;
+            }
+        }
+        if (bestFi >= 0) {
+            s_rectTransformRectOffset = static_cast<std::int32_t>(kScanBase) + bestFi * 4;
+            foundRect = true;
+            std::printf("[MapProbe] RectTransform m_Rect discovered at native+0x%X: rect=(%.1f,%.1f %.1fx%.1f) uiPos=(%.1f,%.1f) scale=(%.3f,%.3f)\n",
+                s_rectTransformRectOffset, rx, ry, rw, rh, wx, wy, cache.uiScaleX, cache.uiScaleY);
+        }
+    }
+
+    if (!foundRect) {
+        cache.valid = false;
+        return false;
+    }
+
+    cache.uiMinX = wx + rx * cache.uiScaleX;
+    cache.uiMaxX = cache.uiMinX + rw * cache.uiScaleX;
+    cache.uiMinY = wy + ry * cache.uiScaleY;
+    cache.uiMaxY = cache.uiMinY + rh * cache.uiScaleY;
+    cache.valid = (cache.uiMaxX - cache.uiMinX >= 50.f) && (cache.uiMaxY - cache.uiMinY >= 50.f);
+    return cache.valid;
+}
+
+static void ReadInGameMapState()
+{
+    const auto& rcfg = ConfigInstance.Radar;
+    if (!rcfg.InGameMinimap && !rcfg.InGameFullMap) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+    if (cachedBattleModel <= 0x10000) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+
+    if (cachedMapDialogModel <= 0x10000) {
+        const std::uintptr_t dlg = ReadPtr(cachedBattleModel + rr::BattleModel::MapDialogModel);
+        if (dlg > 0x10000 && IsClass(dlg, "MapDialogModel"))
+            cachedMapDialogModel = dlg;
+    }
+    if (cachedMapConfigModel <= 0x10000) {
+        const std::uintptr_t cfg = ReadPtr(cachedBattleModel + rr::BattleModel::MapConfigModel);
+        if (cfg > 0x10000 && IsClass(cfg, "MapConfigModel")) {
+            cachedMapConfigModel = cfg;
+            cachedMapFullVar  = ReadPtr(cfg + rr::MapConfigModel::FullScreen);
+            cachedMapMiniVar  = ReadPtr(cfg + rr::MapConfigModel::Minimap);
+            cachedMapModelPtr = ReadPtr(cfg + rr::MapConfigModel::MapModel);
+        }
+    }
+    if (cachedMapConfigModel <= 0x10000) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+
+    // Read ScreenState fresh so pressing/closing 'M' responds on the very next frame.
+    bool fullOpen = false;
+    if (cachedMapDialogModel > 0x10000) {
+        std::int32_t state = 0;
+        if (TargetProcess.ReadFresh(cachedMapDialogModel + rr::ScreenModel::ScreenState, &state, sizeof(state)))
+            fullOpen = (state == 1);
+    }
+
+    const bool modeFlipped = (inGameMapState.fullscreenOpen != fullOpen);
+    inGameMapState.fullscreenOpen = fullOpen;
+
+    if (cachedMapModelPtr > 0x10000) {
+        float nz = 0.f;
+        if (TargetProcess.Read(cachedMapModelPtr + rr::MapModel::NormalizedZoom, &nz, sizeof(nz)) && std::isfinite(nz))
+            inGameMapState.normalizedZoom = nz;
+    }
+
+    auto readVariance = [&](std::uintptr_t varPtr, InGameMapVariance& out, RectTransformCache& rCache, const char* tag) {
+        out = InGameMapVariance{};
+        if (varPtr <= 0x10000) return;
+
+        struct VarBlock {
+            float posX, posY;
+            float rotation;
+            float cameraSize;
+            std::uintptr_t resizeContainer;
+        };
+        static_assert(sizeof(VarBlock) == 24);
+        VarBlock blk{};
+        if (!TargetProcess.ReadFresh(varPtr + rr::MapConfigVariance::Position, &blk, sizeof(blk)))
+            return;
+        if (!std::isfinite(blk.posX) || !std::isfinite(blk.posY) ||
+            !std::isfinite(blk.rotation) || !std::isfinite(blk.cameraSize) ||
+            blk.cameraSize <= 0.1f || blk.cameraSize > 50000.f)
+            return;
+
+        out.position = Vector2(blk.posX, blk.posY);
+        out.rotation = blk.rotation;
+        out.cameraSize = blk.cameraSize;
+        out.valid = true;
+
+        if (blk.resizeContainer > 0x10000 &&
+            ReadRectTransformUiBounds(blk.resizeContainer, rCache, modeFlipped))
+        {
+            out.rectValid = true;
+            out.uiMinX = rCache.uiMinX;
+            out.uiMinY = rCache.uiMinY;
+            out.uiMaxX = rCache.uiMaxX;
+            out.uiMaxY = rCache.uiMaxY;
+            out.uiCenterX = rCache.uiCenterX;
+            out.uiCenterY = rCache.uiCenterY;
+            out.uiScaleX = rCache.uiScaleX;
+            out.uiScaleY = rCache.uiScaleY;
+        }
+
+        // One-shot / mode-flip diagnostic log for 2nd-PC verification.
+        static bool loggedMini = false;
+        static bool loggedFull = false;
+        bool& loggedFlag = (tag[0] == 'F') ? loggedFull : loggedMini;
+        if (!loggedFlag || modeFlipped) {
+            loggedFlag = true;
+            std::printf("[MapProbe] %s: pos=(%.1f,%.1f) local=(%.1f,%.1f) rot=%.2f yaw=%.2f camSize=%.1f rect=%d(%.0f,%.0f..%.0f,%.0f)\n",
+                tag, out.position.x, out.position.y,
+                localPosition.x, localPosition.z,
+                out.rotation, localYaw, out.cameraSize,
+                out.rectValid ? 1 : 0,
+                out.uiMinX, out.uiMinY, out.uiMaxX, out.uiMaxY);
+        }
+    };
+
+    if (fullOpen) {
+        if (rcfg.InGameFullMap)
+            readVariance(cachedMapFullVar, inGameMapState.fullscreen, g_fullRectCache, "Full");
+    } else {
+        if (rcfg.InGameMinimap)
+            readVariance(cachedMapMiniVar, inGameMapState.minimap, g_miniRectCache, "Mini");
+    }
+
+    inGameMapState.valid = fullOpen ? inGameMapState.fullscreen.valid : inGameMapState.minimap.valid;
+}
+
 static void UpdateInternal()
 {
     const std::uint64_t tPassStart = SteadyMicros();
@@ -2451,6 +2791,9 @@ static void UpdateInternal()
 
     const std::uint64_t tAfterRoots = SteadyMicros();
     tRootsUs = tAfterRoots - tPassStart;
+
+    // Live in-game minimap / fullscreen ('M') map camera & rect state (~2 reads).
+    ReadInGameMapState();
 
     // Drop a stale updater when the scene changes; otherwise the view
     // dictionary silently stays empty across a map transition.
