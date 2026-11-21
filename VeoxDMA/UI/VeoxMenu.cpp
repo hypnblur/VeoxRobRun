@@ -2418,6 +2418,14 @@ void DrawSettings(bool attached, const std::string& statusText)
 		if (ConfigInstance.Overlay.PanicKey > 0)
 			Note("Pressing panic key instantly blanks the overlay and stops targeting.");
 
+		static const char* reattachKeys[] = {
+			"Off", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+			"Insert", "Home", "End", "Delete", "Page Up", "Page Down"
+		};
+		ComboRow("Re-attach Key", &ConfigInstance.Overlay.ReattachKey, reattachKeys, IM_ARRAYSIZE(reattachKeys));
+		if (ConfigInstance.Overlay.ReattachKey > 0)
+			Note("Pressing the hotkey re-attaches to the game process.");
+
 		ToggleRow("High Contrast Menu", &ConfigInstance.Overlay.HighContrastMenu);
 		Note("Solid card fills and brighter text, for bright game scenes.");
 
@@ -2479,6 +2487,9 @@ void DrawSettings(bool attached, const std::string& statusText)
 		}
 		if (ButtonRow("", "Re-attach", 130.f, true))
 			RequestReattach();
+		ComboRow("Re-attach Key", &ConfigInstance.Overlay.ReattachKey, reattachKeys, IM_ARRAYSIZE(reattachKeys));
+		if (ConfigInstance.Overlay.ReattachKey > 0)
+			Note("Pressing the hotkey re-attaches to the game process.");
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -2711,6 +2722,27 @@ void DrawTopBar(const ImVec2& pos)
 			g_search[0] = 0;
 	}
 
+	// re-attach button
+	if (kW >= 720.f)
+	{
+		const ImRect reattach(pos + ImVec2(kW - 146.f, 19.f), pos + ImVec2(kW - 54.f, 45.f));
+		const bool reattachHover = ImGui::IsMouseHoveringRect(reattach.Min, reattach.Max);
+		dl->AddRectFilled(reattach.Min, reattach.Max,
+			C(kAccent, reattachHover ? 0.30f : 0.14f), 7.f);
+		dl->AddRect(reattach.Min, reattach.Max,
+			C(kAccent, reattachHover ? 0.65f : 0.35f), 7.f, 0, 1.f);
+		const char* label = "Re-attach";
+		const float tw = TextW(font::inter_medium_small, label);
+		const float th = font::inter_medium_small->FontSize;
+		dl->AddText(font::inter_medium_small, th,
+			ImVec2((reattach.Min.x + reattach.Max.x - tw) * 0.5f,
+				(reattach.Min.y + reattach.Max.y - th) * 0.5f - 1.f),
+			C(reattachHover ? kAccentBright : kText), label);
+		ImGui::SetCursorScreenPos(reattach.Min);
+		if (ImGui::InvisibleButton("##top_reattach", reattach.GetSize()))
+			RequestReattach();
+	}
+
 	// close button
 	const ImRect close(pos + ImVec2(kW - 46.f, 19.f), pos + ImVec2(kW - 20.f, 45.f));
 	const bool closeHover = ImGui::IsMouseHoveringRect(close.Min, close.Max);
@@ -2734,7 +2766,7 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 
 	// The nav list lives in a child that stops above the footer, so a short
 	// window can never draw the footer status over the page buttons.
-	constexpr float footerH = 92.f;
+	constexpr float footerH = 118.f;
 	const float navTop = kTop + 16.f;
 	const float navH = ImMax(kH - navTop - footerH, 44.f);
 
@@ -2779,6 +2811,21 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 	GetLocalTime(&st);
 	std::snprintf(line, sizeof(line), "%02d:%02d", st.wHour, st.wMinute);
 	TextRight(font::inter_medium_small, pos.x + kSide - 20.f, footerY + 50.f, C(kTextFaint), line);
+
+	const ImRect btn(pos + ImVec2(14.f, footerY + 70.f), pos + ImVec2(kSide - 14.f, footerY + 98.f));
+	const bool btnHover = ImGui::IsMouseHoveringRect(btn.Min, btn.Max);
+	dl->AddRectFilled(btn.Min, btn.Max, C(kAccent, btnHover ? 0.28f : 0.14f), 6.f);
+	dl->AddRect(btn.Min, btn.Max, C(kAccent, btnHover ? 0.60f : 0.30f), 6.f, 0, 1.f);
+	const char* btnLabel = "Re-attach Game";
+	const float tw = TextW(font::inter_medium_small, btnLabel);
+	const float th = font::inter_medium_small->FontSize;
+	dl->AddText(font::inter_medium_small, th,
+		ImVec2((btn.Min.x + btn.Max.x - tw) * 0.5f,
+			(btn.Min.y + btn.Max.y - th) * 0.5f - 1.f),
+		C(btnHover ? kAccentBright : kText), btnLabel);
+	ImGui::SetCursorScreenPos(btn.Min);
+	if (ImGui::InvisibleButton("##sidebar_reattach", btn.GetSize()))
+		RequestReattach();
 }
 
 } // namespace
