@@ -462,7 +462,15 @@ void DrawFps()
 	if (!ConfigInstance.Overlay.FPSEnabled) return;
 	char buf[32];
 	std::snprintf(buf, sizeof(buf), "FPS: %.0f", ImGui::GetIO().Framerate);
-	ImGui::GetBackgroundDrawList()->AddText(ImVec2(10.f, 10.f), IM_COL32(0, 255, 0, 255), buf);
+	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	ImFont* font = ImGui::GetFont();
+	const float size = ImGui::GetFontSize();
+	const ImU32 outline = IM_COL32(26, 28, 32, 245);
+	for (int dy = -1; dy <= 1; ++dy)
+		for (int dx = -1; dx <= 1; ++dx)
+			if (dx || dy)
+				dl->AddText(font, size, ImVec2(10.f + dx, 10.f + dy), outline, buf);
+	dl->AddText(font, size, ImVec2(10.f, 10.f), IM_COL32(0, 255, 0, 255), buf);
 }
 
 void DrawDebugOverlay()
