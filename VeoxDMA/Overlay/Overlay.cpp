@@ -21,6 +21,8 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
 
+extern void RequestReattach();
+
 namespace {
 
 ID3D11Device* g_device = nullptr;
@@ -258,6 +260,36 @@ static int GetPanicKeyVk()
 	int idx = ConfigInstance.Overlay.PanicKey;
 	if (idx >= 0 && idx < (int)(sizeof(kPanicKeyVk) / sizeof(kPanicKeyVk[0])))
 		return kPanicKeyVk[idx];
+	return 0;
+}
+
+static const int kReattachKeyVk[] = {
+	0,         // 0: Off
+	VK_F1,     // 1: F1
+	VK_F2,     // 2: F2
+	VK_F3,     // 3: F3
+	VK_F4,     // 4: F4
+	VK_F5,     // 5: F5
+	VK_F6,     // 6: F6
+	VK_F7,     // 7: F7
+	VK_F8,     // 8: F8
+	VK_F9,     // 9: F9
+	VK_F10,    // 10: F10
+	VK_F11,    // 11: F11
+	VK_F12,    // 12: F12
+	VK_INSERT, // 13: Insert
+	VK_HOME,   // 14: Home
+	VK_END,    // 15: End
+	VK_DELETE, // 16: Delete
+	VK_PRIOR,  // 17: Page Up
+	VK_NEXT    // 18: Page Down
+};
+
+static int GetReattachKeyVk()
+{
+	int idx = ConfigInstance.Overlay.ReattachKey;
+	if (idx >= 0 && idx < (int)(sizeof(kReattachKeyVk) / sizeof(kReattachKeyVk[0])))
+		return kReattachKeyVk[idx];
 	return 0;
 }
 
@@ -574,6 +606,10 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		const int panicVk = GetPanicKeyVk();
 		if (panicVk > 0 && KeyJustPressed(panicVk))
 			TogglePanic();
+
+		const int reattachVk = GetReattachKeyVk();
+		if (reattachVk > 0 && KeyJustPressed(reattachVk))
+			RequestReattach();
 
 #ifdef _DEBUG
 		if (KeyJustPressed(VK_DELETE))
