@@ -1181,7 +1181,7 @@ void DrawVisuals()
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
 			SliderIntRow("Min Cash / Value", &ConfigInstance.World.MinValueFilter, 0, 50000, " $");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
-			ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot);
+			ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot, true);
 			EndCard();
 		}
 	}
