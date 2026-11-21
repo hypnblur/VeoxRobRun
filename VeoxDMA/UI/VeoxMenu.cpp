@@ -4,6 +4,7 @@
 #include "ConfigFile.h"
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
+#include "SkinChanger.h"
 #include "DeviceSession.h"
 #include "InputManager.h"
 #include "../Aim/AimController.h"
