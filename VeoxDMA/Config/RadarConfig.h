@@ -42,6 +42,18 @@ public:
 
 	std::string SelectedMap = "city_colliders_map.png";
 
+	// In-game minimap & fullscreen ('M') map overlay
+	bool InGameMinimap = true;
+	bool InGameFullMap = true;
+	bool Hide3DEspOnFullMap = true;
+	bool InGameMapPlayers = true;
+	bool InGameMapVehicles = true;
+	bool InGameMapPlayerHeading = false;
+	bool InGameMapPlayerNames = false;
+	bool InGameMapDroppedBags = false;
+	bool InGameMapValuables = false;
+	float InGameMapScale = 1.0f;
+
 	json ToJson()
 	{
 		json j;
@@ -71,6 +83,16 @@ public:
 		j[ConfigName][LIT("WorldMinZ")] = WorldMinZ;
 		j[ConfigName][LIT("WorldMaxZ")] = WorldMaxZ;
 		j[ConfigName][LIT("SelectedMap")] = SelectedMap;
+		j[ConfigName][LIT("InGameMinimap")] = InGameMinimap;
+		j[ConfigName][LIT("InGameFullMap")] = InGameFullMap;
+		j[ConfigName][LIT("Hide3DEspOnFullMap")] = Hide3DEspOnFullMap;
+		j[ConfigName][LIT("InGameMapPlayers")] = InGameMapPlayers;
+		j[ConfigName][LIT("InGameMapVehicles")] = InGameMapVehicles;
+		j[ConfigName][LIT("InGameMapPlayerHeading")] = InGameMapPlayerHeading;
+		j[ConfigName][LIT("InGameMapPlayerNames")] = InGameMapPlayerNames;
+		j[ConfigName][LIT("InGameMapDroppedBags")] = InGameMapDroppedBags;
+		j[ConfigName][LIT("InGameMapValuables")] = InGameMapValuables;
+		j[ConfigName][LIT("InGameMapScale")] = InGameMapScale;
 		return j;
 	}
 
@@ -105,5 +127,15 @@ public:
 		WorldMinZ = s.value(LIT("WorldMinZ"), WorldMinZ);
 		WorldMaxZ = s.value(LIT("WorldMaxZ"), WorldMaxZ);
 		SelectedMap = s.value(LIT("SelectedMap"), SelectedMap);
+		InGameMinimap = s.value(LIT("InGameMinimap"), InGameMinimap);
+		InGameFullMap = s.value(LIT("InGameFullMap"), InGameFullMap);
+		Hide3DEspOnFullMap = s.value(LIT("Hide3DEspOnFullMap"), Hide3DEspOnFullMap);
+		InGameMapPlayers = s.value(LIT("InGameMapPlayers"), InGameMapPlayers);
+		InGameMapVehicles = s.value(LIT("InGameMapVehicles"), InGameMapVehicles);
+		InGameMapPlayerHeading = s.value(LIT("InGameMapPlayerHeading"), InGameMapPlayerHeading);
+		InGameMapPlayerNames = s.value(LIT("InGameMapPlayerNames"), InGameMapPlayerNames);
+		InGameMapDroppedBags = s.value(LIT("InGameMapDroppedBags"), InGameMapDroppedBags);
+		InGameMapValuables = s.value(LIT("InGameMapValuables"), InGameMapValuables);
+		InGameMapScale = s.value(LIT("InGameMapScale"), InGameMapScale);
 	}
 };

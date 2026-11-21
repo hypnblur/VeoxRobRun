@@ -239,16 +239,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			// is being shut down and the last snapshot is stale.
 			if (g_attached.load(std::memory_order_acquire)) {
 				FrameCameraGuard cameraGuard((int)display.x, (int)display.y);
-				DrawPlayers();
-				DrawBvhDebug();
-				if (!ConfigInstance.Overlay.BattleMode) {
-					DrawWorldEntities();
-					DrawHouseInfo();
-					Radar::Draw();
-					Radar::DrawFullMap();
+				const auto frameSnap = RobRunReader::GetSnapshot();
+				const bool suppress3D = frameSnap &&
+					frameSnap->inGameMap.valid &&
+					frameSnap->inGameMap.fullscreenOpen &&
+					ConfigInstance.Radar.InGameFullMap &&
+					ConfigInstance.Radar.Hide3DEspOnFullMap;
+				if (!suppress3D) {
+					DrawPlayers();
+					DrawBvhDebug();
+					if (!ConfigInstance.Overlay.BattleMode) {
+						DrawWorldEntities();
+						DrawHouseInfo();
+						Radar::Draw();
+						Radar::DrawFullMap();
+					}
+					Aim::Draw();
+					Aim::DrawDebug();
+				} else {
+					RobRunReader::ReportRenderState(false, FLT_MAX);
 				}
-				Aim::Draw();
-				Aim::DrawDebug();
+				Radar::DrawInGameMapOverlay();
 			} else {
 				Aim::Draw();
 				Aim::DrawDebug();
