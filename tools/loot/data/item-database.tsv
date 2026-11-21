@@ -1,0 +1,565 @@
+# Parsed from the ROB RUN item database page by parse_item_database.py.
+# id	name	category	rarity	price
+rifle_ammo_1	Assault Rifle Ammo	Ammo	Common	0
+grenade_launcher_shell_1	Grenade Launcher Shell	Ammo	Legendary	104000
+pistol_ammo_1	Pistol Ammo	Ammo	Common	0
+shotgun_ammo_1	Shotgun Ammo	Ammo	Common	0
+mp_ammo_1	SMG Ammo	Ammo	Common	0
+vest3_m1	Assault Body Armor	Armor	Epic	250000
+vest5_m1	Bastion Body Armor	Armor	Exotic	140000
+vest4_m1	Heavy Body Armor	Armor	Legendary	500000
+vest1_m1	Light Body Armor	Armor	Common	5000
+vest2_m1	Medium Body Armor	Armor	Uncommon	15000
+armor_plate_1	Steel Plate	Armor	Uncommon	5000
+bolt_cutter_1	Bolt Cutter	Breaching tools	Uncommon	1200
+drill_1	Drill	Breaching tools	Legendary	50000
+drill_target	Drill	Breaching tools		0
+glass_cutter_1	Glass Cutter	Breaching tools	Legendary	20000
+lockpick_1	Lockpick	Breaching tools	Uncommon	5000
+storage_lockpick_1	Master Key	Breaching tools	Epic	50000
+mini_drill_1	Mini Drill	Breaching tools	Epic	100000
+vehicle_lockpick_1	Trunk Lockpick	Breaching tools		0
+car_suspension_1	Brake Rotor	Car upgrades	Uncommon	4600
+car_cargo_1	Cargo Rack	Car upgrades	Epic	150000
+car_ecu_1	ECU	Car upgrades	Uncommon	30000
+car_ecu_3	High-performance ECU	Car upgrades	Legendary	260000
+car_ecu_2	Improved ECU	Car upgrades	Epic	160000
+car_engine_cooling_2	Improved Intercooler	Car upgrades	Legendary	200000
+car_turbocharger_2	Improved Turbo Kit	Car upgrades	Legendary	210000
+car_engine_cooling_1	Intercooler	Car upgrades	Epic	120000
+car_inventory_2	Large Trunk Bags	Car upgrades	Epic	130000
+nitro_car_upgrade	Nitro System	Car upgrades		0
+car_suspension_2	Racing Rotor	Car upgrades	Epic	100000
+car_cargo_2	Reinforced Cargo Rack	Car upgrades	Legendary	250000
+car_steering_rack_2	Reinforced Steering Rack	Car upgrades	Legendary	220000
+car_inventory_3	Spacious Trunk Bags	Car upgrades	Legendary	220000
+car_steering_rack_1	Steering Rack	Car upgrades	Epic	100000
+car_inventory_1	Trunk Bags	Car upgrades	Uncommon	20000
+car_turbocharger_1	Turbo Kit	Car upgrades	Epic	110000
+alcohol_box_1	Alcohol	Cargo	Common	50
+cargo_minimarket	Alcohol Crate	Cargo	Epic	40000
+bank_cargo_cashbag	Bank Money Bag	Cargo	Legendary	60000
+cargo_open_workbench_slot_1	Bench Vise	Cargo	Legendary	100000
+cargo_suitcase_2	Blue Suitcase	Cargo	Uncommon	25000
+drugs_bricket_1	Brick	Cargo	Common	120
+cargo_sell	Cargo	Cargo		0
+cargo_open_workbench_upgrade_speed_up_stat	Cargo opening speed boost	Cargo		0
+cargo_open_workbench_circular_saw_1	Cargo Saw	Cargo	Epic	45000
+cargo_exchange_workbench_upgrade_additional	Cargo Slot	Cargo		0
+cargo_open_workbench_upgrade_additional_slot_stat	Cargo Slot	Cargo		0
+cargo_open_workbench_1	Cargo Workbench	Cargo		0
+cargo_cashbag	Closed Money Bag	Cargo	Uncommon	25000
+collection_reward_cargo_2	Collection Crate	Cargo		0
+collection_reward_cargo	Collection Crate	Cargo	Uncommon	50000
+cargo_alcohol_grade_1	Contraband Cargo	Cargo	Uncommon	10000
+cargo_exchange_workbench_1	Contraband Workbench	Cargo	Uncommon	20000
+cargo_soft_crystal_1	Crystalline Concentrate	Cargo		0
+cargo_soft_crystal_2	Crystalline Concentrate	Cargo		0
+cargo_soft_crystal_3	Crystalline Concentrate	Cargo	Uncommon	10000
+lab_crystal_1	Crystalline Powder	Cargo	Uncommon	1000
+lab_crystal_2	Crystalline Powder	Cargo	Epic	2000
+lab_crystal_3	Crystalline Powder	Cargo	Legendary	4000
+electronics_box_1	Electronics	Cargo	Common	50
+cargo_electronics	Electronics Crate	Cargo	Epic	40000
+cargo_equip	Equipment Crate	Cargo	Epic	40000
+cargo_safe_legendary	Expensive Safe	Cargo	Exotic	200000
+cargo_statue	Golden Statue	Cargo	Legendary	250000
+cargo_charge_workbench_garden_bed	Grow Table	Cargo	Uncommon	30000
+cargo_bush_growing_1	Growing Bush	Cargo	Uncommon	20000
+cargo_hard_crystal_1	Hard Crystals	Cargo		0
+cargo_hard_crystal_2	Hard Crystals	Cargo		0
+cargo_hard_crystal_3	Hard Crystals	Cargo	Uncommon	30000
+bush_drugs_1	Harvest Package	Cargo	Uncommon	4000
+cargo_contraband_bag_2	Illegal Alcohol	Cargo		0
+cargo_contraband_bag_1	Illegal Electronics	Cargo		0
+cargo_charge_workbench_lab_freezer_1	Industrial Freezer	Cargo	Uncommon	15000
+cargo_charge_workbench_lab_freezer_2	Industrial Freezer	Cargo	Epic	30000
+cargo_charge_workbench_lab_freezer_3	Industrial Freezer	Cargo	Legendary	100000
+cargo_jewelry	Jewelry Box	Cargo	Epic	40000
+cargo_open_workbench_lab_table_1	Lab Table	Cargo	Uncommon	10000
+cargo_exchange_workbench_speedup_upgrade_1	Label Printer	Cargo	Uncommon	15000
+cargo_open_workbench_toolbox_1	Locksmith Tools	Cargo	Uncommon	20000
+cargo_bush_mature_1	Mature Bush	Cargo	Uncommon	30000
+cargo_medicine	Medications Crate	Cargo	Epic	40000
+cargo_drugbag_2	Perfect Powder Bag	Cargo	Legendary	60000
+cargo_open_workbench_plasma_cutter_1	Plasma Cargo Cutter	Cargo	Legendary	33200
+cargo_safe	Portable Safe	Cargo	Legendary	100000
+cargo_drugbag	Powder Bag	Cargo	Uncommon	25000
+cargo_alcohol_grade_2	Premium Cargo	Cargo	Epic	35000
+cargo_drugbag_1	Pure Powder Bag	Cargo	Epic	40000
+cargo_reagents_2	Quality Reagents	Cargo	Epic	30000
+collection_reward_cargo_3	Rare Collection Crate	Cargo	Epic	150000
+cargo_alcohol_grade_3	Rarity Cargo	Cargo	Legendary	40000
+reagent_cargo	Reagent Canisters	Cargo	Uncommon	20000
+cargo_suitcase_3	Red Suitcase	Cargo	Uncommon	25000
+cargo_exchange_workbench_upgrade_speedup	Repacking speed	Cargo		0
+cargo_box	Sealed Crate	Cargo		0
+cargo_carparts	Spare Parts Crate	Cargo	Epic	40000
+cargo_exchange_workbench_additional_slot	Tool Box	Cargo	Epic	150000
+collection_reward_cargo_4	Unique Collection Crate	Cargo	Legendary	500000
+valuable_cargo_1	Valuable Cargo	Cargo	Legendary	150000
+cargo_weapon_box_1	Weapon Box	Cargo		0
+cargo_suitcase	White Suitcase	Cargo	Uncommon	25000
+action_camera_1_cumulative	Action Camera	Cumulative items	Uncommon	5000
+cargo_manifest_1_cumulative	Cargo Sheet	Cumulative items	Uncommon	1500
+tablet_1_cumulative	Code Tablet	Cumulative items	Epic	25000
+deposit_box_1_cumulative	Deposit Box Keys	Cumulative items	Legendary	100000
+lab_flask_1_cumulative	Lab Flask Set	Cumulative items		0
+cumulative_charger_usb_rubber_ducky	Secured Computer	Cumulative items		0
+usb_1_cumulative	USB Hacking Tool	Cumulative items	Legendary	50000
+evict_plot_1	Eviction Right	Documents	Exotic	4000
+plot_sale_1	Land Plot Title	Documents	Uncommon	50000
+plot_sale_2	Land Plot Title	Documents	Epic	200000
+plot_sale_3	Land Plot Title	Documents	Legendary	1000000
+settlement_sale_1	Settlement Title	Documents	Uncommon	100000
+bedside_cabinet	Bedside Table	Furniture & objects		0
+window_blinds_target	Blinds	Furniture & objects		0
+cupboard	Cabinet	Furniture & objects		0
+cupboard_kitchen	Cabinet	Furniture & objects		0
+cop_salary_box	Confiscated Goods	Furniture & objects		0
+safe_close_panel_target	Control Panel	Furniture & objects		0
+safe_bank_deposit_box	Deposit Box	Furniture & objects		0
+door	Door	Furniture & objects		0
+cupboard_ambry	Dresser	Furniture & objects		0
+prison_escape_point	Exit	Furniture & objects		0
+rack_lever	Lever	Furniture & objects		0
+office_cabinet	Office Cabinet	Furniture & objects		0
+planning_board	Planning Board	Furniture & objects		0
+vehicle_loot	Roof Box	Furniture & objects		0
+roulette	Roulette	Furniture & objects		0
+safe	Safe	Furniture & objects		0
+cupboard_tool	Tool Cabinet	Furniture & objects		0
+undercarriage	Underbody	Furniture & objects		0
+safe_door_target	Vault	Furniture & objects		0
+door_window_target	Window	Furniture & objects		0
+flash_grenade_1	Flash Grenade	Grenades	Epic	25000
+frag_grenade_1	Frag Grenade	Grenades	Legendary	75000
+gas_grenade_1	Gas Grenade	Grenades	Legendary	15092
+smoke_grenade_1	Smoke Grenade	Grenades	Epic	50000
+wall_4	Concrete Fence	Home & plot	Legendary	200000
+wall_1	Farm Fence	Home & plot	Common	240
+storage_6	Large Nightstand	Home & plot	Epic	50000
+shelving_3	Large Rack	Home & plot	Epic	45000
+storage_3	Large Safe	Home & plot	Legendary	150000
+shelving_6	Large Security Cabinet	Home & plot	Legendary	130000
+home_3	Mansion	Home & plot	Legendary	600000
+storage_5	Medium Nightstand	Home & plot	Uncommon	30000
+shelving_2	Medium Rack	Home & plot	Uncommon	25000
+storage_2	Medium Safe	Home & plot	Epic	100000
+shelving_5	Medium Security Cabinet	Home & plot	Epic	90000
+wall_2	Mesh Fence	Home & plot	Uncommon	25000
+wall_3	Metal Fence	Home & plot	Epic	100000
+home_2	Small House	Home & plot	Epic	200000
+storage_4	Small Nightstand	Home & plot	Common	15000
+shelving_1	Small Rack	Home & plot	Common	12000
+storage_1	Small Safe	Home & plot	Uncommon	50000
+shelving_4	Small Security Cabinet	Home & plot	Uncommon	40000
+home_1	Trailer	Home & plot	Uncommon	4000
+idcard_key_1	ID Card	Keys	Exotic	8200
+vip_key_1	Keycard	Keys	Legendary	5620
+battle_pass_random_safe_key	Random Safe Key	Keys		0
+room_key_1	Room Key	Keys	Epic	2250
+safe_key_1	Safe Key	Keys	Uncommon	500
+yacht_key_1	Yacht Key	Keys	Exotic	2000000
+lab_quality_3	Chemical Converter	Laboratory	Legendary	150000
+item_cargo_production_workbench_1	Chemical Reactor	Laboratory		0
+item_cargo_production_workbench_2	Chemical Reactor	Laboratory		0
+item_cargo_production_workbench_3	Chemical Reactor	Laboratory		0
+table_cargo_production_workbench_1	Chemical Reactor	Laboratory		0
+table_cargo_production_workbench_2	Chemical Reactor	Laboratory		0
+table_cargo_production_workbench_3	Chemical Reactor	Laboratory	Uncommon	20000
+decoder_1	Decoder	Laboratory	Uncommon	1000
+decoder_3	Decoder	Laboratory	Legendary	40000
+decoder_2	Decoder	Laboratory	Epic	10000
+defense_module_1	Electronic Fuse	Laboratory	Uncommon	10000
+defense_module_2	Electronic Fuse	Laboratory	Epic	150000
+fan_1	Fan	Laboratory	Uncommon	100000
+fan_2	Fan	Laboratory		0
+fan_3	Fan	Laboratory		0
+lab_speed_1	Improved Evaporator	Laboratory	Epic	40000
+lab_quality_2	Industrial Thermometer	Laboratory	Epic	50000
+lab_slot_1	Laboratory Scales	Laboratory	Uncommon	15000
+lab_speed_2	Quality Refrigerant	Laboratory	Legendary	100000
+lab_quality_1	Reactor Engine	Laboratory		0
+uv_lamp_1	UV Lamp	Laboratory		0
+uv_lamp_2	UV Lamp	Laboratory		0
+uv_lamp_3	UV Lamp	Laboratory	Legendary	500000
+water_pump_1	Water Pump	Laboratory		0
+water_pump_2	Water Pump	Laboratory	Epic	200000
+water_pump_3	Water Pump	Laboratory		0
+afak_1	AFAK	Medicine	Uncommon	5000
+vial_5	Cosmetic Ampule	Medicine	Legendary	25216
+injector_1	Injector	Medicine	Epic	25000
+revive_item	Lucky Coupon	Medicine		0
+pharma_pack_1	Medications	Medicine	Common	50
+vial_6	Medicinal Ampule	Medicine	Epic	3136
+painkiller_1	Painkillers	Medicine	Uncommon	10000
+vial_7	Vial With Illegal Drug	Medicine	Uncommon	254
+vial_2	Vial With Liquid	Medicine	Epic	3290
+vial_4	Vial With Rare Medicine	Medicine	Uncommon	240
+vial_1	Vial With Supplements	Medicine	Uncommon	250
+vial_3	Vial With Vaccine	Medicine	Uncommon	170
+vendor_card	A Black Market legend. Can bribe anyone and arrange the delivery of any product.	Misc		0
+tattoo_set_0_grade_16	Bandit	Misc		0
+garbage_2	Broken Camera	Misc	Common	48
+garbage_3	Broken Laptop	Misc	Common	84
+garbage_4	Broken Toaster	Misc	Common	120
+skin_center_sample_offer	buletti thunder x bundle	Misc		0
+tattoo_set_0_grade_13	Chance	Misc		0
+item_cargo_production_workbench_upgrade_converter_1	Chemical Converter	Misc		0
+tattoo_set_0_grade_4	Criminality	Misc		0
+tattoo_set_0_grade_19	Crown	Misc		0
+tattoo_set_0_grade_18	Death	Misc		0
+tattoo_set_0_grade_14	Defiance	Misc		0
+tattoo_set_0_grade_21	Diamond	Misc		0
+tattoo_set_0_grade_5	Eagle	Misc		0
+tattoo_set_0_grade_9	Eagle	Misc		0
+tattoo_set_0_grade_2	Fearlessness	Misc		0
+tattoo_set_0_grade_8	Flame	Misc		0
+tattoo_set_0_grade_23	Freedom	Misc		0
+tattoo_set_0_grade_11	Heart	Misc		0
+item_cargo_production_workbench_upgrade_engine_1	Industrial Engine	Misc	Uncommon	10000
+item_cargo_production_workbench_upgrade_thermometer_1	Industrial Thermometer	Misc		0
+tattoo_set_0_grade_3	Joy	Misc		0
+tattoo_set_0_grade_24	Life Is A Game	Misc		0
+tattoo_set_0_grade_20	O.G.	Misc		0
+tattoo_set_0_grade_1	Path	Misc		0
+tattoo_set_0_grade_25	Power	Misc		0
+tattoo_set_0_grade_27	Prayer	Misc		0
+tattoo_set_0_grade_26	Revolvers	Misc		0
+tattoo_set_0_grade_12	Risk	Misc		0
+tattoo_set_0_grade_15	Smile	Misc		0
+tattoo_set_0_grade_7	Sorrow	Misc		0
+tattoo_unlock	Tattoo Artist	Misc		0
+tattoo_unlock_point	Tattoo Artist	Misc		0
+garbage_1	Trash	Misc	Common	10
+tattoo_set_0_grade_10	Trust	Misc		0
+tattoo_set_0	Trust No One	Misc		0
+vendor_tree_unknown_item	Unknown Item	Misc		0
+tattoo_set_0_grade_17	Vine	Misc		0
+banker_npc	Bank Employee	NPC		0
+laptop	Black Market	NPC		0
+strip_dancer_target	Dancer	NPC		0
+city_npc_grand_hotel	Jeenx	NPC		0
+barter_trader	Lenny	NPC		0
+city_npc_museum	Pshero	NPC		0
+settlement_npc_crime	Seller	NPC		0
+city_barter_trader	Suspicious Door	NPC		0
+city_npc_sheriff	Zachary	NPC		0
+city_npc_bank	Zeepeye	NPC		0
+collection_upgrade_1	Additional Collection	Plot buildings	Uncommon	25000
+atm	ATM	Plot buildings		0
+money_workbench_speedup_1	Banknote Counter	Plot buildings	Uncommon	10000
+car_garage_1	Car Garage	Plot buildings	Uncommon	10000
+watchtower_1	Car Lift	Plot buildings	Uncommon	5000
+meth_lab_1	Chemical Laboratory	Plot buildings	Epic	160000
+collection_table	Collection Table	Plot buildings	Uncommon	5000
+first_aid_cabinet_1	First Aid Cabinet	Plot buildings	Uncommon	5000
+narco_farm_1	Grow Room	Plot buildings	Epic	150000
+helicopter_garage_1	Helipad	Plot buildings	Legendary	200000
+car_garage_2	Large Car Garage	Plot buildings	Epic	40000
+money_workbench	Laundering Desk	Plot buildings		0
+collection_upgrade_2	Special Collection	Plot buildings	Epic	50000
+collection_upgrade_3	Unique Collection	Plot buildings	Legendary	100000
+storage_building_1	Warehouse	Plot buildings	Epic	130000
+workshop_building_1	Workshop	Plot buildings	Epic	125000
+defense_block	Access	Security		0
+clan_alarm_1	Alarm System	Security	Legendary	50000
+location_alarm_1	Alarm System	Security	Uncommon	15000
+personal_alarm_1	Alarm System	Security	Epic	25000
+defense_block_decoder_offense_stat	Breaching	Security		0
+defense_block_module_defense_stat	Defense	Security		0
+auto_flipper_1	Jammer	Tools	Exotic	64000
+car_police_radio_1	Police Radio	Tools	Legendary	200000
+police_radio_1	Police Radio	Tools	Epic	25000
+poker_cards_3	Ace's Dominion Deck	Valuables	Uncommon	236
+blade_2	Aeron Collectible Knife	Valuables	Uncommon	590
+car_device_1	Affordable Dashcam	Valuables	Uncommon	280
+car_trinket_2	Air Freshener	Valuables	Uncommon	180
+laptop_1	AIR-P Laptop	Valuables	Uncommon	380
+headphones_1	AIRHEADS Headphones	Valuables	Uncommon	230
+necklace_1	ALON GIA Necklace	Valuables	Uncommon	422
+ring_1	ALON GIA Ring	Valuables	Uncommon	258
+alcohol_13	Amber Shift Bottle	Valuables	Legendary	27140
+gemstone_5	Amethyst in Case	Valuables	Legendary	18800
+earrings_2	AMINA Earrings	Valuables	Legendary	33840
+ring_2	AMINA Ring	Valuables	Uncommon	344
+journal_2	AURORA MODE Magazine	Valuables	Uncommon	410
+poker_cards_4	Bad Habit Deck	Valuables	Epic	3156
+headphones_5	Beat Head Headphones	Valuables	Legendary	34716
+egg_faberge_1	BIG EGG #53	Valuables	Exotic	550000
+equipment_2	Binoculars	Valuables	Uncommon	470
+alcohol_1	Black Pirate Bottle	Valuables	Uncommon	306
+pharma_tools_4	Blood Pressure Monitor	Valuables	Epic	5176
+baseball_card_5	Bradley Sanderson Card	Valuables	Epic	3376
+condoms_1	Burex Condoms	Valuables	Uncommon	230
+burner_1	Camping Stove	Valuables	Uncommon	348
+drugs_6	Candy	Valuables	Legendary	23246
+car_parts_parts_7	Car Compressor	Valuables	Epic	4960
+car_parts_parts_2	Car Headlight	Valuables	Uncommon	330
+car_spare_parts_1	Car Parts	Valuables	Common	50
+car_trinket_3	Car Perfume	Valuables	Epic	2560
+car_device_5	Car Stereo	Valuables	Legendary	21280
+equip_carbine_1	Carabiner Set	Valuables	Common	50
+cash_1	Cash	Valuables	Uncommon	0
+cash_loot	Cash Pile	Valuables		0
+antique_set_1	Cheap Antiques	Valuables	Common	50
+car_device_4	Cheap Car Stereo	Valuables	Epic	4080
+drugs_5	Chewing Gum	Valuables	Epic	3164
+earrings_5	CHIPARDI Earrings	Valuables	Epic	6200
+necklace_5	CHIPARDI Necklace	Valuables	Uncommon	306
+camera_3	CIRCUM 360 Camera	Valuables	Epic	2496
+lighter_4	Clipper Lighter	Valuables	Epic	3176
+equipment_11	Collectible Multitool	Valuables	Legendary	30400
+toy_1	CollectiToy #1 Figure	Valuables	Uncommon	370
+toy_2	CollectiToy #2 Figure	Valuables	Uncommon	370
+toy_3	CollectiToy #3 Figure	Valuables	Epic	4986
+toy_4	CollectiToy #4 Figure	Valuables	Epic	4196
+toy_5	CollectiToy x TA	Valuables	Legendary	33896
+watch_2	CONSTERAN Watch	Valuables	Uncommon	276
+condoms_2	Context Condoms	Valuables	Uncommon	200
+antique_6	Copper Pitcher	Valuables	Uncommon	320
+jewelry_pouch_1	Costume Jewelry	Valuables	Common	150
+blade_4	Cyber Collectible Knife	Valuables	Epic	5248
+phone_2	D-MAX Smartphone	Valuables	Uncommon	190
+baseball_card_2	Damon Strickland Card	Valuables	Uncommon	210
+car_device_2	Dashcam	Valuables	Uncommon	440
+antique_1	Deity Statue	Valuables	Epic	4300
+pharma_tools_5	Dental Loupes	Valuables	Legendary	30620
+alcohol_3	Diamond Breeze Bottle	Valuables	Uncommon	330
+gemstone_1	Diamond in Case	Valuables	Exotic	200000
+comics_3	DIGITAL SOUL Comic Book	Valuables	Epic	5106
+headphones_3	DS MAX Headphones	Valuables	Epic	6916
+perfume_5	DUCHEE Perfume	Valuables	Legendary	20226
+car_parts_parts_4	DW-04	Valuables	Uncommon	246
+baseball_card_1	Eason McKinley Card	Valuables	Legendary	22556
+alcohol_6	Eclipse Bottle	Valuables	Epic	5116
+gemstone_4	Emerald in Case	Valuables	Legendary	18000
+camera_1	EOS 900 Camera	Valuables	Uncommon	156
+police_evidence_1	Evidence	Valuables	Epic	4000
+dildo_1	Exotic Tool	Valuables	Legendary	39976
+equipment_4	Field Ration	Valuables	Uncommon	716
+burner_2	Field Stove	Valuables	Epic	5220
+alcohol_7	Fine Wine Bottle	Valuables	Uncommon	312
+perfume_2	FLERS Perfume	Valuables	Uncommon	210
+phone_4	Flip Ring Smartphone	Valuables	Epic	2696
+fluffy_cuffs_1	Fluffy Handcuffs	Valuables	Epic	5776
+figurine	Fragile Figurine	Valuables	Uncommon	80
+console_4	G-Cube Console	Valuables	Epic	9956
+phone_1	G-FLOW Smartphone	Valuables	Uncommon	156
+pharma_tools_3	Glucometer	Valuables	Epic	3816
+gold_bar_1	Gold Bar	Valuables	Legendary	52000
+antique_2	Golden Cat Statue	Valuables	Epic	4666
+vinyl_2	Golden Disc	Valuables	Exotic	318180
+alcohol_5	Golden Jaguar Bottle	Valuables	Legendary	27700
+toaster_1	Goodhouse Toaster	Valuables	Common	198
+earrings_1	GUDDI Earrings	Valuables	Uncommon	276
+necklace_2	GUDDI Necklace	Valuables	Uncommon	342
+ring_3	GUDDI Ring	Valuables	Epic	4828
+car_trinket_1	Hanging Dice	Valuables	Uncommon	160
+alcohol_2	Happy Forester Bottle	Valuables	Epic	4590
+baseball_card_6	Harley Wanger Card	Valuables	Exotic	217320
+graphics_card_1	HD X900 Graphics Card	Valuables	Uncommon	590
+comics_1	HELGRIM Comic Book	Valuables	Uncommon	350
+burner_3	High-precision Stove	Valuables	Legendary	32904
+laptop_3	HUBRID Laptop	Valuables	Epic	6436
+blade_1	Imperial Collectible Knife	Valuables	Uncommon	504
+perfume_1	INFINITY Perfume	Valuables	Epic	2356
+camera_2	ISE S770 Camera	Valuables	Uncommon	210
+car_parts_parts_3	Jack	Valuables	Epic	4750
+poker_cards_5	Joker's Choice Deck	Valuables	Legendary	22556
+equipment_6	K9 Body Armor	Valuables	Legendary	52156
+comics_4	KAIRO Comic Book	Valuables	Epic	6690
+cigar_3	KeKe Cigarettes	Valuables	Uncommon	230
+console_1	Key-Ten-Do Console	Valuables	Uncommon	470
+alcohol_15	King’s Reserve Bottle	Valuables	Exotic	200000
+alcohol_12	Krystal Authority Bottle	Valuables	Legendary	23960
+alcohol_4	Krystal Light Bottle	Valuables	Uncommon	290
+perfume_4	LACROCAS Perfume	Valuables	Epic	3316
+equipment_1	Laser Rangefinder	Valuables	Uncommon	430
+lighter_2	Lerrou Lighter	Valuables	Uncommon	200
+drugs_2	Loose Leaves	Valuables	Uncommon	226
+wallet	Lost Wallet	Valuables	Uncommon	40
+lottery_ticket	Lottery Ticket	Valuables	Common	0
+cigar_1	Lucky Shot Cigarettes	Valuables	Uncommon	190
+condoms_4	LUX Condoms	Valuables	Epic	3566
+earrings_4	MAFFI Earrings	Valuables	Uncommon	398
+necklace_3	MAFFI Necklace	Valuables	Epic	4620
+ring_5	MAFFI Ring	Valuables	Epic	5078
+comics_5	MASK Comic Book	Valuables	Legendary	30180
+baseball_card_3	Maxwell Rivers Card	Valuables	Uncommon	216
+earrings_6	MEKASSI Earrings	Valuables	Epic	5790
+pharma_tools_2	Microscope	Valuables	Exotic	194620
+equipment_7	Modern Tactical Binoculars	Valuables	Legendary	26510
+journal_3	MONOLITH Magazine	Valuables	Epic	5956
+headphones_2	MS MIC Headphones	Valuables	Uncommon	346
+laptop_5	MSR PRO Laptop	Valuables	Exotic	204256
+poker_cards_2	Mystic Card Chronicles Deck	Valuables	Epic	2670
+blade_5	Nightfall Collectible Knife	Valuables	Legendary	27784
+watch_4	NURDAN Watch	Valuables	Epic	5688
+cigar_2	Old Huba Cigars	Valuables	Epic	5670
+alcohol_10	Old Pocket Bottle	Valuables	Epic	4760
+alcohol_9	Omega Bottle	Valuables	Uncommon	316
+headphones_4	OMEGA Headphones	Valuables	Epic	6264
+journal_5	OPALINE Magazine	Valuables	Legendary	32226
+pharma_tools_6	Ophthalmoscope	Valuables	Uncommon	206
+phone_3	P-Verse Smartphone	Valuables	Epic	3486
+picture_tube_1	Painting	Valuables	Uncommon	360
+package	Parcel	Valuables	Uncommon	240
+watch_3	PARDIN Watch	Valuables	Uncommon	366
+laptop_4	PD STATION Laptop	Valuables	Legendary	29556
+watch_1	PEGIUET Watch	Valuables	Uncommon	352
+necklace_6	PENARAI Necklace	Valuables	Legendary	30134
+watch_6	PENARAI Watch	Valuables	Epic	5232
+car_trinket_5	Pit Bull Bobblehead	Valuables	Legendary	20160
+vinyl_1	Platinum Disc	Valuables	Legendary	36936
+condoms_5	Playgirl Condoms	Valuables	Legendary	22960
+car_trinket_6	Plush Car Charm	Valuables	Exotic	192160
+poker_chips_1	Poker Chips	Valuables		0
+poker_cards_1	Poker Powerplay Deck	Valuables	Uncommon	170
+watch_5	POLEX Watch	Valuables	Legendary	32842
+equipment_12	Portable EW System	Valuables	Exotic	204260
+drugs_1	Powder	Valuables	Epic	4052
+equipment_5	Powerful Flashlight	Valuables	Epic	4016
+car_parts_parts_8	Premium Car Compressor	Valuables	Legendary	29760
+car_device_6	Premium Car Stereo	Valuables	Legendary	25680
+car_device_3	Premium Dashcam	Valuables	Epic	3520
+equipment_10	Premium Multitool	Valuables	Epic	2640
+ring_6	PRIDE Ring	Valuables	Legendary	34876
+cube	Puzzle	Valuables	Common	10
+car_trinket_4	Racer Keychain	Valuables	Epic	2200
+lighter_3	RedOlive Lighter	Valuables	Epic	2976
+necklace_4	REFIER Necklace	Valuables	Epic	5180
+equip_carbine_3	Reinforced Carabiner	Valuables	Epic	4380
+graphics_card_2	RG 7700 Graphics Card	Valuables	Epic	7110
+alcohol_11	Rosefield Bottle	Valuables	Epic	5360
+car_parts_parts_1	Royal Motors Emblem	Valuables	Legendary	17076
+gemstone_3	Ruby in Case	Valuables	Legendary	20000
+alcohol_8	Severka Bottle	Valuables	Uncommon	344
+blade_6	Shade Collectible Knife	Valuables	Exotic	199784
+lighter_5	SkyDragon Lighter	Valuables	Legendary	20820
+lighter_1	Snap-Snap Lighter	Valuables	Uncommon	236
+car_parts_parts_6	Spark Plugs	Valuables	Uncommon	280
+equip_carbine_2	Steel Carabiner	Valuables	Uncommon	410
+car_parts_parts_5	Steering Wheel	Valuables	Epic	5360
+antique_4	Stone Maiden Statue	Valuables	Legendary	27420
+blade_3	Streamline Collectible Knife	Valuables	Epic	5008
+drugs_4	Sugar	Valuables	Uncommon	284
+earrings_3	SUGI Earrings	Valuables	Uncommon	390
+ring_4	SUGI Ring	Valuables	Uncommon	398
+hairdryer_1	SuperDryer Hairdryer	Valuables	Epic	3700
+laptop_6	SUS VILO Laptop	Valuables	Epic	6896
+equipment_8	Tactical Binoculars	Valuables	Epic	3540
+equip_carbine_4	Tactical Carabiner	Valuables	Legendary	23200
+equipment_9	Tactical Multitool	Valuables	Uncommon	640
+comics_2	TADASHI Comic Book	Valuables	Uncommon	466
+equipment_3	Thermal Imager	Valuables	Epic	3360
+pharma_tools_1	Thermometer	Valuables	Uncommon	246
+gemstone_2	Topaz in Case	Valuables	Legendary	20800
+baseball_card_4	Trent Carver Card	Valuables	Epic	3120
+perfume_3	TRIO Perfume	Valuables	Uncommon	200
+phone_5	Tuver Phone	Valuables	Legendary	21390
+laptop_2	UTAB Laptop	Valuables	Uncommon	380
+alcohol_14	Velvet Dynasty Bottle	Valuables	Legendary	26160
+journal_4	VELVET RIOT Magazine	Valuables	Epic	4766
+journal_1	VERSIA Magazine	Valuables	Uncommon	436
+drugs_3	Vitamin E	Valuables	Uncommon	310
+ring_7	WISH Ring	Valuables	Exotic	320616
+antique_3	Wooden Figure	Valuables	Uncommon	286
+antique_5	Wooden Totem	Valuables	Uncommon	346
+console_2	X-STATION Console	Valuables	Uncommon	260
+console_5	X-STATION VR Console	Valuables	Legendary	28350
+condoms_3	Zipit Condoms	Valuables	Epic	2860
+console_3	ZTX Console	Valuables	Epic	5980
+buletti_soltempra	Buletti Soltempra	Vehicles	Exotic	2000000
+default_car	Car	Vehicles		0
+fukurou_tensa	Fukurou Tensa	Vehicles	Uncommon	50000
+default_helicopter	Helicopter	Vehicles		0
+police_car	Longhorn Guard	Vehicles		0
+longhorn_titan	Longhorn Titan	Vehicles	Epic	200000
+longhorn_van	Longhorn Van	Vehicles	Uncommon	50000
+longhorn_wild	Longhorn Wild	Vehicles	Legendary	500000
+romanov_r8	Romanov R8	Vehicles	Exotic	2000000
+royal_e	Royal E	Vehicles	Epic	200000
+royal_j	Royal J	Vehicles	Legendary	500000
+gunpowder_1	Basic Gunpowder Kit	Weapon maintenance	Uncommon	330
+weapon_cleaning_1	Gun Cleaning Kit	Weapon maintenance	Uncommon	370
+gun_grease_1	Gun Grease	Weapon maintenance	Uncommon	370
+weapon_cleaning_2	Professional Gun Cleaning Kit	Weapon maintenance	Epic	2950
+gun_grease_2	Professional Gun Grease	Weapon maintenance	Epic	3588
+gunpowder_3	Refined Gunpowder Kit	Weapon maintenance	Legendary	20000
+gunpowder_2	Standard Gunpowder Kit	Weapon maintenance	Epic	3600
+gun_grease_3	Synthetic Gun Grease	Weapon maintenance	Legendary	26444
+weapon_cleaning_3	Tactical Gun Cleaning Kit	Weapon maintenance	Legendary	34824
+weaponparts_box_1	Weapon Parts	Weapon maintenance	Common	50
+apscalar_m1	AP Scalar Mk1	Weapons	Legendary	400000
+apscalar_m2	AP Scalar Mk2	Weapons	Legendary	800000
+apscalar_m3	AP Scalar Mk3	Weapons	Legendary	1600000
+weapon_trinket_2	Ballistic Chronograph	Weapons	Epic	3566
+weapon_trinket_9	Ballistics Computer	Weapons	Epic	3970
+cb45_m1	CB45 Mk1	Weapons	Uncommon	15000
+cb45_m2	CB45 Mk2	Weapons	Uncommon	30000
+cb45_m3	CB45 Mk3	Weapons	Uncommon	60000
+weapon_trinket_8	Chronograph	Weapons		0
+dp9_m1	DP-9 Mk1	Weapons	Uncommon	120
+weapon_dp9_mk2	DP-9 Mk2	Weapons	Uncommon	25000
+drm14_m1	DRM-14 Mk1	Weapons	Legendary	200000
+weapon_drm14_mk2	DRM-14 Mk2	Weapons	Legendary	400000
+weapon_drm14_mk3	DRM-14 Mk3	Weapons	Legendary	800000
+weapon_trinket_3	Drone Controller	Weapons	Legendary	24890
+weapon_trinket_4	Gyroscope	Weapons	Uncommon	410
+harris500_m1	Harris 500 Mk1	Weapons	Uncommon	15000
+harris500_m2	Harris 500 Mk2	Weapons	Uncommon	30000
+harris500_m3	Harris 500 Mk3	Weapons	Uncommon	60000
+jp7_m1	JP-7 Mk1	Weapons	Epic	160000
+jp7_m2	JP-7 Mk2	Weapons	Epic	320000
+jp7_m3	JP-7 Mk3	Weapons	Epic	640000
+kl545_m1	KL-545 Mk1	Weapons	Uncommon	25000
+kl545_m2	KL-545 Mk2	Weapons	Uncommon	50000
+kl545_m3	KL-545 Mk3	Weapons	Uncommon	100000
+lbr44_m1	LBR-44 Mk1	Weapons	Epic	100000
+weapon_lbr44_mk2	LBR-44 Mk2	Weapons	Epic	200000
+m249_m2	LM 249 Mk2	Weapons	Exotic	83840
+mc10_m1	MC-10 Mk1	Weapons	Uncommon	15000
+mc10_m2	MC-10 Mk2	Weapons	Uncommon	30000
+mc10_m3	MC-10 Mk3	Weapons	Uncommon	60000
+weapon_trinket_5	Modern Compass	Weapons	Uncommon	490
+ordr12_m1	ORDR-12 Mk1	Weapons	Epic	160000
+ordr12_m2	ORDR-12 Mk2	Weapons	Epic	320000
+ordr12_m3	ORDR-12 Mk3	Weapons	Epic	640000
+pdw90_m1	PDW90 Mk1	Weapons	Epic	12320
+pdw90_m2	PDW90 Mk2	Weapons	Epic	12320
+pdw90_m3	PDW90 Mk3	Weapons	Epic	12320
+rc556_m1	RC 5.56 Mk1	Weapons	Epic	200000
+rc556_m2	RC 5.56 Mk2	Weapons	Epic	400000
+rc556_m3	RC 5.56 Mk3	Weapons	Epic	800000
+srreaper_m1	SR Reaper Mk1	Weapons	Legendary	400000
+srreaper_m2	SR Reaper Mk2	Weapons	Legendary	800000
+srreaper_m3	SR Reaper Mk3	Weapons	Legendary	1600000
+starh_m1	STAR-H Mk1	Weapons	Epic	100000
+starh_m2	STAR-H Mk2	Weapons	Epic	200000
+starh_m3	STAR-H Mk3	Weapons	Epic	400000
+weapon_trinket_1	Tactical Flashlight	Weapons	Uncommon	426
+weapon_trinket_6	Tactical Sensor	Weapons	Epic	5290
+tag12_m1	TAG-12K Mk1	Weapons	Legendary	400000
+weapon_tag12_mk2	TAG-12K Mk2	Weapons	Legendary	800000
+weapon_tag12_mk3	TAG-12K Mk3	Weapons	Legendary	1600000
+vulture_m1	Vulture 50 Mk1	Weapons	Legendary	300000
+vulture_m2	Vulture 50 Mk2	Weapons	Legendary	600000
+builder_cargo_exchange_workbench_additional_slot	Additional Slots	Workbenches & upgrades		0
+skill_cargo_open_workbench_0	Cargo Workbench	Workbenches & upgrades	Uncommon	5000
+skill_cargo_exchange_workbench_0	Contraband Workbench	Workbenches & upgrades		0
+builder_cargo_production_workbench_converter_slot	Converter	Workbenches & upgrades		0
+builder_cargo_charge_workbench_fan_slot	Fan	Workbenches & upgrades		0
+builder_first_aid_cabinet	First Aid Cabinet	Workbenches & upgrades		0
+builder_cargo_charge_workbench_slot	Garden Bed	Workbenches & upgrades		0
+builder_cargo_charge_workbench_glow_lamp_slot	Grow Lamp	Workbenches & upgrades		0
+builder_cargo_charge_workbench_evaporator_slot	Improved Evaporator	Workbenches & upgrades		0
+builder_cargo_charge_workbench_refrigerant_slot	Improved Refrigerant	Workbenches & upgrades		0
+builder_cargo_production_workbench_engine_slot	Industrial Engine	Workbenches & upgrades		0
+builder_cargo_charge_workbench_lab_freezer_slot	Industrial Freezer	Workbenches & upgrades		0
+builder_cargo_exchange_workbench_speedup	Label Printer	Workbenches & upgrades		0
+builder_defense_panel	Security System	Workbenches & upgrades		0
+builder_special_module_slot	Special Module	Workbenches & upgrades		0
+builder_cargo_production_workbench_thermometer_slot	Thermometer	Workbenches & upgrades		0
+builder_cargo_charge_workbench_water_pump_slot	Water Pump	Workbenches & upgrades		0

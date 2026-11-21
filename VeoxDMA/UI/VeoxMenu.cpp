@@ -1,15 +1,38 @@
 #include "pch.h"
+#include <fstream>
+#include <commdlg.h>
+
+// Native open/save dialog so a config can live anywhere, not only beside the exe.
+static std::wstring PickConfigPath(bool save)
+{
+	wchar_t path[MAX_PATH]{};
+	OPENFILENAMEW ofn{};
+	ofn.lStructSize = sizeof(ofn);
+	ofn.lpstrFilter = L"Loot filter config (*.json)\0*.json\0All files (*.*)\0*.*\0";
+	ofn.lpstrFile = path;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.lpstrDefExt = L"json";
+	ofn.lpstrTitle = save ? L"Export loot filter config" : L"Import loot filter config";
+	ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+	const BOOL ok = save ? GetSaveFileNameW(&ofn) : GetOpenFileNameW(&ofn);
+	return ok ? std::wstring(path) : std::wstring();
+}
+
+
+#pragma comment(lib, "comdlg32.lib")
 #include "VeoxMenu.h"
 #include "ConfigInstance.h"
 #include "ConfigFile.h"
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
+#include "Il2Cpp.h"
 #include "SkinChanger.h"
 #include "DeviceSession.h"
 #include "InputManager.h"
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../Esp/Radar.h"
+#include "../Esp/IconSprites.h"
 #include "../Overlay/Backdrop.h"
 #include "imgui_internal.h"
 #include "imgui_settings.h"
@@ -775,9 +798,20 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 	return changed;
 }
 
-bool ButtonRow(const char* label, const char* text, float width = 130.f, bool accent = false)
+// Compact button for a horizontal strip of actions.
+bool InlineButton(const char* text, float width, bool accent = false)
 {
-	if (label && *label && !Match(label)) return false;
+	if (accent) {
+		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.85f, 1.0f));
+		ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.53f, 0.95f, 1.0f));
+	}
+	const bool pressed = ImGui::Button(text, ImVec2(width, 26.f));
+	if (accent) ImGui::PopStyleColor(2);
+	return pressed;
+}
+
+bool ButtonRow(const char* label, const char* text, float width = 130.f, bool accent = false)
+{	if (label && *label && !Match(label)) return false;
 
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
 	// An empty label hashes to the window ID, which trips ImGui's
@@ -1245,199 +1279,776 @@ void DrawRadar()
 	ImGui::EndGroup();
 }
 
+// ---- loot filter item row ---------------------------------------------------
+// Multi-select for the loot filter list: click selects one row, ctrl-click
+// toggles a row, shift-click extends from the anchor. The quick actions act on
+// the selection when there is one, otherwise on the current category.
+static std::set<std::string> s_lfSelected;
+static std::string s_lfAnchor;
+static std::string s_lfRangeTo;
+static bool        s_lfRangeAdd = false;
+
+void LootItemRow(const LootFilter::ItemDef& def, ItemSettings& item)
+{
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+	ImGui::PushID(def.id);
+	// Two registries can list the same object under different categories, so the
+	// id alone is not a unique widget ID. The category joins it.
+	ImGui::PushID(static_cast<int>(def.category));
+
+	const ImGuiID rowId = window->GetID("##lr");
+	const ImVec2 p = window->DC.CursorPos;
+	const float w = ImGui::GetContentRegionAvail().x;
+	constexpr float rowH = 26.f;
+	const ImRect bb(p, p + ImVec2(w, rowH));
+
+	ImGui::ItemSize(bb);
+	if (!ImGui::ItemAdd(bb, rowId)) {
+		ImGui::PopID();
+		ImGui::PopID();
+		return;
+	}
+
+	bool hov, held;
+	bool pressed = ImGui::ButtonBehavior(bb, rowId, &hov, &held);
+	const ImVec2 mouse = ImGui::GetIO().MousePos;
+
+	ImDrawList* dl = window->DrawList;
+
+	if (hov)
+		dl->AddRectFilled(bb.Min, bb.Max, IM_COL32(255, 255, 255, 8), 3.f);
+	if (s_lfSelected.count(def.id))
+		dl->AddRectFilled(bb.Min, bb.Max, IM_COL32(70, 140, 255, 46), 3.f);
+
+	constexpr float toggleW = 36.f, toggleH = 18.f;
+	constexpr float distW = 48.f, styleW = 62.f, ctrlGap = 6.f;
+
+	const ImRect toggleRect(
+		ImVec2(p.x + w - toggleW, p.y + (rowH - toggleH) * 0.5f),
+		ImVec2(p.x + w, p.y + (rowH + toggleH) * 0.5f));
+	const ImRect distRect(
+		ImVec2(toggleRect.Min.x - ctrlGap - distW, p.y + 3.f),
+		ImVec2(toggleRect.Min.x - ctrlGap, p.y + rowH - 3.f));
+	const ImRect styleRect(
+		ImVec2(distRect.Min.x - ctrlGap - styleW, p.y + 3.f),
+		ImVec2(distRect.Min.x - ctrlGap, p.y + rowH - 3.f));
+
+	// Edits on a selected row apply to the whole selection.
+	const bool multiSel = s_lfSelected.size() > 1 && s_lfSelected.count(def.id) > 0;
+	auto applyToSelection = [&](auto&& fn) {
+		if (!multiSel) return;
+		for (const auto& id : s_lfSelected)
+			if (id != def.id) fn(ConfigInstance.LootFilter.GetItemMut(id.c_str()));
+	};
+
+	bool openFlags = false;
+	if (pressed) {
+		if (toggleRect.Contains(mouse)) {
+			item.visible = !item.visible;
+			if (multiSel) applyToSelection([&](ItemSettings& s) { s.visible = item.visible; });
+		}
+		else if (styleRect.Contains(mouse))
+			openFlags = true;
+		else {
+			// Row body: selection. Ctrl toggles, Shift extends, plain replaces.
+			const ImGuiIO& io = ImGui::GetIO();
+			if (io.KeyShift && !s_lfAnchor.empty()) {
+				s_lfRangeTo = def.id;
+				s_lfRangeAdd = io.KeyCtrl;
+			} else if (io.KeyCtrl) {
+				if (s_lfSelected.count(def.id)) s_lfSelected.erase(def.id);
+				else s_lfSelected.insert(def.id);
+				s_lfAnchor = def.id;
+			} else {
+				s_lfSelected.clear();
+				s_lfSelected.insert(def.id);
+				s_lfAnchor = def.id;
+			}
+		}
+	}
+
+	if (hov && distRect.Contains(mouse)) {
+		float wheel = ImGui::GetIO().MouseWheel;
+		if (wheel != 0.f) {
+			const int delta = (int)(wheel * 50.f);
+			auto adjustRange = [&](ItemSettings& s) {
+				s.maxDistance = ImClamp(s.maxDistance + delta, 0, 3000);
+				s.useGlobalDistance = s.maxDistance == 0;
+			};
+			adjustRange(item);
+			applyToSelection(adjustRange);
+		}
+	}
+
+	static std::map<ImGuiID, float> s_lrAnim;
+	float& ta = s_lrAnim[rowId];
+	ta = ImLerp(ta, item.visible ? 1.f : 0.f, ImGui::GetIO().DeltaTime * 14.f);
+
+	dl->AddRectFilled(toggleRect.Min, toggleRect.Max,
+		C(Mix(kTrack, kAccent, ta), 0.35f + 0.65f * ta), toggleH * 0.5f);
+	if (ta > 0.01f) {
+		dl->PushClipRect(toggleRect.Min, toggleRect.Max, true);
+		dl->AddShadowCircle(
+			ImVec2((toggleRect.Min.x + toggleRect.Max.x) * 0.5f,
+				(toggleRect.Min.y + toggleRect.Max.y) * 0.5f),
+			toggleH * 0.5f, C(kAccent, 0.30f * ta), 18.f, ImVec2(0, 0), 0);
+		dl->PopClipRect();
+	}
+	float kx = ImLerp(toggleRect.Min.x + 9.f, toggleRect.Max.x - 9.f, ta);
+	dl->AddCircleFilled(ImVec2(kx, (toggleRect.Min.y + toggleRect.Max.y) * 0.5f),
+		6.f, C(Mix(kTextDim, ImVec4(1, 1, 1, 1), ta)));
+
+	bool distHov = hov && distRect.Contains(mouse);
+	dl->AddRectFilled(distRect.Min, distRect.Max,
+		C(ImVec4(1, 1, 1, distHov ? 0.07f : 0.04f)), 4.f);
+	char distBuf[16];
+	if (item.useGlobalDistance || item.maxDistance <= 0)
+		strcpy_s(distBuf, "Inherited");
+	else
+		std::snprintf(distBuf, sizeof(distBuf), "%dm", item.maxDistance);
+	float dtw = TextW(font::inter_medium_small, distBuf);
+	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+		ImVec2(distRect.Min.x + (distW - dtw) * 0.5f,
+			RowTextY(p.y, rowH, font::inter_medium_small)),
+		C(distHov ? kText : kTextDim), distBuf);
+
+	// Render-mode chip: a compact read-out of the flag set that opens the
+	// checkbox popup. I=icon N=name D=dot M=distance in metres $=price.
+	bool styleHov = hov && styleRect.Contains(mouse);
+	dl->AddRectFilled(styleRect.Min, styleRect.Max,
+		C(ImVec4(1, 1, 1, styleHov ? 0.09f : 0.05f)), 4.f);
+	char flagBuf[32] = "";
+	if (item.Has(LootFilter::RenderIcon))     strcat_s(flagBuf, "I ");
+	if (item.Has(LootFilter::RenderName))     strcat_s(flagBuf, "N ");
+	if (item.Has(LootFilter::RenderDot))      strcat_s(flagBuf, "D ");
+	if (item.Has(LootFilter::RenderDistance)) strcat_s(flagBuf, "M ");
+	if (item.Has(LootFilter::RenderPrice))    strcat_s(flagBuf, "$");
+	if (!flagBuf[0])                          strcpy_s(flagBuf, "-");
+	float stw = TextW(font::inter_medium_small, flagBuf);
+	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+		ImVec2(styleRect.Min.x + (styleW - stw) * 0.5f,
+			RowTextY(p.y, rowH, font::inter_medium_small)),
+		C(styleHov ? kText : kTextDim), flagBuf);
+
+	if (openFlags)
+		ImGui::OpenPopup("##lf_flags");
+	if (ImGui::BeginPopup("##lf_flags")) {
+		bool changed = false;
+		ImGui::TextUnformatted(def.displayName);
+		ImGui::Separator();
+		for (int i = 0; i < (int)std::size(LootFilter::RenderFlagBits); ++i) {
+			const std::uint8_t bit = LootFilter::RenderFlagBits[i];
+			// No price mined for this item: offering the toggle would only
+			// produce an empty line, so it is not shown at all.
+			if (bit == LootFilter::RenderPrice && def.price == 0)
+				continue;
+			bool on = item.Has(bit);
+			if (ImGui::Checkbox(LootFilter::RenderFlagNames[i], &on)) {
+				item.Set(bit, on);
+				changed = true;
+			}
+		}
+		ImGui::Separator();
+		{
+			char nameBuf[96]{};
+			std::strncpy(nameBuf, item.customName.c_str(), sizeof(nameBuf) - 1);
+			ImGui::SetNextItemWidth(220.f);
+			if (ImGui::InputTextWithHint("##custom_name", "custom name (blank = catalog)",
+					nameBuf, sizeof(nameBuf)))
+				item.customName = nameBuf;
+		}
+		ImGui::Checkbox("Use global distance", &item.useGlobalDistance);
+		ImGui::BeginDisabled(item.useGlobalDistance);
+		ImGui::SetNextItemWidth(120.f);
+		ImGui::SliderInt("Range", &item.maxDistance, 0, 3000, "%d m");
+		ImGui::EndDisabled();
+		ImGui::Separator();
+		if (ImGui::Button("All")) {
+			for (std::uint8_t bit : LootFilter::RenderFlagBits) item.Set(bit, true);
+			changed = true;
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("None")) { item.flags = 0; changed = true; }
+		ImGui::SameLine();
+		if (ImGui::Button("Default")) {
+			item.flags = def.iconSprite[0]
+				? (std::uint8_t)(LootFilter::RenderIcon | LootFilter::RenderName | LootFilter::RenderPrice)
+				: (std::uint8_t)(LootFilter::RenderDot | LootFilter::RenderName | LootFilter::RenderPrice);
+			changed = true;
+		}
+		if (changed && multiSel) {
+			const std::uint8_t applied = item.flags;
+			applyToSelection([&](ItemSettings& s) { s.flags = applied; });
+		}
+		ImGui::EndPopup();
+	}
+
+	uint32_t argb = LootFilter::RarityColors[static_cast<int>(def.rarity)];
+	ImU32 rarityCol = (argb & 0xFF00FF00u) | ((argb >> 16) & 0xFFu) | ((argb & 0xFFu) << 16);
+	dl->AddCircleFilled(ImVec2(p.x + 6.f, p.y + rowH * 0.5f), 4.f, rarityCol);
+
+	float nameStartX = p.x + 18.f;
+	if (def.iconSprite[0] && ImGui::IsRectVisible(bb.Min, bb.Max)) {
+		// Decode lazily and only for rows that are actually on screen: the
+		// catalog is 500+ rows and every miss is a PNG decode.
+		auto icon = IconSprites::Get(def.iconSprite);
+		if (icon.srv) {
+			constexpr float iconSz = 20.f;
+			float iconX = p.x + 16.f;
+			float iconY = p.y + (rowH - iconSz) * 0.5f;
+			dl->AddImage(reinterpret_cast<ImTextureID>(icon.srv),
+				ImVec2(iconX, iconY), ImVec2(iconX + iconSz, iconY + iconSz));
+			nameStartX = iconX + iconSz + 4.f;
+		}
+	}
+
+	dl->PushClipRect(ImVec2(p.x, p.y), ImVec2(styleRect.Min.x - 8.f, p.y + rowH), true);
+	const ImU32 nameColour = C(Mix(kTextDim, kText, item.visible ? 0.8f : 0.f));
+	dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
+		ImVec2(nameStartX, RowTextY(p.y, rowH, font::inter_medium_widget)),
+		nameColour, def.displayName);
+
+	// Which category the row belongs to, so "All Items" is readable at a glance.
+	{
+		const float nameW = TextW(font::inter_medium_widget, def.displayName);
+		const char* catName = LootFilter::CategoryNames[(int)def.category];
+		dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
+			ImVec2(nameStartX + nameW + 8.f, RowTextY(p.y, rowH, font::inter_medium_small)),
+			C(ImVec4(kTextDim.x, kTextDim.y, kTextDim.z, 0.75f)), catName);
+	}
+	dl->PopClipRect();
+
+	ImGui::PopID();
+	ImGui::PopID();
+}
+
+static bool CaseContains(const char* haystack, const char* needle)
+{
+	if (!needle[0]) return true;
+	for (const char* h = haystack; *h; h++) {
+		const char* hp = h;
+		const char* np = needle;
+		while (*hp && *np) {
+			char a = *hp; if (a >= 'A' && a <= 'Z') a += 32;
+			char b = *np; if (b >= 'A' && b <= 'Z') b += 32;
+			if (a != b) break;
+			hp++; np++;
+		}
+		if (!*np) return true;
+	}
+	return false;
+}
+
+// Func<int>: the delegate closes over the value, so the number sits in the target.
+static bool ReadFuncIntValue(std::uintptr_t object, std::uintptr_t funcOffset, int& out)
+{
+	if (object <= 0x10000) return false;
+	const std::uintptr_t fn = RobRunMemory::ReadPtr(object + funcOffset);
+	if (fn <= 0x10000) return false;
+	const std::uintptr_t closure = RobRunMemory::ReadPtr(fn + 0x20);   // delegate target, not method_ptr
+	if (closure <= 0x10000) return false;
+	for (const std::uintptr_t off : { (std::uintptr_t)0x10, (std::uintptr_t)0x18 }) {
+		const int value = RobRunMemory::ReadInt32(closure + off);
+		if (value >= 10 && value < 100000000) { out = value; return true; }
+	}
+	return false;
+}
+
+// SellPriceModifierFunc (0x80) -> InventoryItemSellPriceModifier -> Modifier (float).
+// This is the factor between the buy price and what the game actually pays.
+
+// Which resale column applies to an item. The registry holds one float per
+// family; the families are few and named, so the mapping is explicit rather
+// than a guess: everything else stays on Common.
+static std::string CaseInsensitiveLower(const std::string& value);
+
+static float ResaleModifierFor(const std::string& id, const std::unordered_map<std::string, float>& modifiers,
+	std::string& usedName)
+{
+	auto pick = [&](const char* name) -> float {
+		const auto hit = modifiers.find(name);
+		if (hit != modifiers.end()) { usedName = name; return hit->second; }
+		return 0.f;
+	};
+	const std::string lower = CaseInsensitiveLower(id);
+	if (lower.find("badge") != std::string::npos) { const float v = pick("PoliceBadge"); if (v > 0.f) return v; }
+	if (lower.find("radio") != std::string::npos) { const float v = pick("CopRadio"); if (v > 0.f) return v; }
+	if (lower.find("drill") != std::string::npos) { const float v = pick("Drills"); if (v > 0.f) return v; }
+	if (lower.find("key") != std::string::npos) { const float v = pick("Keys"); if (v > 0.f) return v; }
+	if (lower.find("gas") != std::string::npos && lower.find("grenade") != std::string::npos) {
+		const float v = pick("GasGrenades"); if (v > 0.f) return v;
+	}
+	if (lower.find("cash") != std::string::npos || lower.find("money") != std::string::npos) {
+		const float v = pick("Cash"); if (v > 0.f) return v;
+	}
+	const float common = pick("Common");
+	return common;
+}
+
+static std::string CaseInsensitiveLower(const std::string& value)
+{
+	std::string out;
+	out.reserve(value.size());
+	for (unsigned char c : value) out.push_back((char)std::tolower(c));
+	return out;
+}
+
+static bool ReadSellModifier(std::uintptr_t desc, float& out)
+{
+	if (desc <= 0x10000) return false;
+	const std::uintptr_t fn = RobRunMemory::ReadPtr(desc + 0x80);
+	if (fn <= 0x10000) return false;
+	const std::uintptr_t closure = RobRunMemory::ReadPtr(fn + 0x20);
+	if (closure <= 0x10000) return false;
+	for (const std::uintptr_t off : { (std::uintptr_t)0x10, (std::uintptr_t)0x18 }) {
+		const std::uintptr_t modifier = RobRunMemory::ReadPtr(closure + off);
+		if (modifier <= 0x10000) continue;
+		const int bits = RobRunMemory::ReadInt32(modifier + 0x20);
+		float value = 0.f;
+		std::memcpy(&value, &bits, sizeof(value));
+		if (std::isfinite(value) && value > 0.f && value <= 20.f) { out = value; return true; }
+	}
+	return false;
+}
+
+static bool CaseInsensitiveEquals(const std::string& a, const std::string& b)
+{
+	if (a.size() != b.size()) return false;
+	for (std::size_t i = 0; i < a.size(); ++i)
+		if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+	return true;
+}
+
 void DrawLootFilter()
 {
-	static char s_itemSearch[128] = "";
+	static std::string s_dumpNote;
+	static std::string s_configNote;
+	auto& lf = ConfigInstance.LootFilter;
+
+	if (lf.Items.empty())
+		lf.InitDefaults();
+
+	static char s_search[128] = "";
 	static bool s_searchInit = false;
 	if (!s_searchInit) {
-		std::strncpy(s_itemSearch, ConfigInstance.LootFilter.ItemSearchQuery.c_str(), sizeof(s_itemSearch) - 1);
+		std::strncpy(s_search, lf.SearchQuery.c_str(), sizeof(s_search) - 1);
 		s_searchInit = true;
 	}
 
-	if (!g_singleColumn)
+	const float fullW = ImGui::GetContentRegionAvail().x;
+	BeginCard("LOOT FILTER", fullW);
+
+	ToggleRow("Enable Loot Filter", &lf.Enabled);
+
+	// ---- sizing ------------------------------------------------------------
+	// Settings in two columns: a table, not nested child windows.
+	if (ImGui::BeginTable("##lf_columns", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_PadOuterX)) {
+	ImGui::TableNextColumn();
+	SectionLabel("PER-CATEGORY SIZING");
+	static const std::array<const char*, (std::size_t)LootFilter::Category::COUNT> kSizeCats = [] {
+		std::array<const char*, (std::size_t)LootFilter::Category::COUNT> a{};
+		for (std::size_t i = 0; i < a.size(); ++i) a[i] = LootFilter::CategoryNames[i];
+		return a;
+	}();
+	ComboRow("Category##size", &lf.SizingCategory, kSizeCats.data(),
+		(int)kSizeCats.size(), 190.f);
 	{
-		const float r1 = ImMax(CardNaturalHeight("LOOT FILTER & MAP"), CardNaturalHeight("PRICE CUSTOMIZATION"));
-		const float r2 = ImMax(CardNaturalHeight("VALUABLES & CASH"), CardNaturalHeight("CONTAINERS & SAFES"));
-		const float r3 = ImMax(CardNaturalHeight("WORLD & LOOSE LOOT"), CardNaturalHeight("ITEM SEARCH & QUICK PRESETS"));
-		ForceCardHeight("LOOT FILTER & MAP", r1);
-		ForceCardHeight("PRICE CUSTOMIZATION", r1);
-		ForceCardHeight("VALUABLES & CASH", r2);
-		ForceCardHeight("CONTAINERS & SAFES", r2);
-		ForceCardHeight("WORLD & LOOSE LOOT", r3);
-		ForceCardHeight("ITEM SEARCH & QUICK PRESETS", r3);
+		const int sel = std::clamp(lf.SizingCategory, 0, (int)kSizeCats.size() - 1);
+		auto& sizing = lf.Sizing[(std::size_t)sel];
+		SliderIntRow("Icon Size", &sizing.IconSize, 0, 256, " px  (0 = global)");
+		SliderIntRow("Font Size", &sizing.FontSize, 0, 40, " px  (0 = global)");
+		SliderFloatRow("Dot Size", &sizing.DotSize, 0.f, 12.f, " px  (0 = global)");
+		SliderIntRow("Max Distance", &sizing.MaxDistance, 0, 3000, " m  (0 = per item)");
 	}
 
-	// Column 1
-	ImGui::BeginGroup();
+	SectionLabel("DISPLAY & MAP");
+	ToggleRow("Show on Map", &lf.ShowOnMap);
+	ToggleRow("Show on Minimap", &lf.ShowOnMinimap);
+	ToggleRow("Hide Empty Containers", &lf.HideEmpty);
+	ToggleRow("Hide Looted Items", &lf.FilterTakenLoot);
+	ToggleRow("Read Vehicle/Table Inventories", &lf.ReadVehicleInventories);
+	SliderFloatRow("Base Dot Size", &lf.BaseDotSize, 1.5f, 8.f, " px");
+	SliderIntRow("ESP Font Size", &lf.FontSize, 8, 32, " px");
+	SliderIntRow("ESP Icon Size", &lf.IconSize, 16, 256, " px");
+	SliderIntRow("Global Max Distance", &lf.GlobalMaxDistance, 0, 3000, " m");
+
+	ImGui::TableNextColumn();
+	SectionLabel("VALUE TIERS");
+	ToggleRow("Filter By Min Price", &lf.FilterByMinPrice);
+	SliderIntRow("Min Price", &lf.MinPrice, 0, 50000, " $");
+	SliderIntRow("High Value >=", &lf.HighValueThreshold, 1000, 100000, " $");
+	ColorRow("High Value Color", lf.HighValueColour);
+	ToggleRow("High Value Pulse", &lf.HighValuePulse);
+	SliderIntRow("Mid Value >=", &lf.MidValueThreshold, 500, 50000, " $");
+	ColorRow("Mid Value Color", lf.MidValueColour);
+	ColorRow("Standard Color", lf.StandardColour);
 	{
-		BeginCard("LOOT FILTER & MAP", kCardW);
-		ToggleRow("Enable Loot Filter", &ConfigInstance.LootFilter.Enabled);
-		ToggleRow("Show All Loot on Map", &ConfigInstance.LootFilter.ShowAllOnMap);
-		ToggleRow("Show Loot on Minimap", &ConfigInstance.LootFilter.ShowOnMinimap);
-		ToggleRow("Show Loot Names", &ConfigInstance.LootFilter.ShowNames);
-		ToggleRow("Show Loot Prices", &ConfigInstance.LootFilter.ShowPrices);
-		ToggleRow("Show Distance", &ConfigInstance.LootFilter.ShowDistance);
-		ToggleRow("Hide Empty Containers", &ConfigInstance.LootFilter.HideEmpty);
-
-		SectionLabel("DISPLAY METRICS");
-		SliderFloatRow("Base Dot Size", &ConfigInstance.LootFilter.BaseDotSize, 1.5f, 8.0f, "px");
-		SliderIntRow("Max Distance", &ConfigInstance.LootFilter.MaxDistance, 0, 3000, "m");
-		EndCard();
-
-		BeginCard("VALUABLES & CASH", kCardW);
-		ColorToggleRow("Cash Loot Nodes", &ConfigInstance.LootFilter.CashNodes, ConfigInstance.LootFilter.CashNodeColour);
-		ColorToggleRow("Settlement Cash", &ConfigInstance.LootFilter.SettlementCash, ConfigInstance.LootFilter.SettlementCashColour);
-		ColorToggleRow("Money Workbenches", &ConfigInstance.LootFilter.MoneyWorkbenches, ConfigInstance.LootFilter.MoneyWorkbenchColour);
-		ColorToggleRow("Collection Tables", &ConfigInstance.LootFilter.CollectionTables, ConfigInstance.LootFilter.CollectionTableColour);
-		ColorToggleRow("Dropped Bags", &ConfigInstance.LootFilter.DroppedBags, ConfigInstance.LootFilter.DroppedBagColour);
-		ColorToggleRow("Crypto Workbenches", &ConfigInstance.LootFilter.CryptoWorkbenches, ConfigInstance.LootFilter.CryptoColour);
-		ColorToggleRow("Drug Labs", &ConfigInstance.LootFilter.DrugLabs, ConfigInstance.LootFilter.DrugLabColour);
-		EndCard();
-
-		BeginCard("WORLD & LOOSE LOOT", kCardW);
-		ColorToggleRow("Static Loot", &ConfigInstance.LootFilter.StaticLoot, ConfigInstance.LootFilter.StaticLootColour);
-		ColorToggleRow("Random Loot", &ConfigInstance.LootFilter.RandomLoot, ConfigInstance.LootFilter.RandomLootColour);
-		ColorToggleRow("Vehicle Loot", &ConfigInstance.LootFilter.VehicleLoot, ConfigInstance.LootFilter.VehicleLootColour);
-		ColorToggleRow("Cargo Drops", &ConfigInstance.LootFilter.Cargo, ConfigInstance.LootFilter.CargoColour);
-		ColorToggleRow("Plot Loot", &ConfigInstance.LootFilter.PlotLoot, ConfigInstance.LootFilter.PlotLootColour);
-		ColorToggleRow("Furniture Loot", &ConfigInstance.LootFilter.FurnitureLoot, ConfigInstance.LootFilter.FurnitureLootColour);
-		ColorToggleRow("Building Loot", &ConfigInstance.LootFilter.BuildingLoot, ConfigInstance.LootFilter.BuildingLootColour);
-		EndCard();
+		const float gap = 6.f;
+		const float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f - 2.f;
+		if (InlineButton("Export config", bw)) {
+			const std::wstring path = PickConfigPath(true);
+			if (path.empty()) {
+				s_configNote = "Export cancelled";
+			} else {
+				std::ofstream out(path.c_str(), std::ios::trunc);
+				if (out) {
+					out << lf.ExportJson();
+					s_configNote = "Exported config";
+				} else {
+					s_configNote = "Could not write that file";
+				}
+			}
+		}
+		ImGui::SameLine(0.f, gap);
+		if (InlineButton("Reset filter", bw, true)) {
+			lf.ResetToDefaults();
+			s_configNote = "Loot filter reset to defaults";
+		}
+		ImGui::SameLine(0.f, gap);
+		if (InlineButton("Import config", bw)) {
+			const std::wstring path = PickConfigPath(false);
+			if (path.empty()) {
+				s_configNote = "Import cancelled";
+			} else {
+				std::ifstream in(path.c_str());
+				if (in) {
+					std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+					s_configNote = lf.ImportJson(text)
+						? "Imported config"
+						: "That file contained no known keys";
+				} else {
+					s_configNote = "Could not read that file";
+				}
+			}
+		}
+		ImGui::SameLine(0.f, gap);
+		if (InlineButton("Paste filter code", bw)) {
+			const char* clip = ImGui::GetClipboardText();
+			if (clip && *clip) lf.ImportCode(clip);
+		}
 	}
-	ImGui::EndGroup();
 
-	if (!g_singleColumn)
-		ImGui::SameLine(0.f, kGap);
-
-	// Column 2
-	ImGui::BeginGroup();
+	SectionLabel("LIVE STATS");
 	{
-		BeginCard("PRICE CUSTOMIZATION", kCardW);
-		Note("Customize loot visibility and color tiers based on dollar value.");
-		ToggleRow("Filter By Min Price", &ConfigInstance.LootFilter.FilterByMinPrice);
-		SliderIntRow("Min Loot Price", &ConfigInstance.LootFilter.MinPrice, 0, 50000, " $");
-
-		SectionLabel("VALUE TIERS & HIGHLIGHTS");
-		SliderIntRow("High Value >= ", &ConfigInstance.LootFilter.HighValueThreshold, 1000, 100000, " $");
-		ColorRow("High Value Color", ConfigInstance.LootFilter.HighValueColour);
-		ToggleRow("High Value Ring Indicator", &ConfigInstance.LootFilter.HighValuePulse);
-
-		SliderIntRow("Mid Value >= ", &ConfigInstance.LootFilter.MidValueThreshold, 500, 50000, " $");
-		ColorRow("Mid Value Color", ConfigInstance.LootFilter.MidValueColour);
-		ColorRow("Standard Loot Color", ConfigInstance.LootFilter.StandardColour);
-		EndCard();
-
-		BeginCard("CONTAINERS & SAFES", kCardW);
-		ColorToggleRow("Safe Doors", &ConfigInstance.LootFilter.SafeDoors, ConfigInstance.LootFilter.SafeDoorColour);
-		ColorToggleRow("Storage Boxes", &ConfigInstance.LootFilter.StorageBoxes, ConfigInstance.LootFilter.StorageBoxColour);
-		ColorToggleRow("Shelving", &ConfigInstance.LootFilter.Shelving, ConfigInstance.LootFilter.ShelvingColour);
-		ColorToggleRow("Plot Containers", &ConfigInstance.LootFilter.PlotContainers, ConfigInstance.LootFilter.PlotContainerColour);
-		ColorToggleRow("Loot Nodes", &ConfigInstance.LootFilter.LootNodes, ConfigInstance.LootFilter.LootNodeColour);
-		ColorToggleRow("General Containers", &ConfigInstance.LootFilter.Containers, ConfigInstance.LootFilter.ContainerColour);
-		ColorToggleRow("Vehicle Trunks", &ConfigInstance.LootFilter.VehicleTrunks, ConfigInstance.LootFilter.VehicleTrunkColour);
-		ColorToggleRow("First Aid Cabinets", &ConfigInstance.LootFilter.FirstAid, ConfigInstance.LootFilter.FirstAidColour);
-		EndCard();
-
-		BeginCard("ITEM SEARCH & QUICK PRESETS", kCardW);
-		SectionLabel("FILTER BY NAME / ITEM");
-		ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-		if (ImGui::InputTextWithHint("##loot_filter_search", "Search item or container name...", s_itemSearch, sizeof(s_itemSearch))) {
-			ConfigInstance.LootFilter.ItemSearchQuery = s_itemSearch;
-		}
-
-		SectionLabel("QUICK PRESETS");
-		if (ButtonRow("", "Show All Loot", 140.f, true)) {
-			ConfigInstance.LootFilter.ShowAllOnMap = true;
-			ConfigInstance.LootFilter.FilterByMinPrice = false;
-			ConfigInstance.LootFilter.MinPrice = 0;
-			s_itemSearch[0] = '\0';
-			ConfigInstance.LootFilter.ItemSearchQuery.clear();
-			ConfigInstance.LootFilter.CashNodes = true;
-			ConfigInstance.LootFilter.SettlementCash = true;
-			ConfigInstance.LootFilter.MoneyWorkbenches = true;
-			ConfigInstance.LootFilter.CollectionTables = true;
-			ConfigInstance.LootFilter.DroppedBags = true;
-			ConfigInstance.LootFilter.CryptoWorkbenches = true;
-			ConfigInstance.LootFilter.DrugLabs = true;
-			ConfigInstance.LootFilter.SafeDoors = true;
-			ConfigInstance.LootFilter.StorageBoxes = true;
-			ConfigInstance.LootFilter.Shelving = true;
-			ConfigInstance.LootFilter.PlotContainers = true;
-			ConfigInstance.LootFilter.LootNodes = true;
-			ConfigInstance.LootFilter.Containers = true;
-			ConfigInstance.LootFilter.VehicleTrunks = true;
-			ConfigInstance.LootFilter.FirstAid = true;
-			ConfigInstance.LootFilter.StaticLoot = true;
-			ConfigInstance.LootFilter.RandomLoot = true;
-			ConfigInstance.LootFilter.VehicleLoot = true;
-			ConfigInstance.LootFilter.Cargo = true;
-			ConfigInstance.LootFilter.PlotLoot = true;
-			ConfigInstance.LootFilter.FurnitureLoot = true;
-			ConfigInstance.LootFilter.BuildingLoot = true;
-		}
-
-		if (ButtonRow("", "Only Cash & Bags", 140.f)) {
-			ConfigInstance.LootFilter.Containers = false;
-			ConfigInstance.LootFilter.LootNodes = false;
-			ConfigInstance.LootFilter.StorageBoxes = false;
-			ConfigInstance.LootFilter.Shelving = false;
-			ConfigInstance.LootFilter.PlotContainers = false;
-			ConfigInstance.LootFilter.VehicleTrunks = false;
-			ConfigInstance.LootFilter.StaticLoot = false;
-			ConfigInstance.LootFilter.RandomLoot = false;
-			ConfigInstance.LootFilter.VehicleLoot = false;
-			ConfigInstance.LootFilter.PlotLoot = false;
-			ConfigInstance.LootFilter.FurnitureLoot = false;
-			ConfigInstance.LootFilter.BuildingLoot = false;
-			ConfigInstance.LootFilter.CashNodes = true;
-			ConfigInstance.LootFilter.SettlementCash = true;
-			ConfigInstance.LootFilter.MoneyWorkbenches = true;
-			ConfigInstance.LootFilter.CollectionTables = true;
-			ConfigInstance.LootFilter.DroppedBags = true;
-			ConfigInstance.LootFilter.SafeDoors = true;
-			ConfigInstance.LootFilter.CryptoWorkbenches = true;
-			ConfigInstance.LootFilter.DrugLabs = true;
-		}
-
-		if (ButtonRow("", "High Value ($10k+)", 140.f)) {
-			ConfigInstance.LootFilter.FilterByMinPrice = true;
-			ConfigInstance.LootFilter.MinPrice = 10000;
-		}
-
-		SectionLabel("LIVE MAP LOOT STATS");
 		const auto snapshot = RobRunReader::GetSnapshot();
 		if (snapshot && snapshot->world && snapshot->world->valid) {
-			int totalCash = 0;
-			int highestCash = 0;
-			int cashCount = 0;
-			int containerCount = 0;
-			int looseCount = 0;
+			int totalCash = 0, highestCash = 0, cashCount = 0;
 			for (const auto& ent : snapshot->world->entities) {
 				if (ent.hasCashAmount && ent.cashAmount > 0) {
 					totalCash += ent.cashAmount;
 					cashCount++;
 					if (ent.cashAmount > highestCash) highestCash = ent.cashAmount;
 				}
-				if (ent.kind == RobRunWorld::Kind::Container || ent.kind == RobRunWorld::Kind::SafeDoor ||
-					ent.kind == RobRunWorld::Kind::StorageBox || ent.kind == RobRunWorld::Kind::Shelving ||
-					ent.kind == RobRunWorld::Kind::PlotContainer || ent.kind == RobRunWorld::Kind::LootNode) {
-					containerCount++;
-				} else if (ent.kind == RobRunWorld::Kind::StaticLoot || ent.kind == RobRunWorld::Kind::RandomLoot ||
-					ent.kind == RobRunWorld::Kind::Loot || ent.kind == RobRunWorld::Kind::VehicleLoot ||
-					ent.kind == RobRunWorld::Kind::DroppedBag) {
-					looseCount++;
-				}
 			}
-			Note("Detected Entities: %zu on map", snapshot->world->entities.size());
-			Note("Valuables on Map: %d (Total: $%s)", cashCount, FormatCash(totalCash).c_str());
-			Note("Top Value Spot: $%s", FormatCash(highestCash).c_str());
-			Note("Containers: %d | Loose Loot: %d", containerCount, looseCount);
+			Note("Entities: %zu | Cash sources: %d ($%s)",
+				snapshot->world->entities.size(), cashCount, FormatCash(totalCash).c_str());
+			Note("Top value: $%s", FormatCash(highestCash).c_str());
 		} else {
-			Note("No world snapshot yet. In raid, live stats will appear here.");
+			Note("No world snapshot. Live stats appear in-raid.");
 		}
-		EndCard();
+	ImGui::EndTable();
 	}
-	ImGui::EndGroup();
+	}
+
+	// ---- filter + list -----------------------------------------------------
+	SectionLabel("ITEMS");
+	static const std::array<const char*, (std::size_t)LootFilter::Category::COUNT + 1> kCatLabels = [] {
+		std::array<const char*, (std::size_t)LootFilter::Category::COUNT + 1> a{};
+		a[0] = "All Items";
+		for (std::size_t i = 1; i < a.size(); ++i)
+			a[i] = LootFilter::CategoryNames[i - 1];
+		return a;
+	}();
+	ComboRow("Category", &lf.SelectedCategory, kCatLabels.data(), (int)kCatLabels.size(), 190.f);
+
+	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+	if (ImGui::InputTextWithHint("##lf_search", "Search items...", s_search, sizeof(s_search)))
+		lf.SearchQuery = s_search;
+
+	auto inCategory = [&](const LootFilter::ItemDef& def) {
+		return lf.SelectedCategory <= 0 ||
+			static_cast<int>(def.category) == lf.SelectedCategory - 1;
+	};
+	{
+		const bool hasSelection = !s_lfSelected.empty();
+		constexpr int kSlots = 5;
+		const float gap = 5.f;
+		const float bw = (ImGui::GetContentRegionAvail().x - gap * (kSlots - 1)) / kSlots - 2.f;
+		auto slot = [&](int index) { if (index > 0) ImGui::SameLine(0.f, gap); };
+
+		slot(0);
+		if (InlineButton("Show Category", bw, true)) {
+			for (const auto& def : LootFilter::kItemCatalog)
+				if (inCategory(def)) lf.GetItemMut(def.id).visible = true;
+		}
+		slot(1);
+		if (InlineButton("Hide Category", bw)) {
+			for (const auto& def : LootFilter::kItemCatalog)
+				if (inCategory(def)) lf.GetItemMut(def.id).visible = false;
+		}
+		ImGui::BeginDisabled(!hasSelection);
+		slot(2);
+		if (InlineButton("Show Selected", bw)) {
+			for (const auto& id : s_lfSelected) lf.GetItemMut(id.c_str()).visible = true;
+		}
+		slot(3);
+		if (InlineButton("Hide Selected", bw)) {
+			for (const auto& id : s_lfSelected) lf.GetItemMut(id.c_str()).visible = false;
+		}
+		slot(4);
+		if (InlineButton("Clear Selection", bw)) {
+			s_lfSelected.clear();
+			s_lfAnchor.clear();
+		}
+		ImGui::EndDisabled();
+	}
+
+	static const char* kSortLabels[] = {
+		"Name  >  Rarity", "Rarity  >  Name", "Price  >  High to Low"
+	};
+	ComboRow("Sort", &lf.SortMode, kSortLabels, (int)std::size(kSortLabels), 190.f);
+
+	static const char* kPriceLabels[] = { "Sell price", "Buy price", "Unlock price" };
+	ComboRow("Price shown", &lf.PriceMode, kPriceLabels, (int)std::size(kPriceLabels), 190.f);
+
+	static const char* kAuthorityLabels[] = {
+		"1 - lowest", "2", "3", "4", "5 - highest"
+	};
+	int authorityIndex = std::clamp(lf.AuthorityLevel - 1, 0, 4);
+	if (ComboRow("Authority level", &authorityIndex, kAuthorityLabels, 5, 190.f))
+		lf.AuthorityLevel = authorityIndex + 1;
+
+	std::vector<const LootFilter::ItemDef*> shown;
+	shown.reserve(256);
+	for (const auto& def : LootFilter::kItemCatalog) {
+		if (lf.SelectedCategory > 0 &&
+			static_cast<int>(def.category) != lf.SelectedCategory - 1)
+			continue;
+		if (s_search[0] && !CaseContains(def.displayName, s_search))
+			continue;
+		shown.push_back(&def);
+	}
+
+	std::sort(shown.begin(), shown.end(), [&](const LootFilter::ItemDef* a, const LootFilter::ItemDef* b) {
+		switch (std::clamp(lf.SortMode, 0, 2)) {
+		case 1:
+			if (a->rarity != b->rarity) return a->rarity < b->rarity;
+			return std::string_view(a->displayName) < std::string_view(b->displayName);
+		case 2:
+			if (a->price != b->price) return a->price > b->price;
+			return std::string_view(a->displayName) < std::string_view(b->displayName);
+		default:
+			{
+				const int cmp = std::string_view(a->displayName).compare(std::string_view(b->displayName));
+				if (cmp != 0) return cmp < 0;
+				return a->rarity < b->rarity;
+			}
+		}
+	});
+
+	if (!ImGui::GetIO().WantTextInput &&
+		ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A, false)) {
+		for (const auto* def : shown) s_lfSelected.insert(def->id);
+		s_lfAnchor = shown.empty() ? std::string() : shown.front()->id;
+	}
+
+	{
+		int enabled = 0;
+		for (const auto* def : shown)
+			if (lf.IsItemVisible(def->id)) enabled++;
+		Note("%d shown | %d enabled | %d selected", (int)shown.size(), enabled,
+			(int)s_lfSelected.size());
+	}
+
+	for (const auto* def : shown)
+		LootItemRow(*def, lf.GetItemMut(def->id));
+
+	if (shown.empty())
+		Note("No items match the current filter.");
+
+	// Bottom of ITEMS: dump the price picture to a file to hand back.
+	{
+		static std::string s_configNote;
+	static bool s_flagsMigrated = false;
+		const float gap = 8.f;
+		const float bw = (ImGui::GetContentRegionAvail().x - gap) * 0.5f - 2.f;
+		if (InlineButton("Dump item prices", bw, true)) {
+			wchar_t exePath[MAX_PATH]{};
+			GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+			std::wstring dir(exePath);
+			const std::size_t slash = dir.find_last_of(L"\\/");
+			if (slash != std::wstring::npos) dir.resize(slash + 1);
+			const std::wstring path = dir + L"item-prices-dump.tsv";
+
+			std::ofstream out(path.c_str(), std::ios::trunc);
+			if (out) {
+				out << "# VeoxDMA price dump - hand this file back so the table can be completed.\n";
+				out << "# id\tname\tcategory\trarity\tcatalog_price\tbuy_price\tsell_base\n";
+
+				// The registry holds one static PER ITEM, built at launch, so this
+				// lists every item the build knows - not just what is on the map.
+				int registryRows = 0;
+				std::unordered_map<std::string, std::pair<int, int>> prices;
+				std::unordered_map<std::string, float> modifiers;
+				{
+					const std::uintptr_t mClass = Il2Cpp::FindClassByName("InventoryItemSellPriceModifiers");
+					if (mClass > 0x10000) {
+						const std::uintptr_t mStatics = Il2Cpp::StaticFields(mClass);
+						if (mStatics > 0x10000) {
+							for (const auto& mf : Il2Cpp::Fields(mClass, false)) {
+								if (mf.offset <= 0) continue;
+								const std::uintptr_t entry = RobRunMemory::ReadPtr(mStatics + (std::uintptr_t)mf.offset);
+								if (entry <= 0x10000) continue;
+								const int bits = RobRunMemory::ReadInt32(entry + 0x20);
+								float value = 0.f;
+								std::memcpy(&value, &bits, sizeof(value));
+								if (!std::isfinite(value) || value <= 0.f || value > 20.f) continue;
+								std::string name = mf.name;
+								const std::size_t close = name.find('>');
+								if (!name.empty() && name[0] == '<') name = name.substr(1, close == std::string::npos ? std::string::npos : close - 1);
+								modifiers[name] = value;
+							}
+						}
+					}
+				}
+				const std::uintptr_t klass = Il2Cpp::FindClassByName("InventoryItemDescriptions");
+				if (klass > 0x10000) {
+					const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
+					if (statics > 0x10000) {
+						for (const auto& field : Il2Cpp::Fields(klass, false)) {
+							if (field.offset <= 0) continue;
+							const std::uintptr_t desc = RobRunMemory::ReadPtr(
+								statics + (std::uintptr_t)field.offset);
+							if (desc <= 0x10000) continue;
+
+							std::wstring wideId;
+							if (!RobRunMemory::ReadString(RobRunMemory::ReadPtr(desc + 0x10), wideId))
+								continue;
+							const std::string id = RobRunMemory::WideToUtf8(wideId);
+							if (id.empty() || id.size() > 64) continue;
+
+							int basePrice = 0, sellPrice = 0;
+							ReadFuncIntValue(desc, 0x78, basePrice);
+							ReadFuncIntValue(desc, 0x88, sellPrice);
+							if (basePrice <= 0 && sellPrice <= 0) continue;
+							prices[id] = { basePrice, sellPrice };
+							registryRows++;
+						}
+					}
+				}
+
+				// Live entity values as a cross-check for anything the registry missed.
+				std::unordered_map<std::string, int> liveSell;
+				if (const auto snapshot = RobRunReader::GetSnapshot()) {
+					if (snapshot->world && snapshot->world->valid) {
+						for (const auto& ent : snapshot->world->entities) {
+							if (ent.hasValue && ent.value > 0 && !ent.label.empty())
+								liveSell[ent.label] = ent.value;
+						}
+					}
+				}
+
+				for (const auto& def : LootFilter::kItemCatalog) {
+					int basePrice = 0, sellPrice = 0;
+					auto hit = prices.find(def.id);
+					if (hit == prices.end()) {
+						for (const auto& kv : prices) {
+							if (CaseInsensitiveEquals(kv.first, def.id)) { hit = prices.find(kv.first); break; }
+						}
+					}
+					if (hit != prices.end()) { basePrice = hit->second.first; sellPrice = hit->second.second; }
+					if (sellPrice <= 0) {
+						for (const auto& kv : liveSell) {
+							if (CaseInsensitiveEquals(kv.first, def.id)) { sellPrice = kv.second; break; }
+						}
+					}
+					out << def.id << '\t' << def.displayName << '\t'
+						<< LootFilter::CategoryNames[(int)def.category] << '\t'
+						<< LootFilter::RarityNames[(int)def.rarity] << '\t'
+						<< def.price << '\t' << basePrice << '\t' << sellPrice << '\n';
+				}
+				// Sell modifiers live in their own registry: Common, Keys, Drills,
+				// GasGrenades, Cash and friends, each with the float that turns a
+				// buy price into what the game pays.
+				out << "\n# sell modifier\tvalue\n";
+				const std::uintptr_t modifierClass =
+					Il2Cpp::FindClassByName("InventoryItemSellPriceModifiers");
+				int modifierRows = 0;
+				if (modifierClass > 0x10000) {
+					const std::uintptr_t modifierStatics = Il2Cpp::StaticFields(modifierClass);
+					if (modifierStatics > 0x10000) {
+						for (const auto& field : Il2Cpp::Fields(modifierClass, false)) {
+							if (field.offset <= 0) continue;
+							const std::uintptr_t entry = RobRunMemory::ReadPtr(
+								modifierStatics + (std::uintptr_t)field.offset);
+							if (entry <= 0x10000) continue;
+							const int bits = RobRunMemory::ReadInt32(entry + 0x20);
+							float value = 0.f;
+							std::memcpy(&value, &bits, sizeof(value));
+							if (!std::isfinite(value) || value <= 0.f || value > 20.f) continue;
+							out << field.name << '\t' << value << '\n';
+							modifierRows++;
+						}
+					}
+				}
+				out.flush();
+				// Authority ladder: the sell price is base * (1 + modifier), so the
+				// modifiers are what turn one base number into a price per level.
+				out << "\n# authority level\tpoints_required\tcargo_modifier\tloot_modifier\n";
+				const std::uintptr_t ladderClass =
+					Il2Cpp::FindClassByName("RobberAuthorityLevelDescriptions");
+				int ladderRows = 0;
+				if (ladderClass > 0x10000) {
+					const std::uintptr_t ladderStatics = Il2Cpp::StaticFields(ladderClass);
+					if (ladderStatics > 0x10000) {
+						for (const auto& field : Il2Cpp::Fields(ladderClass, false)) {
+							if (field.offset <= 0) continue;
+							const std::uintptr_t level = RobRunMemory::ReadPtr(
+								ladderStatics + (std::uintptr_t)field.offset);
+							if (level <= 0x10000) continue;
+							const int points = RobRunMemory::ReadInt32(level + 0x28);
+							const int cargoBits = RobRunMemory::ReadInt32(level + 0x2C);
+							const int lootBits = RobRunMemory::ReadInt32(level + 0x30);
+							float cargoMod = 0.f, lootMod = 0.f;
+							std::memcpy(&cargoMod, &cargoBits, sizeof(cargoMod));
+							std::memcpy(&lootMod, &lootBits, sizeof(lootMod));
+							if (!std::isfinite(cargoMod) || !std::isfinite(lootMod)) continue;
+							if (std::fabs(cargoMod) > 100.f || std::fabs(lootMod) > 100.f) continue;
+							out << field.name << '\t' << points << '\t'
+								<< cargoMod << '\t' << lootMod << '\n';
+							ladderRows++;
+						}
+					}
+				}
+				out.flush();
+				s_configNote = "Wrote " + std::to_string(LootFilter::kItemCount) + " catalog rows, "
+					+ std::to_string(registryRows) + " from the item registry, " + std::to_string(ladderRows) + " authority levels, " + std::to_string(modifierRows) + " sell modifiers -> item-prices-dump.tsv";
+			} else {
+				s_configNote = "Could not write item-prices-dump.tsv";
+			}
+		}
+		ImGui::SameLine(0.f, gap);
+		if (InlineButton("Copy filter code", bw)) ImGui::SetClipboardText(lf.ExportCode().c_str());
+		if (!s_dumpNote.empty())
+			Note("%s", s_dumpNote.c_str());
+	}
+
+	if (!s_lfRangeTo.empty()) {
+		int a = -1, b = -1;
+		for (int i = 0; i < (int)shown.size(); ++i) {
+			if (shown[i]->id == s_lfAnchor) a = i;
+			if (shown[i]->id == s_lfRangeTo) b = i;
+		}
+		if (a >= 0 && b >= 0) {
+			if (!s_lfRangeAdd) s_lfSelected.clear();
+			const int lo = (std::min)(a, b), hi = (std::max)(a, b);
+			for (int i = lo; i <= hi; ++i)
+				s_lfSelected.insert(shown[i]->id);
+		}
+		s_lfRangeTo.clear();
+	}
+
+	EndCard();
 }
 
 void DrawAim()

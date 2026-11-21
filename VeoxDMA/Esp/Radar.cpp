@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Radar.h"
 #include "EspDraw.h"
+#include "IconSprites.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
@@ -217,6 +218,10 @@ struct LootRenderInfo {
 	ImU32 colour = IM_COL32(255, 255, 255, 255);
 	float dotSize = 3.5f;
 	bool hasHighValueRing = false;
+	bool showDot = true;
+	LootFilter::Category category = LootFilter::Category::Misc;
+	ImU32 textColour = IM_COL32(235, 235, 235, 240);
+	std::string icon;             // catalogue sprite stem, empty when the row has none
 	std::string text;
 };
 
@@ -224,11 +229,13 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 {
 	const auto& lf = ConfigInstance.LootFilter;
 
-	// Check if this is a vehicle (vehicles are handled separately by radar vehicle settings)
-	if (ent.kind == RobRunWorld::Kind::Car || ent.kind == RobRunWorld::Kind::Helicopter ||
-		ent.kind == RobRunWorld::Kind::Vehicle) {
+	// Vehicles have their own radar toggle when the filter is off; with the
+	// filter on they resolve through the catalogue like any other entity.
+	const bool isVehicle = ent.kind == RobRunWorld::Kind::Car ||
+		ent.kind == RobRunWorld::Kind::Helicopter ||
+		ent.kind == RobRunWorld::Kind::Vehicle;
+	if (!lf.Enabled && isVehicle)
 		return false;
-	}
 
 	if (!lf.Enabled) {
 		// Fallback to legacy Radar/World toggles when LootFilter is disabled
@@ -286,136 +293,45 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 		return true;
 	}
 
-	// 1. Distance check
+	// 1. Resolve the catalog entry and its per-item settings
+	const LootFilter::ItemDef* itemDef = lf.FindItemForEntity(ent.kind, ent.label);
+	if (!itemDef)
+		return false;
+
+	const ItemSettings& item = lf.GetItem(itemDef->id);
+	if (!item.visible)
+		return false;
+
+	// 2. Distance check — per-item limit clamped by the global limit (0 = unlimited)
 	float distance = 0.f;
 	if (haveLocalPos) {
 		const float dx = ent.position.x - localPos.x;
 		const float dy = ent.position.y - localPos.y;
 		const float dz = ent.position.z - localPos.z;
 		distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-		if (lf.MaxDistance > 0 && distance > (float)lf.MaxDistance)
+
+		int maxDistance = item.useGlobalDistance ? lf.GlobalMaxDistance : item.maxDistance;
+		if (maxDistance <= 0) maxDistance = (std::max)(lf.GlobalMaxDistance, 0);
+		const int catMax = lf.ResolvedMaxDistance(itemDef->category);
+		if (catMax > 0 && (item.useGlobalDistance || item.maxDistance <= 0))
+			maxDistance = catMax;
+		if (lf.GlobalMaxDistance > 0)
+			maxDistance = (maxDistance > 0)
+				? (std::min)(maxDistance, lf.GlobalMaxDistance)
+				: lf.GlobalMaxDistance;
+		if (maxDistance > 0 && distance > (float)maxDistance)
 			return false;
 	}
 
-	// 2. Empty container check
-	if (lf.HideEmpty && ent.hasEmptyFlag && ent.empty)
+	// 3. Empty container check - only rows that opted into HideEmpty
+	if (lf.HideEmpty && itemDef->hideWhenEmpty && ent.hasEmptyFlag && ent.empty)
 		return false;
 
-	// 3. Category enable & base colour
-	bool categoryEnabled = false;
-	D2D1::ColorF categoryColour = lf.StandardColour;
-	float baseSize = lf.BaseDotSize;
+	// 4. Base colour and dot size from the per-item settings
+	ImU32 finalCol = ColorToImU32(item.color);
+	float baseSize = lf.ResolvedDotSize(itemDef->category);
 
-	switch (ent.kind) {
-	case RobRunWorld::Kind::CashLootNode:
-		categoryEnabled = lf.CashNodes;
-		categoryColour = lf.CashNodeColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::SettlementCash:
-		categoryEnabled = lf.SettlementCash;
-		categoryColour = lf.SettlementCashColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::MoneyWorkbench:
-		categoryEnabled = lf.MoneyWorkbenches;
-		categoryColour = lf.MoneyWorkbenchColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::CollectionTable:
-		categoryEnabled = lf.CollectionTables;
-		categoryColour = lf.CollectionTableColour;
-		break;
-	case RobRunWorld::Kind::DroppedBag:
-		categoryEnabled = lf.DroppedBags;
-		categoryColour = lf.DroppedBagColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::CryptoWorkbench:
-		categoryEnabled = lf.CryptoWorkbenches;
-		categoryColour = lf.CryptoColour;
-		break;
-	case RobRunWorld::Kind::DrugWorkbench:
-		categoryEnabled = lf.DrugLabs;
-		categoryColour = lf.DrugLabColour;
-		baseSize += 1.0f;
-		break;
-
-	case RobRunWorld::Kind::SafeDoor:
-		categoryEnabled = lf.SafeDoors;
-		categoryColour = lf.SafeDoorColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::StorageBox:
-		categoryEnabled = lf.StorageBoxes;
-		categoryColour = lf.StorageBoxColour;
-		break;
-	case RobRunWorld::Kind::Shelving:
-		categoryEnabled = lf.Shelving;
-		categoryColour = lf.ShelvingColour;
-		break;
-	case RobRunWorld::Kind::PlotContainer:
-		categoryEnabled = lf.PlotContainers;
-		categoryColour = lf.PlotContainerColour;
-		break;
-	case RobRunWorld::Kind::LootNode:
-		categoryEnabled = lf.LootNodes;
-		categoryColour = lf.LootNodeColour;
-		break;
-	case RobRunWorld::Kind::Container:
-		categoryEnabled = lf.Containers;
-		categoryColour = lf.ContainerColour;
-		break;
-	case RobRunWorld::Kind::VehicleTrunk:
-		categoryEnabled = lf.VehicleTrunks;
-		categoryColour = lf.VehicleTrunkColour;
-		break;
-	case RobRunWorld::Kind::FirstAidCabinet:
-		categoryEnabled = lf.FirstAid;
-		categoryColour = lf.FirstAidColour;
-		break;
-
-	case RobRunWorld::Kind::StaticLoot:
-		categoryEnabled = lf.StaticLoot;
-		categoryColour = lf.StaticLootColour;
-		break;
-	case RobRunWorld::Kind::RandomLoot:
-	case RobRunWorld::Kind::Loot:
-		categoryEnabled = lf.RandomLoot;
-		categoryColour = lf.RandomLootColour;
-		break;
-	case RobRunWorld::Kind::VehicleLoot:
-		categoryEnabled = lf.VehicleLoot;
-		categoryColour = lf.VehicleLootColour;
-		break;
-	case RobRunWorld::Kind::Cargo:
-		categoryEnabled = lf.Cargo;
-		categoryColour = lf.CargoColour;
-		baseSize += 0.5f;
-		break;
-	case RobRunWorld::Kind::PlotLoot:
-		categoryEnabled = lf.PlotLoot;
-		categoryColour = lf.PlotLootColour;
-		break;
-	case RobRunWorld::Kind::FurnitureLoot:
-		categoryEnabled = lf.FurnitureLoot;
-		categoryColour = lf.FurnitureLootColour;
-		break;
-	case RobRunWorld::Kind::BuildingLoot:
-		categoryEnabled = lf.BuildingLoot;
-		categoryColour = lf.BuildingLootColour;
-		break;
-
-	default:
-		categoryEnabled = lf.ShowAllOnMap;
-		categoryColour = lf.StandardColour;
-		break;
-	}
-
-	if (!categoryEnabled)
-		return false;
-
-	// 4. Price filter
+	// 5. Price filter
 	if (lf.FilterByMinPrice && lf.MinPrice > 0) {
 		if (ent.hasCashAmount) {
 			if (ent.cashAmount < lf.MinPrice)
@@ -426,18 +342,17 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 		}
 	}
 
-	// 5. Item Search Query
-	if (!lf.ItemSearchQuery.empty()) {
+	// 6. Item search query
+	if (!lf.SearchQuery.empty()) {
 		std::string hay = ent.label;
-		std::string needle = lf.ItemSearchQuery;
+		std::string needle = lf.SearchQuery;
 		std::transform(hay.begin(), hay.end(), hay.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 		std::transform(needle.begin(), needle.end(), needle.begin(), [](unsigned char c) { return (char)std::tolower(c); });
 		if (hay.find(needle) == std::string::npos)
 			return false;
 	}
 
-	// 6. Value tiering & highlighting
-	ImU32 finalCol = ColorToImU32(categoryColour);
+	// 7. Value tiering & highlighting
 	bool highValueRing = false;
 
 	if (ent.hasCashAmount) {
@@ -451,24 +366,45 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 		}
 	}
 
-	// 7. Label text
-	std::string text = ent.label;
-	if (lf.ShowPrices && ent.hasCashAmount) {
-		text += " | $" + FormatCash(ent.cashAmount);
-		if (ent.kind == RobRunWorld::Kind::MoneyWorkbench && ent.cleanCash > 0 && ent.dirtyCash > 0) {
-			text += " (C:$" + FormatCash(ent.cleanCash) + " D:$" + FormatCash(ent.dirtyCash) + ")";
+	// 8. Label text, gated by the per-item render flags
+	std::string text;
+	const bool wantName  = item.Has(LootFilter::RenderName);
+	const bool wantPrice = item.Has(LootFilter::RenderPrice);
+	const bool wantDist  = item.Has(LootFilter::RenderDistance);
+	if (wantName || wantDist) {
+		if (wantName)
+			text = ent.label;
+		if (wantPrice && ent.hasCashAmount) {
+			if (!text.empty())
+				text += " | ";
+			text += "$" + FormatCash(ent.cashAmount);
+			if (ent.kind == RobRunWorld::Kind::MoneyWorkbench && ent.cleanCash > 0 && ent.dirtyCash > 0) {
+				text += " (C:$" + FormatCash(ent.cleanCash) + " D:$" + FormatCash(ent.dirtyCash) + ")";
+			}
+		} else if (wantName && !lf.HideEmpty && ent.hasEmptyFlag) {
+			text += ent.empty ? " [empty]" : " [loot]";
 		}
-	} else if (!lf.HideEmpty && ent.hasEmptyFlag) {
-		text += ent.empty ? " [empty]" : " [loot]";
-	}
-	if (lf.ShowDistance && haveLocalPos) {
-		text += " [" + std::to_string((int)distance) + "m]";
+		if (wantDist && haveLocalPos) {
+			if (!text.empty()) text += " ";
+			text += "[" + std::to_string((int)distance) + "m]";
+		}
 	}
 
 	out.show = true;
 	out.colour = finalCol;
 	out.dotSize = baseSize;
 	out.hasHighValueRing = highValueRing;
+	out.showDot = item.Has(LootFilter::RenderDot);
+	out.category = itemDef->category;
+	out.textColour = RarityColorU32(itemDef->rarity);
+	out.icon.clear();
+	if (item.Has(LootFilter::RenderIcon)) {
+		// Vehicles label themselves with their exact model+paint id.
+		if (isVehicle && !ent.label.empty() && IconSprites::Get(ent.label.c_str()).srv)
+			out.icon = ent.label;
+		else if (itemDef->iconSprite[0])
+			out.icon = itemDef->iconSprite;
+	}
 	out.text = std::move(text);
 	return true;
 }
@@ -662,14 +598,12 @@ void Draw()
 				ImU32 dotCol = IM_COL32(255, 255, 255, 200);
 				float dotSize = 3.f;
 
-				if (ent.kind == RobRunWorld::Kind::Car || ent.kind == RobRunWorld::Kind::Helicopter ||
-					ent.kind == RobRunWorld::Kind::Vehicle) {
-					if (cfg.ShowVehicles) {
-						show = true;
-						dotCol = IM_COL32(120, 190, 255, 230);
-						dotSize = 4.f;
-					}
-				} else if (ConfigInstance.LootFilter.Enabled) {
+				const bool isVehicle = ent.kind == RobRunWorld::Kind::Car ||
+					ent.kind == RobRunWorld::Kind::Helicopter ||
+					ent.kind == RobRunWorld::Kind::Vehicle;
+
+				if (ConfigInstance.LootFilter.Enabled) {
+					// One switchboard: vehicles resolve through the catalogue too.
 					if (ConfigInstance.LootFilter.ShowOnMinimap) {
 						LootRenderInfo lootInfo;
 						if (EvaluateLootEntity(ent, localPos, haveLocal, lootInfo)) {
@@ -677,6 +611,12 @@ void Draw()
 							dotCol = lootInfo.colour;
 							dotSize = lootInfo.dotSize;
 						}
+					}
+				} else if (isVehicle) {
+					if (cfg.ShowVehicles) {
+						show = true;
+						dotCol = IM_COL32(120, 190, 255, 230);
+						dotSize = 4.f;
 					}
 				} else if (cfg.ShowLoot) {
 					show = true;
@@ -942,27 +882,49 @@ void DrawFullMap()
 			}
 
 			LootRenderInfo lootInfo;
-			if (EvaluateLootEntity(ent, localPos, haveLocal, lootInfo)) {
+			if ((!ConfigInstance.LootFilter.Enabled || ConfigInstance.LootFilter.ShowOnMap) &&
+				EvaluateLootEntity(ent, localPos, haveLocal, lootInfo)) {
 				ImVec2 sp = worldToScreen(ent.position.x, ent.position.z);
 				if (sp.x < clipMin.x - 8.f || sp.x > clipMax.x + 8.f ||
 					sp.y < clipMin.y - 8.f || sp.y > clipMax.y + 8.f)
 					continue;
 
-				dl->AddCircleFilled(sp, lootInfo.dotSize, lootInfo.colour);
-				if (lootInfo.hasHighValueRing) {
-					dl->AddCircle(sp, lootInfo.dotSize + 2.5f, lootInfo.colour, 0, 1.5f);
+				float markerPx = lootInfo.dotSize;
+				bool drewSprite = false;
+				if (!lootInfo.icon.empty()) {
+					const auto sprite = IconSprites::Get(lootInfo.icon.c_str());
+					if (sprite.srv) {
+						const float size = (float)ConfigInstance.LootFilter.ResolvedIconSize(lootInfo.category);
+						float drawW = size, drawH = size;
+						if (sprite.width > 0 && sprite.height > 0) {
+							if (sprite.width >= sprite.height)
+								drawH = size * (float)sprite.height / (float)sprite.width;
+							else
+								drawW = size * (float)sprite.width / (float)sprite.height;
+						}
+						markerPx = drawH * 0.5f;
+						dl->AddImage(reinterpret_cast<ImTextureID>(sprite.srv),
+							ImVec2(sp.x - drawW * 0.5f, sp.y - drawH * 0.5f),
+							ImVec2(sp.x + drawW * 0.5f, sp.y + drawH * 0.5f));
+						drewSprite = true;
+					}
+				}
+				if (!drewSprite && lootInfo.showDot) {
+					dl->AddCircleFilled(sp, lootInfo.dotSize, lootInfo.colour);
+					if (lootInfo.hasHighValueRing) {
+						dl->AddCircle(sp, lootInfo.dotSize + 2.5f, lootInfo.colour, 0, 1.5f);
+					}
 				}
 
-				const bool showLabel = (ConfigInstance.LootFilter.Enabled
-					? (ConfigInstance.LootFilter.ShowNames || ConfigInstance.LootFilter.ShowPrices)
-					: cfg.ShowLootNames) && !lootInfo.text.empty();
+				const bool showLabel = !lootInfo.text.empty() &&
+					(ConfigInstance.LootFilter.Enabled || cfg.ShowLootNames);
 
 				if (showLabel) {
 					ImVec2 ts = ImGui::CalcTextSize(lootInfo.text.c_str());
-					ImVec2 tp(sp.x - ts.x * 0.5f, sp.y + lootInfo.dotSize + 1.f);
+					ImVec2 tp(sp.x - ts.x * 0.5f, sp.y + markerPx + 1.f);
 					dl->AddText(ImVec2(tp.x + 1.f, tp.y + 1.f), IM_COL32(0, 0, 0, 240), lootInfo.text.c_str());
 					dl->AddText(ImVec2(tp.x - 1.f, tp.y - 1.f), IM_COL32(0, 0, 0, 240), lootInfo.text.c_str());
-					dl->AddText(tp, lootInfo.colour, lootInfo.text.c_str());
+					dl->AddText(tp, lootInfo.textColour, lootInfo.text.c_str());
 				}
 			}
 		}
