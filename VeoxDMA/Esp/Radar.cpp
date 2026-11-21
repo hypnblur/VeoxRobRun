@@ -1483,6 +1483,26 @@ void DrawInGameMapOverlay()
 	std::vector<VehicleOccupantInfo> vehOcc(vehCount);
 	std::vector<int> playerMatchedVeh(snapshot->entities.size(), -1);
 
+	// Remember the last live driver seen inside each vehicle so if they drive
+	// outside the 200-300 m player replication bubble (including helicopters or
+	// stolen cars without CharacterOwner), we keep tracking their live role &
+	// name on the moving vehicle and suppress their stale frozen ghost arrow.
+	struct LastVehicleDriver {
+		std::int32_t entityId = -1;
+		int role = 0;
+		std::string roleName;
+		std::string nicknameUtf8;
+		bool isTeammate = false;
+		std::uint64_t stampMs = 0;
+	};
+	static std::unordered_map<int, LastVehicleDriver> s_lastVehDriver;
+	static std::uint64_t s_lastVehDriverSession = 0;
+	const std::uint64_t vehNowMs = GetTickCount64();
+	if (snapshot->sessionGeneration != s_lastVehDriverSession) {
+		s_lastVehDriverSession = snapshot->sessionGeneration;
+		s_lastVehDriver.clear();
+	}
+
 	if (vehCount > 0) {
 		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
 			const auto& ent = snapshot->entities[ei];
@@ -1522,6 +1542,7 @@ void DrawInGameMapOverlay()
 				auto& occ = vehOcc[static_cast<std::size_t>(matchedIdx)];
 				if (isLocal) {
 					occ.localOccupied = true;
+					s_lastVehDriver.erase(mapVehicles[static_cast<std::size_t>(matchedIdx)].id);
 				} else {
 					const int prio = RolePriority(ent.role, ent.roleName, isTeammate);
 					if (!occ.occupied || prio > occ.priority) {
@@ -1532,6 +1553,14 @@ void DrawInGameMapOverlay()
 							occ.driverPos = ent.position;
 							occ.hasDriverPos = true;
 						}
+						auto& ld = s_lastVehDriver[mapVehicles[static_cast<std::size_t>(matchedIdx)].id];
+						ld.entityId = ent.entityId;
+						ld.role = ent.role;
+						ld.roleName = ent.roleName;
+						if (!ent.nicknameUtf8.empty())
+							ld.nicknameUtf8 = ent.nicknameUtf8;
+						ld.isTeammate = isTeammate;
+						ld.stampMs = vehNowMs;
 					}
 				}
 			}
@@ -1539,7 +1568,7 @@ void DrawInGameMapOverlay()
 	}
 
 	// Track per-vehicle motion so far/unmatched vehicles that are actively moving
-	// (or moved in the last 10 s) show their owner's role color & name on the full map.
+	// (or moved in the last 10 s) show their driver/owner's role color & name on the full map.
 	struct VehicleMotion {
 		Vector3 anchorPos{};
 		std::uint64_t lastMovedMs = 0;
@@ -1547,12 +1576,13 @@ void DrawInGameMapOverlay()
 	};
 	static std::unordered_map<int, VehicleMotion> s_vehMotion;
 	static std::uint64_t s_vehMotionSession = 0;
-	const std::uint64_t vehNowMs = GetTickCount64();
 	if (snapshot->sessionGeneration != s_vehMotionSession) {
 		s_vehMotionSession = snapshot->sessionGeneration;
 		s_vehMotion.clear();
 	}
 	constexpr std::uint64_t kVehRecentMoveMs = 10'000ULL;
+	constexpr std::uint64_t kLastDriverMaxAgeMs = 120'000ULL;
+	std::unordered_set<std::int32_t> trackedByVehicleEntityIds;
 
 	// 2. Vehicles (cars & helicopters — 80-500 Hz live positions, colored by driver/owner role)
 	if (cfg.InGameMapVehicles && vehCount > 0)
@@ -1581,14 +1611,37 @@ void DrawInGameMapOverlay()
 			const bool recentlyMoved = (mot.lastMovedMs != 0) && (vehNowMs - mot.lastMovedMs <= kVehRecentMoveMs);
 			const bool activeRemoteVeh = !occ.occupied && (mv.hasDriver || recentlyMoved);
 
+			// Check remembered live driver (covers helicopters & stolen cars leaving 200-300 m bubble).
+			const LastVehicleDriver* remembered = nullptr;
+			if (activeRemoteVeh) {
+				auto it = s_lastVehDriver.find(mv.id);
+				if (it != s_lastVehDriver.end()) {
+					if (vehNowMs - it->second.stampMs <= kLastDriverMaxAgeMs) {
+						remembered = &it->second;
+						if (remembered->entityId >= 0)
+							trackedByVehicleEntityIds.insert(remembered->entityId);
+					} else {
+						s_lastVehDriver.erase(it);
+					}
+				}
+			}
+
 			ImVec2 pt{};
 			if (!worldToMap(vehWorldPos, pt)) continue;
 
 			ImU32 vehCol = IM_COL32(210, 216, 224, 240);
+			std::string remoteLabel;
 			if (occ.occupied) {
 				vehCol = occ.color;
-			} else if (activeRemoteVeh && !mv.ownerRoleName.empty()) {
-				vehCol = GetInGameMapRoleColor(0, mv.ownerRoleName, false);
+			} else if (activeRemoteVeh) {
+				if (remembered) {
+					vehCol = GetInGameMapRoleColor(remembered->role, remembered->roleName, remembered->isTeammate);
+					remoteLabel = remembered->nicknameUtf8;
+				}
+				if (remoteLabel.empty() && !mv.ownerNicknameUtf8.empty())
+					remoteLabel = mv.ownerNicknameUtf8;
+				if (!remembered && !mv.ownerRoleName.empty())
+					vehCol = GetInGameMapRoleColor(0, mv.ownerRoleName, false);
 			}
 
 			const float vehScale = (occ.occupied || activeRemoteVeh) ? scale : (scale * 0.85f);
@@ -1598,16 +1651,16 @@ void DrawInGameMapOverlay()
 				DrawCarIcon(dl, pt, vehScale, vehCol);
 			}
 
-			// Show owner name on the fullscreen ('M') map for moving/driven vehicles
+			// Show driver/owner name on the fullscreen ('M') map for moving/driven vehicles
 			// whose driver isn't already drawn as a live player arrow.
-			if (isFull && cfg.InGameMapPlayerNames && activeRemoteVeh && font && !mv.ownerNicknameUtf8.empty()) {
-				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, mv.ownerNicknameUtf8.c_str());
+			if (isFull && cfg.InGameMapPlayerNames && activeRemoteVeh && font && !remoteLabel.empty()) {
+				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, remoteLabel.c_str());
 				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * vehScale - sz.y - 2.f);
 				dl->AddRectFilled(
 					ImVec2(textPos.x - 5.f, textPos.y - 2.f),
 					ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
 					IM_COL32(26, 28, 32, 225), 3.5f);
-				Esp::DrawOutlinedText(dl, textPos, vehCol, font, fontSize, mv.ownerNicknameUtf8.c_str());
+				Esp::DrawOutlinedText(dl, textPos, vehCol, font, fontSize, remoteLabel.c_str());
 			}
 		}
 	}
@@ -1717,7 +1770,7 @@ void DrawInGameMapOverlay()
 				it = s_lastKnown.erase(it);
 				continue;
 			}
-			if (isFull && !liveIds.count(it->first)) {
+			if (isFull && !liveIds.count(it->first) && !trackedByVehicleEntityIds.count(it->first)) {
 				const auto& lk = it->second;
 				if (!(pcfg.HideTeammates && lk.isTeammate)) {
 					ImVec2 pt{};
