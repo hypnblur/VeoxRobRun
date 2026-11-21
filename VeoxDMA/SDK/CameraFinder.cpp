@@ -12,10 +12,10 @@
 
 namespace CameraFinder {
 
-static uintptr_t unityPlayer = 0;
+static std::atomic<uintptr_t> unityPlayer{ 0 };
 
 void Init(uintptr_t unityPlayerBase) {
-    unityPlayer = unityPlayerBase;
+    unityPlayer.store(unityPlayerBase, std::memory_order_release);
     InvalidateCache();
 }
 
@@ -114,7 +114,8 @@ constexpr uintptr_t kTagBase = 0x21150C0;
 // every candidate.
 void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     out.clear();
-    if (!unityPlayer)
+    const uintptr_t up = unityPlayer.load(std::memory_order_acquire);
+    if (!up)
         return;
 
     auto readFreshU64 = [](uintptr_t addr) -> uintptr_t {
@@ -126,7 +127,7 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
         return TargetProcess.ReadFresh(addr, &v, sizeof(v)) ? v : 0;
     };
 
-    const uintptr_t gom = readFreshU64(unityPlayer + kGomSlot);
+    const uintptr_t gom = readFreshU64(up + kGomSlot);
     if (!gom)
         return;
 
@@ -134,8 +135,8 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     if (!taggedNodes)
         return;
 
-    const uint32_t range = readFreshU32(unityPlayer + kTagRange);
-    const uint32_t base = readFreshU32(unityPlayer + kTagBase);
+    const uint32_t range = readFreshU32(up + kTagRange);
+    const uint32_t base = readFreshU32(up + kTagBase);
 
     uintptr_t node = readFreshU64(taggedNodes + 0x08);
     for (int guard = 0; node && node != taggedNodes && guard < 65536; ++guard) {
@@ -268,7 +269,6 @@ struct PhysCamCache {
 };
 std::mutex g_physCamMutex;
 PhysCamCache g_physCam{};
-
 bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     std::uintptr_t projOff, CameraData& data) {
     if (!node || !viewOff || !projOff)
@@ -622,7 +622,8 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
     if (now - lastMissLogMs >= 10000) {
         lastMissLogMs = now;
         uintptr_t gom = 0;
-        TargetProcess.ReadFresh(unityPlayer + kGomSlot, &gom, sizeof(gom));
+        const uintptr_t up = unityPlayer.load(std::memory_order_acquire);
+        if (up) TargetProcess.ReadFresh(up + kGomSlot, &gom, sizeof(gom));
         const uintptr_t tagged = gom ? GetTaggedNodes(gom, 5) : 0;
         std::printf("[CameraFinder] native miss: gom=0x%llX tagged=0x%llX cams=%zu haveExpected=%d\n",
             (unsigned long long)gom, (unsigned long long)tagged, cameras.size(), (int)haveExpected);

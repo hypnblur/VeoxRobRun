@@ -3,6 +3,7 @@
 #include "RobRunSDK.h"
 #include "Il2Cpp.h"
 #include "Memory.h"
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -10,8 +11,8 @@
 
 namespace RobRunCamera {
 
-static std::uintptr_t gaBase = 0;
-static std::uintptr_t g_cachedBrain = 0;
+static std::atomic<std::uintptr_t> gaBase{ 0 };
+static std::atomic<std::uintptr_t> g_cachedBrain{ 0 };
 
 struct ManagedPhysCache {
     std::uintptr_t va = 0;
@@ -85,8 +86,8 @@ static Vector3 Rotate(const float q[4], const Vector3& v)
 
 void Init(std::uintptr_t gameAssemblyBase)
 {
-    gaBase = gameAssemblyBase;
-    g_cachedBrain = 0;
+    gaBase.store(gameAssemblyBase, std::memory_order_release);
+    g_cachedBrain.store(0, std::memory_order_release);
     g_cachedFov = 0.f;
     g_cachedFovStampMs = 0;
     {
@@ -98,17 +99,18 @@ void Init(std::uintptr_t gameAssemblyBase)
 
 float ReadCinemachineFov()
 {
-    if (!gaBase) return 0.f;
+    if (!gaBase.load(std::memory_order_acquire)) return 0.f;
 
     // The brain instance is stable for a scene, so it is resolved once and
     // then only the FOV value is re-read (uncached) each pass.
-    if (g_cachedBrain > 0x10000) {
+    const std::uintptr_t cached = g_cachedBrain.load(std::memory_order_acquire);
+    if (cached > 0x10000) {
         float fov = 0.f;
-        if (ReadBytesFresh(g_cachedBrain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
+        if (ReadBytesFresh(cached + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
             std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
             return fov;
         }
-        g_cachedBrain = 0;
+        g_cachedBrain.store(0, std::memory_order_release);
     }
 
     const std::uintptr_t klass = Il2Cpp::GetClassByIndex(rr::ClassIndex::CinemachineCore);
@@ -136,11 +138,19 @@ float ReadCinemachineFov()
         float fov = 0.f;
         if (ReadBytesFresh(brain + rr::Cinemachine::BrainFov, &fov, sizeof(fov)) &&
             std::isfinite(fov) && fov >= 1.f && fov <= 179.f) {
-            g_cachedBrain = brain;
+            g_cachedBrain.store(brain, std::memory_order_release);
             return fov;
         }
     }
     return 0.f;
+}
+
+std::uintptr_t GetCachedBrain()
+{
+    const std::uintptr_t cached = g_cachedBrain.load(std::memory_order_acquire);
+    if (cached > 0x10000) return cached;
+    ReadCinemachineFov();
+    return g_cachedBrain.load(std::memory_order_acquire);
 }
 
 CameraState Read(std::uintptr_t battleCameraModel)

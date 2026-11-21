@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <cstdint>
 #include <mutex>
@@ -32,7 +33,8 @@ private:
     SOCKET s_Client = INVALID_SOCKET;
     client_data ReceiveData = {};
     client_data PostData = {};
-    bool m_connected = false;
+    std::atomic<bool> m_connected{ false };
+    bool m_wsaInitialized = false;
     // Serializes SendData across threads (combat thread + UI test button
     // share the socket and the PostData buffer).
     std::mutex m_ioMutex;
@@ -60,7 +62,7 @@ public:
 
     void Disconnect();
 
-    bool IsConnected() const { return m_connected && s_Client != INVALID_SOCKET; }
+    bool IsConnected() const { return m_connected.load(std::memory_order_acquire); }
 
     bool ConsumeReconnectRequested();
     int KeyboardKey(unsigned char hid, bool down);

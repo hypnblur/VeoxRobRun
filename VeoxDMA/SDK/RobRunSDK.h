@@ -449,8 +449,11 @@ inline constexpr std::uint32_t BattlePlayerCapacity = 320;
 // Active view updater (live verified)
 // ------------------------------------------------------------------
 namespace BattleEntitiesUpdater {
-inline constexpr std::uintptr_t _battleModel          = 0x70;
-inline constexpr std::uintptr_t _characterEntityViews = 0x110; // Dictionary<int, view>
+inline constexpr std::uintptr_t _battleModel                = 0x70;
+inline constexpr std::uintptr_t _entitiesModelsUpdaters     = 0x30;  // Dictionary<int, IUpdater>
+inline constexpr std::uintptr_t _entitiesViewsUpdaters      = 0x38;  // Dictionary<int, IUpdater>
+inline constexpr std::uintptr_t _mixingCameraBlendUpdater   = 0x100; // MixingCameraBlendUpdater
+inline constexpr std::uintptr_t _characterEntityViews       = 0x110; // Dictionary<int, view>
 }
 
 // Updater list chain:
@@ -552,10 +555,22 @@ inline constexpr float DefaultFovDeg        = 60.0f;
 
 namespace Cinemachine {
 // CinemachineCore class -> static_fields(+0xB8) -> core instance at +0x08
-inline constexpr std::uintptr_t CoreInstance = 0x08;
-inline constexpr std::uintptr_t BrainList    = 0x10; // List<CinemachineBrain>
-inline constexpr std::uintptr_t BrainFov      = 0xB0; // vertical FOV degrees
-inline constexpr std::uintptr_t BrainStateLensFov = 0xB0; // new offset set alias
+inline constexpr std::uintptr_t CoreInstance          = 0x08;
+inline constexpr std::uintptr_t BrainList             = 0x10; // List<CinemachineBrain>
+inline constexpr std::uintptr_t BrainActiveCameraPrev = 0xA0; // Brain.mActiveCameraPreviousFrame
+inline constexpr std::uintptr_t BrainFov              = 0xB0; // vertical FOV degrees
+inline constexpr std::uintptr_t BrainStateLensFov     = 0xB0; // new offset set alias
+}
+
+namespace Fov {
+inline constexpr std::uintptr_t BrainActiveCamera = 0xA0;  // Brain.mActiveCameraPreviousFrame
+inline constexpr std::uintptr_t VcamLensFov       = 0xB8;  // VirtualCamera.m_Lens.FieldOfView
+inline constexpr std::uintptr_t MixCameras        = 0xA8;  // MixingCamera._cameras List
+inline constexpr std::uintptr_t MixupMixer        = 0x10;  // MixingCameraBlendUpdater._mixingCamera
+inline constexpr std::uintptr_t BeuMixup          = 0x100; // BattleEntitiesUpdater._mixingCameraBlendUpdater
+inline constexpr std::uintptr_t BeuUpdaters       = 0x30;  // BattleEntitiesUpdater._entitiesModelsUpdaters dict
+inline constexpr std::uintptr_t BeuViewUpdaters   = 0x38;  // BattleEntitiesUpdater._entitiesViewsUpdaters dict
+inline constexpr std::uintptr_t AimBrain          = 0x48;  // BattleAimTargetUpdater._cinemachineBrain
 }
 
 // ------------------------------------------------------------------
@@ -678,8 +693,7 @@ inline constexpr std::uintptr_t EntityId = 0x28; // wrapper
 // World entities (metadata)
 // ------------------------------------------------------------------
 namespace WorldEntitiesModel {
-inline constexpr std::uintptr_t NotSpawnedBattleCharacters = 0x480;
-inline constexpr std::uintptr_t BattleCharacters           = 0x488;
+inline constexpr std::uintptr_t NotSpawnedBattleCharacters = 0x480;inline constexpr std::uintptr_t BattleCharacters           = 0x488;
 inline constexpr std::uintptr_t Containers                 = 0x490;
 inline constexpr std::uintptr_t AccessEntities             = 0x498;
 inline constexpr std::uintptr_t SecurityAlarms             = 0x5E0;
@@ -696,6 +710,8 @@ inline constexpr std::uintptr_t RandomLootObjects          = 0x4F8;
 inline constexpr std::uintptr_t LootNodes                  = 0x500;
 inline constexpr std::uintptr_t VehicleTrunks              = 0x510;
 inline constexpr std::uintptr_t Cargos                     = 0x518;
+inline constexpr std::uintptr_t CargosInstance             = 0x0C8; // plain Dictionary, fallback when the ReadOnly view will not open
+inline constexpr std::uintptr_t BuildingCargos             = 0x558; // ReadOnly.Dictionary<int, IBuildingCargoModel> - the one that actually yields cargo
 inline constexpr std::uintptr_t CollectionTables           = 0x528;
 inline constexpr std::uintptr_t SafeDoors                  = 0x5C8;
 inline constexpr std::uintptr_t StorageBoxes               = 0x560;
@@ -880,6 +896,22 @@ inline constexpr std::uintptr_t Item        = 0x18; // IPrimitiveData<LootObject
 inline constexpr std::uintptr_t Description = 0x20; // V3 position at +0x24
 }
 
+// LootObjectItemDescription (EnumItem) -> Func<InventoryItemDescription> at 0x20.
+// Following it is what yields the tiered item id ("starh_m2") and its rarity.
+namespace LootObjectItemDescriptionModel {
+inline constexpr std::uintptr_t ItemDescriptionFunc = 0x20;
+}
+
+namespace LocationLootNodeDescriptionModel {
+inline constexpr std::uintptr_t LootNodeDescriptionFunc = 0x28; // Func<LootNodeDescription>
+inline constexpr std::uintptr_t Position                = 0x38;
+}
+
+namespace LocationContainerDescriptionModel {
+inline constexpr std::uintptr_t ContainerDescriptionFunc = 0x28; // Func<ContainerDescription>
+inline constexpr std::uintptr_t Position                 = 0x30;
+}
+
 namespace VehicleModel {
 inline constexpr std::uintptr_t Transform      = 0x28;
 inline constexpr std::uintptr_t CharacterOwner = 0x40; // VehicleOwnerModel*
@@ -1015,8 +1047,38 @@ inline constexpr std::uintptr_t HasCargo         = 0x38; // IPrimitiveModel<bool
 }
 
 namespace CargoModel {
+inline constexpr std::uintptr_t Description      = 0x28; // CargoDescription (EnumItem -> Identified)
 inline constexpr std::uintptr_t Transform        = 0x30;
 inline constexpr std::uintptr_t InteractPosition = 0x38;
+}
+
+// CargoDescription is an EnumItem (id string at IdentifiedBase::Id) that also
+// carries the game's own coin values for that cargo type.
+namespace BuildingCargoModel {
+inline constexpr std::uintptr_t Description = 0x18; // LocationStaticCargoDescription / LocationRandomCargoDescription
+}
+
+namespace LocationStaticCargoDescriptionModel {
+inline constexpr std::uintptr_t Position            = 0x24; // inline Vector3
+inline constexpr std::uintptr_t CargoDescriptionFunc = 0x30; // Func<CargoDescription>
+}
+
+namespace CargoDescriptionModel {
+inline constexpr std::uintptr_t Rare                 = 0x20; // RarityItem (int enum)
+inline constexpr std::uintptr_t ArrestCoinsReward    = 0x30; // int32
+inline constexpr std::uintptr_t ExchangeCoinsReward  = 0x34; // int32
+}
+
+// RarityItem: 0 none, 1 Common, 2 Uncommon, 3 Rare, 4 Epic, 5 Legendary, 6 Exotic.
+namespace InventoryItemDescriptionModel {
+inline constexpr std::uintptr_t Rarity               = 0x30; // RarityItem (int enum)
+inline constexpr std::uintptr_t BasePriceFunc        = 0x78; // Func<int>
+inline constexpr std::uintptr_t SellPriceModifierFunc = 0x80; // Func<InventoryItemSellPriceModifier>
+inline constexpr std::uintptr_t SellPriceFunc        = 0x88; // Func<int> - the price the game pays
+}
+
+namespace InventoryItemSellPriceModifierModel {
+inline constexpr std::uintptr_t Modifier = 0x20; // float
 }
 
 namespace PlotLootModel {
