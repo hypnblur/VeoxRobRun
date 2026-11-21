@@ -105,11 +105,22 @@ struct InGameMapState {
     InGameMapVariance fullscreen;
 };
 
+struct FastVehicle {
+    int id = 0;
+    RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
+    Vector3 position{};
+    std::uint64_t ownerPublicId = 0;
+    std::string ownerRoleName;
+    std::string ownerNicknameUtf8;
+    bool hasDriver = false;
+};
+
 // Immutable view of the last completed read pass. The worker publishes a new
 // snapshot every cycle; the overlay thread only ever reads one. This is what
 // keeps DMA latency off the render thread.
 struct Snapshot {
     std::vector<EntityData> entities;
+    std::vector<FastVehicle> fastVehicles;
     // World/inventory reads walk dozens of dictionaries and can take hundreds
     // of milliseconds. They run on their own thread and publish immutable
     // states, so the player/pose pass never waits for them.

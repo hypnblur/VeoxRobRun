@@ -881,8 +881,15 @@ inline constexpr std::uintptr_t Description = 0x20; // V3 position at +0x24
 }
 
 namespace VehicleModel {
-inline constexpr std::uintptr_t Transform   = 0x28;
-inline constexpr std::uintptr_t Description = 0x118;
+inline constexpr std::uintptr_t Transform      = 0x28;
+inline constexpr std::uintptr_t CharacterOwner = 0x40; // VehicleOwnerModel*
+inline constexpr std::uintptr_t OwnerRole      = 0x50; // IPrimitiveModel<PlayerRoleDescription>
+inline constexpr std::uintptr_t Description    = 0x118;
+}
+
+namespace VehicleOwnerModel {
+inline constexpr std::uintptr_t OwnerPublicId = 0x10; // IPrimitiveData<long>
+inline constexpr std::uintptr_t EmptyPublicId = 0x18; // long sentinel
 }
 
 namespace VehicleTransformModel {
@@ -890,8 +897,11 @@ inline constexpr std::uintptr_t Position = 0x10; // primitive<Vector3> wrapper
 }
 
 namespace CarModel {
-inline constexpr std::uintptr_t Transform   = 0xC0;
-inline constexpr std::uintptr_t Description = 0x78;
+inline constexpr std::uintptr_t CharacterOwner = 0x30; // VehicleOwnerModel*
+inline constexpr std::uintptr_t OwnerRole      = 0x48; // IPrimitiveModel<PlayerRoleDescription>
+inline constexpr std::uintptr_t ControlOwner   = 0x50; // CarControlOwnerModel* (+0x18 = Driver)
+inline constexpr std::uintptr_t Transform      = 0xC0;
+inline constexpr std::uintptr_t Description    = 0x78;
 }
 
 namespace HelicopterModel {

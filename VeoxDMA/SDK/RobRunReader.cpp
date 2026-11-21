@@ -90,6 +90,7 @@ struct SlotIdentityCache {
     bool valid = false;
 };
 static std::unordered_map<std::uintptr_t, SlotIdentityCache> g_slotIdentityCache;
+static std::unordered_map<std::uint64_t, std::string> g_publicIdToNick;
 
 struct RoleCacheEntry {
     int roleId = 0;
@@ -159,6 +160,7 @@ static void MarkSessionChanged()
     viewOwnerMisses.clear();
     ClearEntityCaches();
     g_slotIdentityCache.clear();
+    g_publicIdToNick.clear();
     g_roleCache.clear();
     g_weaponDescCache.clear();
     viewsRefreshed = false;
@@ -219,6 +221,18 @@ static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
 static InGameMapState inGameMapState;
+static std::vector<FastVehicle> fastVehicles;
+struct FastVehicleEntry {
+    int id = 0;
+    RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
+    std::uintptr_t model = 0;
+    std::uintptr_t posAddr = 0; // direct Vector3 address (wrapper+0x10 or transform+0x10)
+    std::uint64_t ownerPublicId = 0;
+    std::string ownerRoleName;
+    bool hasDriver = false;
+};
+static std::vector<FastVehicleEntry> g_fastVehMeta;
+static std::uint64_t g_fastVehMetaStamp = 0;
 static Vector3 localPosition{};
 static float localYaw = 0.f;
 static float localPitch = 0.f;
@@ -385,6 +399,9 @@ static void ClearEntityCaches()
     g_miniRectCache = RectTransformCache{};
     g_fullRectCache = RectTransformCache{};
     inGameMapState = InGameMapState{};
+    fastVehicles.clear();
+    g_fastVehMeta.clear();
+    g_fastVehMetaStamp = 0;
     g_liveFullMapVarPtr.store(0, std::memory_order_release);
     g_fullMapFastMode.store(false, std::memory_order_relaxed);
     {
@@ -788,6 +805,7 @@ static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
     snapshot->entities = entities;
+    snapshot->fastVehicles = fastVehicles;
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
         snapshot->world = g_worldState;
@@ -1851,6 +1869,9 @@ static void ReadSlotIdentity(std::uintptr_t slotValue, EntityData& entity)
         g_slotIdentityCache[slotValue] = SlotIdentityCache{
             entity.nickname, entity.clanTag, entity.publicId, true
         };
+        if (entity.publicId > 0 && !entity.nickname.empty()) {
+            g_publicIdToNick[entity.publicId] = RobRunMemory::WideToUtf8(entity.nickname);
+        }
     }
 }
 
@@ -2827,6 +2848,168 @@ static void ReadInGameMapState()
     }
 }
 
+static void ReadFastVehicles()
+{
+    const auto& rcfg = ConfigInstance.Radar;
+    if ((!rcfg.InGameMinimap && !rcfg.InGameFullMap) || !rcfg.InGameMapVehicles ||
+        cachedBattleEntities <= 0x10000)
+    {
+        fastVehicles.clear();
+        return;
+    }
+
+    const std::uint64_t now = GetTickCount64();
+    if (g_fastVehMetaStamp == 0 || now - g_fastVehMetaStamp >= 500) {
+        g_fastVehMetaStamp = now;
+        g_fastVehMeta.clear();
+
+        const std::uintptr_t worldPtr = ReadPtr(cachedBattleEntities + 0x60);
+        if (worldPtr <= 0x10000) {
+            fastVehicles.clear();
+            return;
+        }
+
+        auto readVehDict = [&](std::uintptr_t offset, std::vector<RobRunMemory::DictEntry>& out) {
+            out.clear();
+            const std::uintptr_t field = ReadPtr(worldPtr + offset);
+            if (field <= 0x10000) return;
+            if (RobRunMemory::ReadDictInt(field, out, false)) return;
+            const std::uintptr_t inner = ReadPtr(field + 0x10);
+            if (inner > 0x10000 && inner != field && RobRunMemory::ReadDictInt(inner, out, false)) return;
+            const std::uintptr_t inner18 = ReadPtr(field + 0x18);
+            if (inner18 > 0x10000 && inner18 != field && inner18 != inner)
+                RobRunMemory::ReadDictInt(inner18, out, false);
+        };
+
+        auto resolvePosAddr = [](std::uintptr_t transform) -> std::uintptr_t {
+            if (transform <= 0x10000) return 0;
+            const std::uintptr_t wrapper = ReadPtr(transform + rr::VehicleTransformModel::Position);
+            if (wrapper > 0x10000 && wrapper < 0x7FFFFFFFFFFFull) {
+                Vector3 test{};
+                if (Il2Cpp::ReadPrimitiveVector3(wrapper, test) && RobRunMemory::Finite(test)) {
+                    // Most primitive<Vector3> wrappers store Value at +0x18 or +0x10.
+                    Vector3 v18{}, v10{};
+                    if (RobRunMemory::ReadVector3(wrapper + 0x18, v18) &&
+                        std::fabs(v18.x - test.x) < 0.01f && std::fabs(v18.z - test.z) < 0.01f)
+                        return wrapper + 0x18;
+                    if (RobRunMemory::ReadVector3(wrapper + 0x10, v10) &&
+                        std::fabs(v10.x - test.x) < 0.01f && std::fabs(v10.z - test.z) < 0.01f)
+                        return wrapper + 0x10;
+                }
+            }
+            Vector3 inlineV{};
+            if (RobRunMemory::ReadVector3(transform + rr::VehicleTransformModel::Position, inlineV) &&
+                RobRunMemory::Finite(inlineV))
+                return transform + rr::VehicleTransformModel::Position;
+            return 0;
+        };
+
+        auto readOwnerPublicId = [](std::uintptr_t ownerModel) -> std::uint64_t {
+            if (ownerModel <= 0x10000) return 0;
+            const std::uintptr_t pubWrapper = ReadPtr(ownerModel + rr::VehicleOwnerModel::OwnerPublicId);
+            if (pubWrapper <= 0x10000) return 0;
+            std::int64_t pubId = 0;
+            if (!Il2Cpp::ReadPrimitiveInt64(pubWrapper, pubId) || pubId <= 0)
+                return 0;
+            const std::int64_t emptyId = RobRunMemory::ReadInt64(ownerModel + rr::VehicleOwnerModel::EmptyPublicId);
+            if (pubId == emptyId)
+                return 0;
+            return static_cast<std::uint64_t>(pubId);
+        };
+
+        std::unordered_set<int> seenIds;
+        auto collect = [&](std::uintptr_t dictOff, RobRunWorld::Kind kind,
+                           std::uintptr_t transformOff, std::uintptr_t ownerOff,
+                           std::uintptr_t ownerRoleOff, std::uintptr_t ctrlOwnerOff) {
+            std::vector<RobRunMemory::DictEntry> entries;
+            readVehDict(dictOff, entries);
+            for (const auto& e : entries) {
+                if (e.value <= 0x10000 || !seenIds.insert(e.key).second) continue;
+                const std::uintptr_t transform = ReadPtr(e.value + transformOff);
+                const std::uintptr_t posAddr = resolvePosAddr(transform);
+                if (posAddr <= 0x10000) continue;
+
+                FastVehicleEntry meta{};
+                meta.id = e.key;
+                meta.kind = kind;
+                meta.model = e.value;
+                meta.posAddr = posAddr;
+                if (ownerOff != 0)
+                    meta.ownerPublicId = readOwnerPublicId(ReadPtr(e.value + ownerOff));
+                if (ownerRoleOff != 0) {
+                    EntityData roleScratch{};
+                    ApplyRoleFromWrapper(ReadPtr(e.value + ownerRoleOff), roleScratch);
+                    meta.ownerRoleName = std::move(roleScratch.roleName);
+                }
+                if (ctrlOwnerOff != 0) {
+                    const std::uintptr_t ctrl = ReadPtr(e.value + ctrlOwnerOff);
+                    if (ctrl > 0x10000) {
+                        std::uintptr_t drv = 0;
+                        if (!TargetProcess.ReadFresh(ctrl + 0x18, &drv, sizeof(drv)))
+                            drv = ReadPtr(ctrl + 0x18);
+                        meta.hasDriver = (drv > 0x10000);
+                    }
+                }
+                g_fastVehMeta.push_back(std::move(meta));
+            }
+        };
+
+        // Direct private dictionary fields on WorldEntitiesModel:
+        // _cars (+0x60), _helicopters (+0x68), _vehicles (+0x58)
+        collect(rr::WorldEntitiesModel::Cars, RobRunWorld::Kind::Car,
+                rr::CarModel::Transform, rr::CarModel::CharacterOwner,
+                rr::CarModel::OwnerRole, rr::CarModel::ControlOwner);
+        collect(rr::WorldEntitiesModel::Helicopters, RobRunWorld::Kind::Helicopter,
+                rr::HelicopterModel::Transform, 0, 0, 0);
+        collect(rr::WorldEntitiesModel::Vehicles, RobRunWorld::Kind::Vehicle,
+                rr::VehicleModel::Transform, rr::VehicleModel::CharacterOwner,
+                rr::VehicleModel::OwnerRole, 0);
+    }
+
+    fastVehicles.clear();
+    if (g_fastVehMeta.empty())
+        return;
+
+    std::vector<Vector3> positions(g_fastVehMeta.size());
+    {
+        Memory::ScopedScatter sc(TargetProcess, /*cached=*/false);
+        if (sc.handle) {
+            for (std::size_t i = 0; i < g_fastVehMeta.size(); ++i) {
+                TargetProcess.AddScatterReadRequest(sc,
+                    g_fastVehMeta[i].posAddr, &positions[i], sizeof(Vector3));
+            }
+            TargetProcess.ExecuteScatterRead(sc);
+        } else {
+            for (std::size_t i = 0; i < g_fastVehMeta.size(); ++i) {
+                if (!TargetProcess.ReadFresh(g_fastVehMeta[i].posAddr, &positions[i], sizeof(Vector3)))
+                    RobRunMemory::ReadVector3(g_fastVehMeta[i].posAddr, positions[i]);
+            }
+        }
+    }
+
+    fastVehicles.reserve(g_fastVehMeta.size());
+    for (std::size_t i = 0; i < g_fastVehMeta.size(); ++i) {
+        const auto& m = g_fastVehMeta[i];
+        const Vector3& pos = positions[i];
+        if (!RobRunMemory::Finite(pos) || (pos.x == 0.f && pos.y == 0.f && pos.z == 0.f) ||
+            std::fabs(pos.x) > 1.0e6f || std::fabs(pos.z) > 1.0e6f)
+            continue;
+        FastVehicle fv{};
+        fv.id = m.id;
+        fv.kind = m.kind;
+        fv.position = pos;
+        fv.ownerPublicId = m.ownerPublicId;
+        fv.ownerRoleName = m.ownerRoleName;
+        fv.hasDriver = m.hasDriver;
+        if (m.ownerPublicId > 0) {
+            const auto nickIt = g_publicIdToNick.find(m.ownerPublicId);
+            if (nickIt != g_publicIdToNick.end())
+                fv.ownerNicknameUtf8 = nickIt->second;
+        }
+        fastVehicles.push_back(std::move(fv));
+    }
+}
+
 static void UpdateInternal()
 {
     const std::uint64_t tPassStart = SteadyMicros();
@@ -3120,8 +3303,10 @@ static void UpdateInternal()
     const std::uint64_t tAfterRoots = SteadyMicros();
     tRootsUs = tAfterRoots - tPassStart;
 
-    // Live in-game minimap / fullscreen ('M') map camera & rect state (~2 reads).
+    // Live in-game minimap / fullscreen ('M') map camera & rect state (~2 reads)
+    // plus high-frequency vehicle scatter (~0.3 ms) for smooth map vehicles.
     ReadInGameMapState();
+    ReadFastVehicles();
 
     // Drop a stale updater when the scene changes; otherwise the view
     // dictionary silently stays empty across a map transition.
@@ -3246,8 +3431,15 @@ static void UpdateInternal()
                     if (entry.key >= 0 && entry.value > 0x10000)
                         fresh[entry.key] = entry.value;
                 }
-                if (!fresh.empty())
+                if (!fresh.empty()) {
                     cachedSlots.swap(fresh);
+                    // Prime publicId -> nickname map for all server slots so far
+                    // moving vehicles can display their owner's name on the map.
+                    for (const auto& kv : cachedSlots) {
+                        EntityData slotScratch{};
+                        ReadSlotIdentity(kv.second, slotScratch);
+                    }
+                }
             }
         }
     }
