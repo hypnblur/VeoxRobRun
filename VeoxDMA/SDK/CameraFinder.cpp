@@ -1,34 +1,36 @@
 #include "pch.h"
 #include "CameraFinder.h"
 #include "Memory.h"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cfloat>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace CameraFinder {
 
 static std::atomic<uintptr_t> unityPlayer{ 0 };
 
-namespace {
-struct CameraNodeCache {
-    std::uintptr_t node = 0;
-    std::uintptr_t viewOff = 0;
-    std::uintptr_t projOff = 0;
-};
-std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
-std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
-} // namespace
-
 void Init(uintptr_t unityPlayerBase) {
     unityPlayer.store(unityPlayerBase, std::memory_order_release);
-    g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
-    g_lastResolveTick.store(0, std::memory_order_release);
+    InvalidateCache();
 }
 
 uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
     if (!s_Instance)
         return 0;
+
+    auto readFreshU32 = [](uintptr_t addr) -> uint32_t {
+        uint32_t v = 0;
+        return TargetProcess.ReadFresh(addr, &v, sizeof(v)) ? v : 0;
+    };
+    auto readFreshU64 = [](uintptr_t addr) -> uintptr_t {
+        uintptr_t v = 0;
+        return TargetProcess.ReadFresh(addr, &v, sizeof(v)) ? v : 0;
+    };
 
     uint32_t v3;
     uint32_t v4;
@@ -38,8 +40,8 @@ uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
     uint32_t n8;
     uintptr_t i;
 
-    const uint32_t mask = TargetProcess.Read<uint32_t>(s_Instance + 0x08);
-    const uintptr_t table = TargetProcess.Read<uint64_t>(s_Instance);
+    const uint32_t mask = readFreshU32(s_Instance + 0x08);
+    const uintptr_t table = readFreshU64(s_Instance);
 
     if (!table)
         return 0;
@@ -61,11 +63,11 @@ uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
 
     i_1 = table + 3ull * v5;
 
-    if (TargetProcess.Read<uint32_t>(i_1) != v6 ||
-        n5 != static_cast<int32_t>(TargetProcess.Read<uint32_t>(i_1 + 8))) {
+    if (readFreshU32(i_1) != v6 ||
+        n5 != static_cast<int32_t>(readFreshU32(i_1 + 8))) {
         n8 = 8;
 
-        if (TargetProcess.Read<uint32_t>(i_1) == 0xFFFFFFFFu)
+        if (readFreshU32(i_1) == 0xFFFFFFFFu)
             return 0;
 
         // Bounded probe: a corrupt/partial table must not spin forever.
@@ -74,14 +76,14 @@ uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
             v5 = mask & static_cast<uint32_t>(n8 + v5);
             i_1 = table + 2ull * v5 + static_cast<uint32_t>(v5);
 
-            if (TargetProcess.Read<uint32_t>(i_1) == v6 &&
-                n5 == static_cast<int32_t>(TargetProcess.Read<uint32_t>(i_1 + 8))) {
+            if (readFreshU32(i_1) == v6 &&
+                n5 == static_cast<int32_t>(readFreshU32(i_1 + 8))) {
                 break;
             }
 
             n8 += 8;
 
-            if (TargetProcess.Read<uint32_t>(i_1) == 0xFFFFFFFFu)
+            if (readFreshU32(i_1) == 0xFFFFFFFFu)
                 return 0;
         }
     }
@@ -91,14 +93,14 @@ uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
         i_1 < i;
         i_1 += 24ull
     ) {
-        if (TargetProcess.Read<uint32_t>(i_1) < 0xFFFFFFFEu)
+        if (readFreshU32(i_1) < 0xFFFFFFFEu)
             break;
     }
 
     if (table + 3ull * (static_cast<uint64_t>(mask) + 8ull) == i_1)
         return 0;
 
-    return TargetProcess.Read<uint64_t>(i_1 + 16);
+    return readFreshU64(i_1 + 16);
 }
 
 namespace {
@@ -116,7 +118,16 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     if (!up)
         return;
 
-    const uintptr_t gom = TargetProcess.Read<uintptr_t>(up + kGomSlot);
+    auto readFreshU64 = [](uintptr_t addr) -> uintptr_t {
+        uintptr_t v = 0;
+        return TargetProcess.ReadFresh(addr, &v, sizeof(v)) ? v : 0;
+    };
+    auto readFreshU32 = [](uintptr_t addr) -> uint32_t {
+        uint32_t v = 0;
+        return TargetProcess.ReadFresh(addr, &v, sizeof(v)) ? v : 0;
+    };
+
+    const uintptr_t gom = readFreshU64(up + kGomSlot);
     if (!gom)
         return;
 
@@ -124,20 +135,20 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     if (!taggedNodes)
         return;
 
-    const uint32_t range = TargetProcess.Read<uint32_t>(up + kTagRange);
-    const uint32_t base = TargetProcess.Read<uint32_t>(up + kTagBase);
+    const uint32_t range = readFreshU32(up + kTagRange);
+    const uint32_t base = readFreshU32(up + kTagBase);
 
-    uintptr_t node = TargetProcess.Read<uintptr_t>(taggedNodes + 0x08);
+    uintptr_t node = readFreshU64(taggedNodes + 0x08);
     for (int guard = 0; node && node != taggedNodes && guard < 65536; ++guard) {
-        const uintptr_t entry = TargetProcess.Read<uintptr_t>(node + 0x10);
+        const uintptr_t entry = readFreshU64(node + 0x10);
         if (entry) {
-            const uintptr_t begin = TargetProcess.Read<uintptr_t>(entry + 0x20);
-            const uintptr_t count = TargetProcess.Read<uintptr_t>(entry + 0x30);
+            const uintptr_t begin = readFreshU64(entry + 0x20);
+            const uintptr_t count = readFreshU64(entry + 0x30);
             for (uintptr_t i = 0; begin && i < count && i < 4096; ++i) {
                 const uintptr_t element = begin + i * 0x10;
-                const uint32_t identifier = TargetProcess.Read<uint32_t>(element);
+                const uint32_t identifier = readFreshU32(element);
                 if (uint32_t(identifier - base) < range) {
-                    const uintptr_t object = TargetProcess.Read<uintptr_t>(element + 0x08);
+                    const uintptr_t object = readFreshU64(element + 0x08);
                     if (object) {
                         out.push_back(object);
                         if (out.size() >= max)
@@ -147,7 +158,7 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
                 }
             }
         }
-        node = TargetProcess.Read<uintptr_t>(node + 0x08);
+        node = readFreshU64(node + 0x08);
     }
 }
 
@@ -226,9 +237,38 @@ struct MatrixLayout {
 };
 
 constexpr std::size_t kScanBytes = 0x1000;
-constexpr float kMaxPositionError = 5.f;   // metres
+constexpr float kMaxPositionError = 16.f;  // metres (tolerates vehicles & custom camera zoom)
 constexpr float kMinForwardDot = 0.5f;     // 60 degrees
 
+std::atomic<std::uintptr_t> g_fovNode{ 0 };
+std::atomic<std::uint64_t> g_fovNodeResolveTick{ 0 };
+
+// Cached render camera and the structurally discovered matrix offsets. Offsets
+// are stable for a Unity build, so they survive scene changes; the node does
+// not, and is re-resolved when it stops matching the managed camera.
+//
+// Node and offsets are one value: as three separate atomics a reader could
+// pair a freshly resolved node with the previous node's offsets and read
+// matrices from the wrong place.
+struct CameraNodeCache {
+    std::uintptr_t node = 0;
+    std::uintptr_t viewOff = 0;
+    std::uintptr_t projOff = 0;
+};
+std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
+std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
+
+// Cached virtual->physical translation for the contiguous view+projection block
+// when it fits inside one 4 KB page. Direct LcRead on the physical address
+// skips VMMDLL's process/TLB locks and 4 KB page alignment for sub-ms reads.
+struct PhysCamCache {
+    std::uintptr_t va = 0;
+    std::size_t span = 0;
+    std::uint64_t pa = 0;
+    std::uint64_t stampMs = 0;
+};
+std::mutex g_physCamMutex;
+PhysCamCache g_physCam{};
 bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     std::uintptr_t projOff, CameraData& data) {
     if (!node || !viewOff || !projOff)
@@ -236,18 +276,79 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
 
     Matrix4x4 view{};
     Matrix4x4 projection{};
-    Memory::ScopedScatter scatter(TargetProcess);
-    if (!scatter) return false;
-    TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
-    TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
-    TargetProcess.ExecuteReadScatter(scatter);
-
     Vector3 position{};
     Vector3 forward{};
-    if (!ParseViewMatrix(&view.matrix[0][0], position, forward))
-        return false;
-    if (!ParseProjectionMatrix(&projection.matrix[0][0]))
-        return false;
+    bool parsed = false;
+    bool usedPhys = false;
+
+    const std::uintptr_t minOff = (std::min)(viewOff, projOff);
+    const std::uintptr_t maxEnd = (std::max)(viewOff, projOff) + sizeof(Matrix4x4);
+    const std::size_t span = static_cast<std::size_t>(maxEnd - minOff);
+    const std::uintptr_t va = node + minOff;
+
+    // Fastest path: contiguous block within one 4 KB page -> cached PA + direct
+    // LeechCore physical read (~150-300 us, single 128-byte TLP).
+    const bool singlePage = (span <= 512) &&
+        ((va & ~static_cast<std::uintptr_t>(0xFFF)) ==
+         ((va + span - 1) & ~static_cast<std::uintptr_t>(0xFFF)));
+    if (singlePage) {
+        std::uint64_t pa = 0;
+        const std::uint64_t nowMs = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lock(g_physCamMutex);
+            if (g_physCam.va == va && g_physCam.span == span &&
+                g_physCam.pa != 0 && (nowMs - g_physCam.stampMs) < 3000) {
+                pa = g_physCam.pa;
+            }
+        }
+        if (!pa) {
+            std::uint64_t translated = 0;
+            if (TargetProcess.VirtToPhys(va, translated) && translated != 0) {
+                pa = translated;
+                std::lock_guard<std::mutex> lock(g_physCamMutex);
+                g_physCam = PhysCamCache{ va, span, pa, nowMs };
+            }
+        }
+        if (pa) {
+            unsigned char raw[512];
+            if (TargetProcess.ReadPhysicalFast(pa, raw, span)) {
+                std::memcpy(&view, raw + (viewOff - minOff), sizeof(view));
+                std::memcpy(&projection, raw + (projOff - minOff), sizeof(projection));
+                if (ParseViewMatrix(&view.matrix[0][0], position, forward) &&
+                    ParseProjectionMatrix(&projection.matrix[0][0])) {
+                    parsed = true;
+                    usedPhys = true;
+                }
+            }
+            if (!parsed) {
+                // Physical frame may have migrated or scene changed: drop the
+                // cached PA and fall through to a virtual uncached read.
+                std::lock_guard<std::mutex> lock(g_physCamMutex);
+                g_physCam = PhysCamCache{};
+            }
+        }
+    }
+
+    if (!parsed) {
+        if (span <= 512) {
+            unsigned char raw[512];
+            if (!TargetProcess.ReadFresh(va, raw, span))
+                return false;
+            std::memcpy(&view, raw + (viewOff - minOff), sizeof(view));
+            std::memcpy(&projection, raw + (projOff - minOff), sizeof(projection));
+        } else {
+            Memory::ScopedScatter scatter(TargetProcess);
+            if (!scatter) return false;
+            TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
+            TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
+            if (!TargetProcess.ExecuteReadScatter(scatter))
+                return false;
+        }
+        if (!ParseViewMatrix(&view.matrix[0][0], position, forward))
+            return false;
+        if (!ParseProjectionMatrix(&projection.matrix[0][0]))
+            return false;
+    }
 
     data.view = view;
     data.projection = projection;
@@ -255,6 +356,7 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     data.position = position;
     data.forward = forward;
     data.valid = true;
+    data.usedPhysical = usedPhys;
     data.positionError = -1.f;
     data.forwardDot = -1.f;
     return true;
@@ -310,12 +412,35 @@ bool MatchesManaged(const CameraData& data, const Vector3& expectedPosition,
 bool DiscoverLayout(std::uintptr_t node, const Vector3& expectedPosition,
     const Vector3& expectedForward, float expectedVerticalFovDegrees,
     bool haveExpected, MatrixLayout& layout) {
-    std::vector<unsigned char> buffer(kScanBytes);
-    if (!TargetProcess.Read(node, buffer.data(), buffer.size()))
+    // Fast probe of the standard Unity Camera matrix layout (0x70 / 0xB0):
+    // only 128 bytes, so it never fails if node + 0x1000 crosses into an
+    // unmapped guard page at the end of a heap allocation.
+    {
+        CameraData quick{};
+        if (ReadMatricesAt(node, 0x70, 0xB0, quick) &&
+            MatchesManaged(quick, expectedPosition, expectedForward,
+                expectedVerticalFovDegrees, haveExpected)) {
+            layout.viewOff = 0x70;
+            layout.projOff = 0xB0;
+            return true;
+        }
+    }
+
+    // Safe chunked scan up to kScanBytes so an unmapped page past the object
+    // does not abort discovery of matrices near the start of the struct.
+    std::vector<unsigned char> buffer(kScanBytes, 0);
+    std::size_t validBytes = 0;
+    constexpr std::size_t kChunk = 0x200;
+    for (std::size_t off = 0; off < kScanBytes; off += kChunk) {
+        if (!TargetProcess.ReadFresh(node + off, buffer.data() + off, kChunk))
+            break;
+        validBytes = off + kChunk;
+    }
+    if (validBytes < 0x100)
         return false;
 
     const float* floats = reinterpret_cast<const float*>(buffer.data());
-    const std::size_t floatCount = buffer.size() / sizeof(float);
+    const std::size_t floatCount = validBytes / sizeof(float);
     const std::size_t kMatrixFloats = 16;
 
     struct Candidate {
@@ -493,6 +618,16 @@ CameraData GetCameraMatricesValidated(const Vector3& expectedPosition,
     }
 
     g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
+    static std::uint64_t lastMissLogMs = 0;
+    if (now - lastMissLogMs >= 10000) {
+        lastMissLogMs = now;
+        uintptr_t gom = 0;
+        const uintptr_t up = unityPlayer.load(std::memory_order_acquire);
+        if (up) TargetProcess.ReadFresh(up + kGomSlot, &gom, sizeof(gom));
+        const uintptr_t tagged = gom ? GetTaggedNodes(gom, 5) : 0;
+        std::printf("[CameraFinder] native miss: gom=0x%llX tagged=0x%llX cams=%zu haveExpected=%d\n",
+            (unsigned long long)gom, (unsigned long long)tagged, cameras.size(), (int)haveExpected);
+    }
     return data;
 }
 
@@ -503,21 +638,43 @@ float ReadNativeFov()
     std::uintptr_t projOff = cache.projOff;
 
     if (!node) {
-        node = FindMainCamera();
+        node = g_fovNode.load(std::memory_order_acquire);
+        const std::uint64_t now = GetTickCount64();
+        if (!node && now >= g_fovNodeResolveTick.load(std::memory_order_relaxed)) {
+            g_fovNodeResolveTick.store(now + 2000, std::memory_order_relaxed);
+            node = FindMainCamera();
+            if (node)
+                g_fovNode.store(node, std::memory_order_release);
+        }
         if (!node) return 0.f;
         projOff = 0xB0;
     }
     if (!projOff) projOff = 0xB0;
 
     float yScale = 0.f;
-    TargetProcess.ReadFresh(node + projOff + sizeof(float) * 5, &yScale, sizeof(yScale));
-    if (!std::isfinite(yScale) || yScale <= 0.f)
+    if (!TargetProcess.ReadFresh(node + projOff + sizeof(float) * 5, &yScale, sizeof(yScale)) ||
+        !std::isfinite(yScale) || yScale <= 0.f) {
+        if (!cache.node) g_fovNode.store(0, std::memory_order_release);
         return 0.f;
+    }
 
     const float fovRad = 2.f * std::atan(1.f / yScale);
     const float fovDeg = fovRad * 180.f / 3.14159265358979323846f;
-    if (fovDeg < 1.f || fovDeg > 179.f) return 0.f;
+    if (fovDeg < 1.f || fovDeg > 179.f) {
+        if (!cache.node) g_fovNode.store(0, std::memory_order_release);
+        return 0.f;
+    }
     return fovDeg;
+}
+
+void InvalidateCache()
+{
+    g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
+    g_lastResolveTick.store(0, std::memory_order_relaxed);
+    g_fovNode.store(0, std::memory_order_release);
+    g_fovNodeResolveTick.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_physCamMutex);
+    g_physCam = PhysCamCache{};
 }
 
 CameraData GetCameraMatricesFast()

@@ -6,6 +6,7 @@
 namespace CameraFinder {
 
 void Init(uintptr_t unityPlayerBase);
+void InvalidateCache();
 uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5);
 uintptr_t FindMainCamera();
 
@@ -21,6 +22,7 @@ struct CameraData {
     Vector3 position{};
     Vector3 forward{};
     bool valid = false;
+    bool usedPhysical = false;
     // Validation against the managed camera (the aim never writes its
     // position): distance in metres and forward-vector dot product. Negative
     // when unknown.

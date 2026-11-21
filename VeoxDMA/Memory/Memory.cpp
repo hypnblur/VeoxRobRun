@@ -37,6 +37,7 @@ Memory::~Memory()
 {
 	// Init() closes the handle on some failure paths; never close a stale one
 	// again here (VMMDLL_Close on a freed handle is a use-after-free).
+	this->lcHandle = nullptr;
 	if (this->vHandle)
 	{
 		VMMDLL_Close(this->vHandle);
@@ -55,9 +56,13 @@ void Memory::ResetProcess()
 {
 	PROCESS_INITIALIZED = FALSE;
 	current_pid.store(0, std::memory_order_release);
-	std::lock_guard<std::mutex> lock(modules_mutex);
-	current_process = CurrentProcessInformation{};
-	Modules.clear();
+	{
+		std::lock_guard<std::mutex> lock(modules_mutex);
+		current_process = CurrentProcessInformation{};
+		Modules.clear();
+	}
+	RefreshAllCaches();
+	RefreshProcessesFast();
 }
 
 bool Memory::DumpMemoryMap(bool debug)
@@ -179,8 +184,13 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 		bool vmmReady = false;
 		for (int attempt = 0; attempt < 2 && !vmmReady; ++attempt)
 		{
-			LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
-			DWORD argc = 3;
+			// -norefresh disables MemProcFS's automatic background refresh thread
+			// (which otherwise periodically flushes read/TLB caches and walks OS
+			// process lists over the FPGA, causing multi-ms latency spikes and
+			// micro-stutters). Refreshes are triggered explicitly on controlled
+			// schedules instead.
+			LPSTR args[] = { (LPSTR)"", (LPSTR)"-device", (LPSTR)"fpga://algo=0", (LPSTR)"-norefresh", (LPSTR)"", (LPSTR)"", (LPSTR)"", (LPSTR)"" };
+			DWORD argc = 4;
 			if (debug)
 			{
 				args[argc++] = (LPSTR)"-v";
@@ -226,32 +236,23 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 			return false;
 		}
 
-		ULONG64 FPGA_ID, DEVICE_ID;
+		ULONG64 FPGA_ID = 0, DEVICE_ID = 0, lcVal = 0;
 
 		VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_FPGA_ID, &FPGA_ID);
 		VMMDLL_ConfigGet(this->vHandle, LC_OPT_FPGA_DEVICE_ID, &DEVICE_ID);
+		if (VMMDLL_ConfigGet(this->vHandle, VMMDLL_OPT_CORE_LEECHCORE_HANDLE, &lcVal) && lcVal)
+			this->lcHandle = reinterpret_cast<HANDLE>(lcVal);
 
 		LOG("FPGA ID: %llu\n", FPGA_ID);
 		LOG("DEVICE ID: %llu\n", DEVICE_ID);
+		LOG("Direct LeechCore handle: %s | MemProcFS mode: -norefresh\n",
+			this->lcHandle ? "enabled" : "fallback");
 		LOG("success!\n");
-
-		// Configure VMM's background refresh intervals.
-		//
-		// VMMDLL_OPT_REFRESH_FREQ_* are one-shot "refresh now" commands, not
-		// interval settings. The real controls are the tick period plus the
-		// number of ticks each cache stays valid (see the MemProcFS timing
-		// FAQ). A 100 ms base tick with a 2-tick memory cache keeps cached
-		// pointer chains usable without letting them go seconds stale.
-		//
-		// Dynamic values (positions and animation poses) do not rely on this:
-		// they are read with VMMDLL_FLAG_NOCACHE via Memory::ReadFresh.
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_TICK_PERIOD, 100);
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_READCACHE_TICKS, 2);
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_CONFIG_TLBCACHE_TICKS, 20);
 
 		if (!this->SetFPGA())
 		{
 			LOG("[!] Could not set FPGA!\n");
+			this->lcHandle = nullptr;
 			VMMDLL_Close(this->vHandle);
 			this->vHandle = nullptr;
 			return false;
@@ -316,6 +317,10 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 
 DWORD Memory::GetPidFromName(std::string process_name)
 {
+	// With -norefresh active, refresh the process list on attach/reattach so
+	// games started after VeoxDMA are discovered immediately.
+	if (!PROCESS_INITIALIZED)
+		RefreshProcessesFast();
 	DWORD pid = 0;
 	VMMDLL_PidGetFromName(this->vHandle, (LPSTR)process_name.c_str(), &pid);
 	return pid;
@@ -893,13 +898,24 @@ bool Memory::Read(uintptr_t address, void* buffer, size_t size, int pid) const
 	return cbRead == static_cast<DWORD>(size);
 }
 
+namespace {
+	// Low-latency flags for uncached DMA reads: bypass data cache, skip writing
+	// back short-lived camera/pose pages into the cache, avoid disk paging I/O,
+	// and disable extra speculative adjacent-page reads on small transfers.
+	constexpr DWORD kFreshReadFlags =
+		VMMDLL_FLAG_NOCACHE |
+		VMMDLL_FLAG_NOCACHEPUT |
+		VMMDLL_FLAG_NOPAGING_IO |
+		VMMDLL_FLAG_NO_PREDICTIVE_READ;
+}
+
 bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size) const
 {
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
 	DWORD cbRead = 0;
 	if (!VMMDLL_MemReadEx(this->vHandle, this->GetPID(), address,
-		(PBYTE)buffer, size, &cbRead, VMMDLL_FLAG_NOCACHE))
+		(PBYTE)buffer, size, &cbRead, kFreshReadFlags))
 		return false;
 	return cbRead == static_cast<DWORD>(size);
 }
@@ -910,14 +926,67 @@ bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) co
 		return false;
 	DWORD cbRead = 0;
 	if (!VMMDLL_MemReadEx(this->vHandle, pid, address, (PBYTE)buffer, size,
-		&cbRead, VMMDLL_FLAG_NOCACHE))
+		&cbRead, kFreshReadFlags))
 		return false;
 	return cbRead == static_cast<DWORD>(size);
 }
 
+bool Memory::VirtToPhys(uintptr_t va, uint64_t& pa) const
+{
+	pa = 0;
+	const int pid = this->GetPID();
+	if (!this->vHandle || !pid || !(va > 0x10000 && va < 0x7FFFFFFFFFFF))
+		return false;
+	ULONG64 resolved = 0;
+	if (!VMMDLL_MemVirt2Phys(this->vHandle, pid, va, &resolved) || !resolved)
+		return false;
+	pa = static_cast<uint64_t>(resolved);
+	return true;
+}
+
+bool Memory::ReadPhysicalFast(uint64_t pa, void* buffer, size_t size) const
+{
+	if (!pa || !buffer || !size)
+		return false;
+	if (this->lcHandle)
+		return LcRead(this->lcHandle, pa, static_cast<DWORD>(size), static_cast<PBYTE>(buffer)) != 0;
+	if (!this->vHandle)
+		return false;
+	DWORD cbRead = 0;
+	if (!VMMDLL_MemReadEx(this->vHandle, static_cast<DWORD>(-1), pa,
+		static_cast<PBYTE>(buffer), static_cast<DWORD>(size), &cbRead, kFreshReadFlags))
+		return false;
+	return cbRead == static_cast<DWORD>(size);
+}
+
+void Memory::RefreshMemCachePartial() const
+{
+	if (this->vHandle)
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_MEM_PARTIAL, 1);
+}
+
+void Memory::RefreshTlbCachePartial() const
+{
+	if (this->vHandle)
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_TLB_PARTIAL, 1);
+}
+
+void Memory::RefreshAllCaches() const
+{
+	if (!this->vHandle) return;
+	VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_MEM, 1);
+	VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_TLB, 1);
+}
+
+void Memory::RefreshProcessesFast() const
+{
+	if (this->vHandle)
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_FAST, 1);
+}
+
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()
 {
-	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, this->GetPID(), VMMDLL_FLAG_NOCACHE);
+	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, this->GetPID(), kFreshReadFlags);
 	if (!ScatterHandle)
 		LOG("[!] Failed to create scatter handle\n");
 	return ScatterHandle;
@@ -925,7 +994,7 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle(int pid)
 {
-	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, pid, VMMDLL_FLAG_NOCACHE);
+	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, pid, kFreshReadFlags);
 	if (!ScatterHandle)
 		LOG("[!] Failed to create scatter handle\n");
 	return ScatterHandle;
@@ -958,13 +1027,13 @@ bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addre
 bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 {
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, this->GetPID(), VMMDLL_FLAG_NOCACHE);
+	VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
 	return ok;
 }
 bool Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
 {
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, this->GetPID(), VMMDLL_FLAG_NOCACHE);
+	VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
 	return ok;
 }
 bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
@@ -973,7 +1042,7 @@ bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 		pid = this->GetPID();
 
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE);
+	VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);
 	return ok;
 }
 
@@ -983,7 +1052,7 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 		pid = this->GetPID();
 
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, pid, VMMDLL_FLAG_NOCACHE);
+	VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);
 	return ok;
 }
 

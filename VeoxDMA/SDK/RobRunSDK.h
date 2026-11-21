@@ -158,6 +158,31 @@ inline constexpr std::uintptr_t CoinsModel                 = 0x4A8;
 inline constexpr std::uintptr_t CryptoCoinsModel           = 0x4B0;
 inline constexpr std::uintptr_t DelayedUseAction           = 0x610;
 inline constexpr std::uintptr_t BattleSettings             = 0x98;
+inline constexpr std::uintptr_t MapDialogModel             = 0x1D8;
+inline constexpr std::uintptr_t MapConfigModel             = 0x1E8;
+}
+
+namespace ScreenModel {
+inline constexpr std::uintptr_t ScreenState = 0x10; // int32: 0=Closed, 1=Opened
+inline constexpr std::uintptr_t Intention   = 0x14; // int32: 0=None, 1=Open, 2=Close
+}
+
+namespace MapConfigModel {
+inline constexpr std::uintptr_t MapDialogModel = 0x10;
+inline constexpr std::uintptr_t FullScreen     = 0x18; // MapConfigVariance*
+inline constexpr std::uintptr_t Minimap        = 0x20; // MapConfigVariance*
+inline constexpr std::uintptr_t MapModel       = 0x28; // MapModel*
+}
+
+namespace MapConfigVariance {
+inline constexpr std::uintptr_t Position        = 0x10; // Vector2 (world X, Z)
+inline constexpr std::uintptr_t Rotation        = 0x18; // float
+inline constexpr std::uintptr_t CameraSize      = 0x1C; // float (ortho half-height)
+inline constexpr std::uintptr_t ResizeContainer = 0x20; // RectTransform*
+}
+
+namespace MapModel {
+inline constexpr std::uintptr_t NormalizedZoom = 0x18; // float (0..1)
 }
 
 namespace BattleSettingsDescription {
