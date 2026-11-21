@@ -6,10 +6,13 @@
 #include "RobRunMemory.h"
 #include "Il2Cpp.h"
 #include "Memory.h"
+#include "InputManager.h"
 #include "../Config/ConfigInstance.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 namespace FovChanger {
@@ -22,9 +25,10 @@ struct FovTarget {
     bool used = false;
 };
 
+static std::mutex g_fovMutex;
 static FovTarget g_fovTargets[kMaxFovTargets];
-static bool g_fovHolding = false;
-static DWORD g_fovModUntil = 0;
+static std::atomic<bool> g_fovHolding{ false };
+static std::uint64_t g_fovModUntil = 0;
 
 static inline bool IsValidPtr(std::uintptr_t ptr)
 {
@@ -59,11 +63,11 @@ static bool ClassNamed(std::uintptr_t obj, const char* want)
     return false;
 }
 
-// Read-modify-write: an unchanged value costs one read instead of a DMA write
+// Read-modify-write: an unchanged value costs one fresh read instead of a DMA write
 static void WriteFloatMaybe(std::uintptr_t addr, float value)
 {
     float current = 0.f;
-    if (!TargetProcess.Read(addr, &current, sizeof(current))) return;
+    if (!TargetProcess.ReadFresh(addr, &current, sizeof(current))) return;
     if (current == value) return;
     TargetProcess.Write(addr, value);
 }
@@ -152,16 +156,20 @@ static std::uintptr_t FindBrain(std::uintptr_t views)
 // is active the game owns the lens; the hold re-applies after the tail.
 static bool IsFovModActive()
 {
-    if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
-        g_fovModUntil = GetTickCount() + 600;
+    const bool shiftDown =
+        (Keyboard::IsReady() && Keyboard::IsKeyDown(VK_SHIFT)) ||
+        ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    const std::uint64_t now = GetTickCount64();
+    if (shiftDown) {
+        g_fovModUntil = now + 600;
         return true;
     }
-    return GetTickCount() < g_fovModUntil;
+    return now < g_fovModUntil;
 }
 
-void Restore()
+static void RestoreLocked()
 {
-    if (!g_fovHolding) return;
+    if (!g_fovHolding.load(std::memory_order_relaxed)) return;
     for (int i = 0; i < kMaxFovTargets; ++i) {
         FovTarget* t = &g_fovTargets[i];
         if (!t->used) continue;
@@ -172,24 +180,32 @@ void Restore()
         t->addr = 0;
         t->original = 0.f;
     }
-    g_fovHolding = false;
+    g_fovHolding.store(false, std::memory_order_release);
+}
+
+void Restore()
+{
+    std::lock_guard<std::mutex> lock(g_fovMutex);
+    RestoreLocked();
 }
 
 void Reset()
 {
-    Restore();
+    std::lock_guard<std::mutex> lock(g_fovMutex);
+    RestoreLocked();
     std::memset(g_fovTargets, 0, sizeof(g_fovTargets));
-    g_fovHolding = false;
+    g_fovHolding.store(false, std::memory_order_release);
     g_fovModUntil = 0;
 }
 
 bool IsHolding()
 {
-    return g_fovHolding;
+    return g_fovHolding.load(std::memory_order_acquire);
 }
 
 void Tick()
 {
+    std::lock_guard<std::mutex> lock(g_fovMutex);
     const bool enabled = ConfigInstance.Overlay.FovChanger && !ConfigInstance.Overlay.PanicMode;
     const float fovVal = std::clamp(ConfigInstance.Overlay.CameraFov, 20.0f, 160.0f);
 
@@ -199,7 +215,7 @@ void Tick()
     std::uintptr_t targets[kMaxFovTargets]{};
     int n = 0;
 
-    if (enabled || g_fovHolding) {
+    if (enabled || g_fovHolding.load(std::memory_order_relaxed)) {
         std::uintptr_t brain = FindBrain(views);
         if (IsValidPtr(brain)) {
             const std::uintptr_t activeVcam = TargetProcess.Read<std::uintptr_t>(brain + rr::Fov::BrainActiveCamera);
@@ -217,7 +233,7 @@ void Tick()
     }
 
     if (!enabled) {
-        if (g_fovHolding) {
+        if (g_fovHolding.load(std::memory_order_relaxed)) {
             for (int i = 0; i < kMaxFovTargets; ++i) {
                 FovTarget* t = &g_fovTargets[i];
                 if (!t->used) continue;
@@ -235,7 +251,7 @@ void Tick()
                 t->addr = 0;
                 t->original = 0.f;
             }
-            g_fovHolding = false;
+            g_fovHolding.store(false, std::memory_order_release);
         }
         return;
     }
@@ -244,7 +260,7 @@ void Tick()
     // captured originals and holding state stay armed for the resume.
     if (IsFovModActive()) return;
     if (n <= 0) return;
-    g_fovHolding = true;
+    g_fovHolding.store(true, std::memory_order_release);
 
     for (int j = 0; j < n; ++j) {
         FovTarget* t = nullptr;

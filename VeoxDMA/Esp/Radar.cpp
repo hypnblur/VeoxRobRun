@@ -9,8 +9,10 @@
 #include "../ImGUI/imgui.h"
 #include <d3d11.h>
 #include <wincodec.h>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
+#include <mutex>
 
 namespace {
 
@@ -21,6 +23,9 @@ int g_mapHeight = 0;
 std::vector<std::string> g_mapFiles;
 int g_currentMapIndex = -1;
 std::filesystem::path g_mapsDir;
+std::atomic<int> g_pendingMapIndex{ -1 };
+std::mutex g_radarStateMutex;
+bool g_comInitialized = false;
 
 bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 {
@@ -51,11 +56,17 @@ bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 	if (FAILED(hr)) { converter->Release(); frame->Release(); decoder->Release(); factory->Release(); return false; }
 
 	UINT w = 0, h = 0;
-	converter->GetSize(&w, &h);
-	g_mapWidth = (int)w;
-	g_mapHeight = (int)h;
+	hr = converter->GetSize(&w, &h);
+	if (FAILED(hr) || w == 0 || h == 0 || w > 16384 || h > 16384) {
+		converter->Release();
+		frame->Release();
+		decoder->Release();
+		factory->Release();
+		return false;
+	}
 
-	std::vector<BYTE> pixels(w * h * 4);
+	const std::size_t pixelBytes = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+	std::vector<BYTE> pixels(pixelBytes);
 	hr = converter->CopyPixels(nullptr, w * 4, (UINT)pixels.size(), pixels.data());
 	converter->Release();
 	frame->Release();
@@ -87,6 +98,10 @@ bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 	srvDesc.Texture2D.MipLevels = 1;
 	hr = device->CreateShaderResourceView(tex, &srvDesc, &g_mapSRV);
 	tex->Release();
+	if (SUCCEEDED(hr)) {
+		g_mapWidth = (int)w;
+		g_mapHeight = (int)h;
+	}
 	return SUCCEEDED(hr);
 }
 
@@ -181,7 +196,7 @@ namespace Radar {
 void Init()
 {
 	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-	(void)hr;
+	g_comInitialized = (hr == S_OK || hr == S_FALSE);
 
 	wchar_t exePath[MAX_PATH] = {};
 	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -520,9 +535,10 @@ void Draw()
 
 	const bool drawMapTexture = (g_mapSRV != nullptr) && cfg.ShowMap;
 	if (drawMapTexture) {
-		if (cfg.RotateWithCamera && haveLocal) {
-			float worldW = cfg.WorldMaxX - cfg.WorldMinX;
-			float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
+		const float worldW = cfg.WorldMaxX - cfg.WorldMinX;
+		const float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
+		const bool validBounds = worldW > 0.f && worldH > 0.f && cfg.Zoom > 0.f;
+		if (cfg.RotateWithCamera && haveLocal && validBounds) {
 			float scale = side / std::max(worldW, worldH) * cfg.Zoom;
 
 			float normX = (localPos.x - cfg.WorldMinX) / worldW;
@@ -555,9 +571,7 @@ void Draw()
 				IM_COL32(255, 255, 255, (int)(op * 255.f)));
 		}
 		else {
-			if (haveLocal) {
-				float worldW = cfg.WorldMaxX - cfg.WorldMinX;
-				float worldH = cfg.WorldMaxZ - cfg.WorldMinZ;
+			if (haveLocal && validBounds) {
 				float scale = side / std::max(worldW, worldH) * cfg.Zoom;
 
 				float normX = (localPos.x - cfg.WorldMinX) / worldW;
@@ -1043,6 +1057,10 @@ void DrawFullMap()
 void Shutdown()
 {
 	if (g_mapSRV) { g_mapSRV->Release(); g_mapSRV = nullptr; }
+	if (g_comInitialized) {
+		CoUninitialize();
+		g_comInitialized = false;
+	}
 }
 
 const std::vector<std::string>& GetMapFiles()
@@ -1052,16 +1070,35 @@ const std::vector<std::string>& GetMapFiles()
 
 int GetCurrentMapIndex()
 {
+	std::lock_guard<std::mutex> lock(g_radarStateMutex);
 	return g_currentMapIndex;
+}
+
+void RequestSetMap(int index)
+{
+	g_pendingMapIndex.store(index, std::memory_order_release);
+}
+
+void ProcessPendingMap()
+{
+	const int pending = g_pendingMapIndex.exchange(-1, std::memory_order_acq_rel);
+	if (pending >= 0)
+		SetMap(pending);
 }
 
 void SetMap(int index)
 {
 	if (index < 0 || index >= (int)g_mapFiles.size()) return;
-	if (index == g_currentMapIndex) return;
+	{
+		std::lock_guard<std::mutex> lock(g_radarStateMutex);
+		if (index == g_currentMapIndex) return;
+	}
 
 	if (LoadMapByName(g_mapFiles[index])) {
-		g_currentMapIndex = index;
+		{
+			std::lock_guard<std::mutex> lock(g_radarStateMutex);
+			g_currentMapIndex = index;
+		}
 		ConfigInstance.Radar.SelectedMap = g_mapFiles[index];
 		if (ConfigInstance.Radar.AutoMapSelect) {
 			CalibrateBoundsForMap(g_mapFiles[index]);
@@ -1069,12 +1106,12 @@ void SetMap(int index)
 	}
 }
 
-const std::string& GetCurrentMapName()
+std::string GetCurrentMapName()
 {
-	static const std::string s_empty = "";
+	std::lock_guard<std::mutex> lock(g_radarStateMutex);
 	if (g_currentMapIndex >= 0 && g_currentMapIndex < (int)g_mapFiles.size())
 		return g_mapFiles[g_currentMapIndex];
-	return ConfigInstance.Radar.SelectedMap.empty() ? s_empty : ConfigInstance.Radar.SelectedMap;
+	return ConfigInstance.Radar.SelectedMap;
 }
 
 std::filesystem::path GetMapsDirectory()

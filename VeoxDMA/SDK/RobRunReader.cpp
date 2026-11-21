@@ -335,8 +335,11 @@ static Vector3 g_nativeCameraPosition{};
 static Vector3 g_nativeCameraForward{};
 static bool g_nativeCameraPoseValid = false;
 
-static CollisionBVH::Scene g_bvhScene;
-static std::string g_bvhLoadedPath;
+static std::mutex g_bvhMutex;
+static std::shared_ptr<const CollisionBVH::Scene> g_bvhScene =
+    std::make_shared<CollisionBVH::Scene>();
+static std::string g_bvhRequestedPath;
+static std::uint64_t g_bvhLastAttemptMs = 0;
 static CollisionBVH::DynamicOccluders g_dynOccluders;
 static std::mutex g_dynOccludersMutex;
 
@@ -382,36 +385,37 @@ CollisionBVH::DynamicOccluders GetDynamicOccluders()
     return g_dynOccluders;
 }
 
+static std::shared_ptr<const CollisionBVH::Scene> LoadBvhSnapshot()
+{
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    return g_bvhScene;
+}
+
 static void TryLoadBvh(bool force = false)
 {
-    const std::string& path = ConfigInstance.Player.BvhPath.empty()
-        ? "city_colliders.bvh"
+    const std::string path = ConfigInstance.Player.BvhPath.empty()
+        ? std::string("city_colliders.bvh")
         : ConfigInstance.Player.BvhPath;
 
-    static std::uint64_t s_lastAttemptMs = 0;
-    static std::string s_lastAttemptPath;
     const std::uint64_t now = GetTickCount64();
-
-    if (!force)
     {
-        if (g_bvhScene.valid && path == s_lastAttemptPath)
-            return;
-        if (s_lastAttemptMs != 0 && (now - s_lastAttemptMs) < 3000 && path == s_lastAttemptPath)
-            return;
+        std::lock_guard<std::mutex> lock(g_bvhMutex);
+        if (!force)
+        {
+            if (g_bvhScene && g_bvhScene->valid && path == g_bvhRequestedPath)
+                return;
+            if (g_bvhLastAttemptMs != 0 && (now - g_bvhLastAttemptMs) < 3000 && path == g_bvhRequestedPath)
+                return;
+        }
+        g_bvhLastAttemptMs = now ? now : 1;
+        g_bvhRequestedPath = path;
     }
 
-    s_lastAttemptMs = now ? now : 1;
-    s_lastAttemptPath = path;
+    auto nextScene = std::make_shared<CollisionBVH::Scene>();
+    CollisionBVH::Load(path, *nextScene);
 
-    g_bvhScene = CollisionBVH::Scene{};
-    if (CollisionBVH::Load(path, g_bvhScene))
-    {
-        g_bvhLoadedPath = g_bvhScene.loadedPath;
-    }
-    else
-    {
-        g_bvhLoadedPath.clear();
-    }
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    g_bvhScene = std::move(nextScene);
 }
 
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
@@ -697,13 +701,14 @@ static void PublishSnapshot()
 
 void Shutdown()
 {
-    RestoreDefaultCrosshair();
     g_workerStop.store(true, std::memory_order_relaxed);
     g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
         g_workerThread.join();
     if (g_worldWorkerThread.joinable())
         g_worldWorkerThread.join();
+    // Restore after stopping workers so g_workerThread cannot re-hide it.
+    RestoreDefaultCrosshair();
 
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
@@ -804,7 +809,10 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
 
     DLOG("RobRunReader::Init: TryLoadBvh");
     TryLoadBvh(true);
-    DLOG("RobRunReader::Init: BVH done, valid=%d", g_bvhScene.valid);
+    {
+        const auto bvh = LoadBvhSnapshot();
+        DLOG("RobRunReader::Init: BVH done, valid=%d", (bvh && bvh->valid) ? 1 : 0);
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_snapshotMutex);
@@ -3518,6 +3526,7 @@ static void UpdateInternal()
             // Distance gate per item 9:
             const bool haveLocalPos = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
             const float entDist = haveLocalPos ? Distance(entity.position, localPosition) : 0.f;
+            const auto bvh = LoadBvhSnapshot();
             if (ConfigInstance.Player.VisMaxDistance > 0.f && entDist > ConfigInstance.Player.VisMaxDistance) {
                 entity.visible = false;
                 for (auto& seg : entity.bones) {
@@ -3525,7 +3534,7 @@ static void UpdateInternal()
                 }
             }
             else if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
-                g_bvhScene.valid && visCamera.valid &&
+                bvh && bvh->valid && visCamera.valid &&
                 entity.entityId != localEntityId)
             {
                 const CollisionBVH::Float3 cam = {
@@ -3547,8 +3556,8 @@ static void UpdateInternal()
                         entity.position.y + 1.65f,
                         entity.position.z };
 
-                    bool torsoVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, torso, &dynCopy, carCabinSolid);
-                    bool headVis = !CollisionBVH::IsOccluded(g_bvhScene, cam, head, &dynCopy, carCabinSolid);
+                    bool torsoVis = !CollisionBVH::IsOccluded(*bvh, cam, torso, &dynCopy, carCabinSolid);
+                    bool headVis = !CollisionBVH::IsOccluded(*bvh, cam, head, &dynCopy, carCabinSolid);
                     anyVisible = torsoVis || headVis;
                     for (auto& seg : entity.bones) {
                         seg.visible = anyVisible;
@@ -3573,12 +3582,12 @@ static void UpdateInternal()
                         CollisionBVH::Float3{ entity.position.x + 0.40f, entity.position.y + 1.0f, entity.position.z };
                     const CollisionBVH::Float3 pFeet = { entity.position.x, entity.position.y + 0.15f, entity.position.z };
 
-                    bool vHead   = !CollisionBVH::IsOccluded(g_bvhScene, cam, pHead, &dynCopy, carCabinSolid);
-                    bool vChest  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pChest, &dynCopy, carCabinSolid);
-                    bool vPelvis = !CollisionBVH::IsOccluded(g_bvhScene, cam, pPelvis, &dynCopy, carCabinSolid);
-                    bool vLHand  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pLHand, &dynCopy, carCabinSolid);
-                    bool vRHand  = !CollisionBVH::IsOccluded(g_bvhScene, cam, pRHand, &dynCopy, carCabinSolid);
-                    bool vFeet   = !CollisionBVH::IsOccluded(g_bvhScene, cam, pFeet, &dynCopy, carCabinSolid);
+                    bool vHead   = !CollisionBVH::IsOccluded(*bvh, cam, pHead, &dynCopy, carCabinSolid);
+                    bool vChest  = !CollisionBVH::IsOccluded(*bvh, cam, pChest, &dynCopy, carCabinSolid);
+                    bool vPelvis = !CollisionBVH::IsOccluded(*bvh, cam, pPelvis, &dynCopy, carCabinSolid);
+                    bool vLHand  = !CollisionBVH::IsOccluded(*bvh, cam, pLHand, &dynCopy, carCabinSolid);
+                    bool vRHand  = !CollisionBVH::IsOccluded(*bvh, cam, pRHand, &dynCopy, carCabinSolid);
+                    bool vFeet   = !CollisionBVH::IsOccluded(*bvh, cam, pFeet, &dynCopy, carCabinSolid);
 
                     anyVisible = (vHead || vChest || vPelvis || vLHand || vRHand || vFeet);
 
@@ -3599,7 +3608,7 @@ static void UpdateInternal()
                             (seg.a.x + seg.b.x) * 0.5f,
                             (seg.a.y + seg.b.y) * 0.5f,
                             (seg.a.z + seg.b.z) * 0.5f };
-                        seg.visible = !CollisionBVH::IsOccluded(g_bvhScene, cam, mid, &dynCopy, carCabinSolid);
+                        seg.visible = !CollisionBVH::IsOccluded(*bvh, cam, mid, &dynCopy, carCabinSolid);
                         if (seg.visible)
                             anyVisible = true;
                     }
@@ -3684,10 +3693,7 @@ void Update()
         DLOG("Update #%d", updateCount);
 
     try {
-        if (!g_bvhScene.valid || ConfigInstance.Player.BvhPath != g_bvhLoadedPath)
-        {
-            TryLoadBvh(false);
-        }
+        TryLoadBvh(false);
 
         UpdateInternal();
         PublishSnapshot();
@@ -4011,11 +4017,14 @@ bool ProjectWorld(const Matrix4x4& viewProjection, const Vector3& world,
 
 BvhStatus GetBvhStatus()
 {
+    const auto bvh = LoadBvhSnapshot();
     BvhStatus s;
-    s.loaded = g_bvhScene.valid;
-    s.nodeCount = (uint32_t)g_bvhScene.nodes.size();
-    s.triCount = (uint32_t)g_bvhScene.tris.size();
-    s.path = g_bvhScene.loadedPath;
+    if (bvh) {
+        s.loaded = bvh->valid;
+        s.nodeCount = (uint32_t)bvh->nodes.size();
+        s.triCount = (uint32_t)bvh->tris.size();
+        s.path = bvh->loadedPath;
+    }
     return s;
 }
 
@@ -4024,14 +4033,15 @@ void ReloadBvh()
     TryLoadBvh(true);
 }
 
-const CollisionBVH::Scene& GetBvhScene()
+std::shared_ptr<const CollisionBVH::Scene> GetBvhScene()
 {
-    return g_bvhScene;
+    return LoadBvhSnapshot();
 }
 
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool checkDynamic)
 {
-    if (!g_bvhScene.valid) return false;
+    const auto bvh = LoadBvhSnapshot();
+    if (!bvh || !bvh->valid) return false;
     const CollisionBVH::Float3 o{ origin.x, origin.y, origin.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
     CollisionBVH::DynamicOccluders dynCopy;
@@ -4041,15 +4051,18 @@ bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool c
         dynCopy = g_dynOccluders;
         dyn = &dynCopy;
     }
-    return CollisionBVH::IsOccluded(g_bvhScene, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
 }
 
 bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
 {
-    if (!g_bvhScene.valid) return false;
-    RobRunCamera::CameraState cam = cameraState;
-    RobRunCamera::CameraState fresh{};
-    if (GetFreshCamera(fresh)) cam = fresh;
+    const auto bvh = LoadBvhSnapshot();
+    if (!bvh || !bvh->valid) return false;
+    RobRunCamera::CameraState cam{};
+    if (!GetFreshCamera(cam)) {
+        const auto snap = GetSnapshot();
+        if (snap) cam = snap->camera;
+    }
     if (!cam.valid) return false;
     const CollisionBVH::Float3 o{ cam.position.x, cam.position.y, cam.position.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
@@ -4060,7 +4073,7 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
         dynCopy = g_dynOccluders;
         dyn = &dynCopy;
     }
-    return CollisionBVH::IsOccluded(g_bvhScene, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
 }
 
 } // namespace RobRunReader

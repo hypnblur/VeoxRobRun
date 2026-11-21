@@ -502,15 +502,6 @@ void DrawPlayers()
 
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	const auto& pcfg = ConfigInstance.Player;
-	const ImU32 espCol = Esp::D2DColorToImU32(pcfg.TextColour);
-	const ImU32 boxCol = Esp::D2DColorToImU32(pcfg.BoxColour);
-	const ImU32 nameCol = Esp::D2DColorToImU32(pcfg.NameColour);
-	const ImU32 distCol = Esp::D2DColorToImU32(pcfg.DistanceColour);
-	const ImU32 hpTxtCol = Esp::D2DColorToImU32(pcfg.HealthTextColour);
-	const ImU32 weapCol = Esp::D2DColorToImU32(pcfg.WeaponColour);
-	const ImU32 roleCol = Esp::D2DColorToImU32(pcfg.RoleColour);
-	const ImU32 lookCol = Esp::D2DColorToImU32(pcfg.LookingColour);
-	const ImU32 stateCol = Esp::D2DColorToImU32(pcfg.StateColour);
 	const float fontSize = (float)pcfg.FontSize;
 	ImFont* font = ImGui::GetFont();
 
@@ -1106,8 +1097,8 @@ void DrawBvhDebug()
 {
 	if (!ConfigInstance.Player.ShowBvh) return;
 
-	const auto& scene = RobRunReader::GetBvhScene();
-	if (!scene.valid || scene.nodes.empty()) return;
+	const auto scene = RobRunReader::GetBvhScene();
+	if (!scene || !scene->valid || scene->nodes.empty()) return;
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	const int screenW = (int)display.x;
@@ -1126,7 +1117,7 @@ void DrawBvhDebug()
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	const ImU32 col = IM_COL32(0, 255, 255, 80);
 
-	for (const auto& node : scene.nodes) {
+	for (const auto& node : scene->nodes) {
 		if (!node.isLeaf()) continue;
 
 		const float cx = (node.aabbMin.x + node.aabbMax.x) * 0.5f;

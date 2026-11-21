@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include <mutex>
 #include <set>
 
 // Aim settings for the Device Connections tab.
@@ -80,7 +81,38 @@ public:
 
 	// Manually trusted players (by publicId / account id). Aimbot skips these
 	// the same way it skips party members when ExpIgnoreTeammates is on.
+	// Accessed concurrently by the UI thread and the 500 Hz targeting worker;
+	// always go through the synchronized helpers below (or lock TrustedMutex()).
 	std::set<std::uint64_t> TrustedPlayers;
+
+	static std::mutex& TrustedMutex()
+	{
+		static std::mutex m;
+		return m;
+	}
+
+	bool IsTrusted(std::uint64_t publicId) const
+	{
+		if (!publicId) return false;
+		std::lock_guard<std::mutex> lock(TrustedMutex());
+		return TrustedPlayers.count(publicId) > 0;
+	}
+
+	void SetTrusted(std::uint64_t publicId, bool trusted)
+	{
+		if (!publicId) return;
+		std::lock_guard<std::mutex> lock(TrustedMutex());
+		if (trusted)
+			TrustedPlayers.insert(publicId);
+		else
+			TrustedPlayers.erase(publicId);
+	}
+
+	int TrustedCount() const
+	{
+		std::lock_guard<std::mutex> lock(TrustedMutex());
+		return static_cast<int>(TrustedPlayers.size());
+	}
 
 	// Hardware Device connection settings
 	int DeviceIndex = 0;
@@ -128,6 +160,7 @@ public:
 		j[ConfigName][LIT("IgnoreKnock")] = IgnoreKnock;
 		j[ConfigName][LIT("HideCrosshair")] = HideCrosshair;
 		{
+			std::lock_guard<std::mutex> lock(TrustedMutex());
 			json arr = json::array();
 			for (auto id : TrustedPlayers) arr.push_back(std::to_string(id));
 			j[ConfigName][LIT("TrustedPlayers")] = arr;
@@ -179,10 +212,19 @@ public:
 		SkipKnocked = j[ConfigName].value(LIT("SkipKnocked"), SkipKnocked);
 		IgnoreKnock = j[ConfigName].value(LIT("IgnoreKnock"), IgnoreKnock);
 		HideCrosshair = j[ConfigName].value(LIT("HideCrosshair"), HideCrosshair);
-		if (j[ConfigName].contains(LIT("TrustedPlayers"))) {
-			TrustedPlayers.clear();
-			for (const auto& v : j[ConfigName][LIT("TrustedPlayers")])
-				TrustedPlayers.insert(std::stoull(v.get<std::string>()));
+		if (j[ConfigName].contains(LIT("TrustedPlayers")) &&
+			j[ConfigName][LIT("TrustedPlayers")].is_array()) {
+			std::set<std::uint64_t> parsed;
+			for (const auto& v : j[ConfigName][LIT("TrustedPlayers")]) {
+				try {
+					if (v.is_string())
+						parsed.insert(std::stoull(v.get<std::string>()));
+					else if (v.is_number_unsigned())
+						parsed.insert(v.get<std::uint64_t>());
+				} catch (...) {}
+			}
+			std::lock_guard<std::mutex> lock(TrustedMutex());
+			TrustedPlayers = std::move(parsed);
 		}
 		DeviceIndex = j[ConfigName].value(LIT("DeviceIndex"), DeviceIndex);
 		ComPort = j[ConfigName].value(LIT("ComPort"), ComPort);

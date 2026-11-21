@@ -14,6 +14,7 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <cctype>
+#include <utility>
 
 namespace WebRadar {
 
@@ -22,7 +23,60 @@ namespace {
 std::atomic<bool> g_serverRunning{ false };
 std::thread g_serverThread;
 int g_serverPort = 8888;
+std::mutex g_socketMutex;
 SOCKET g_listenSocket = INVALID_SOCKET;
+
+void CloseListenSocket()
+{
+	SOCKET s = INVALID_SOCKET;
+	{
+		std::lock_guard<std::mutex> lock(g_socketMutex);
+		s = std::exchange(g_listenSocket, INVALID_SOCKET);
+	}
+	if (s != INVALID_SOCKET)
+		closesocket(s);
+}
+
+bool SendAll(SOCKET sock, const char* data, std::size_t len)
+{
+	std::size_t sent = 0;
+	while (sent < len) {
+		const int chunk = static_cast<int>((std::min)(len - sent, static_cast<std::size_t>(1 << 20)));
+		const int n = send(sock, data + sent, chunk, 0);
+		if (n <= 0) return false;
+		sent += static_cast<std::size_t>(n);
+	}
+	return true;
+}
+
+std::string UrlDecode(const std::string& in)
+{
+	std::string out;
+	out.reserve(in.size());
+	auto hexVal = [](char c) -> int {
+		if (c >= '0' && c <= '9') return c - '0';
+		if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+		if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+		return -1;
+	};
+	for (std::size_t i = 0; i < in.size(); ++i) {
+		if (in[i] == '+') {
+			out.push_back(' ');
+		} else if (in[i] == '%' && i + 2 < in.size()) {
+			const int hi = hexVal(in[i + 1]);
+			const int lo = hexVal(in[i + 2]);
+			if (hi >= 0 && lo >= 0) {
+				out.push_back(static_cast<char>((hi << 4) | lo));
+				i += 2;
+				continue;
+			}
+			out.push_back(in[i]);
+		} else {
+			out.push_back(in[i]);
+		}
+	}
+	return out;
+}
 
 // ---------------------------------------------------------------------------
 // Embedded HTML5 / Canvas Single-Page Application
@@ -814,42 +868,63 @@ const std::string kWebRadarHtml = std::string(R"raw_html(<!DOCTYPE html>
 void RunServerLoop(int port)
 {
 	WSADATA wsaData{};
-	WSAStartup(MAKEWORD(2, 2), &wsaData);
+	const bool wsaOk = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
+	if (!wsaOk) {
+		g_serverRunning.store(false);
+		return;
+	}
+	struct WsaGuard {
+		~WsaGuard() { WSACleanup(); }
+	} wsaGuard;
 
-	g_listenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (g_listenSocket == INVALID_SOCKET) {
+	SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	if (listenSock == INVALID_SOCKET) {
 		g_serverRunning.store(false);
 		return;
 	}
 
 	int opt = 1;
-	setsockopt(g_listenSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+	setsockopt(listenSock, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
 
 	sockaddr_in serverAddr{};
 	serverAddr.sin_family = AF_INET;
 	serverAddr.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces (localhost + LAN)
 	serverAddr.sin_port = htons(static_cast<u_short>(port));
 
-	if (bind(g_listenSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-		closesocket(g_listenSocket);
-		g_listenSocket = INVALID_SOCKET;
+	if (bind(listenSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+		closesocket(listenSock);
 		g_serverRunning.store(false);
 		return;
 	}
 
-	if (listen(g_listenSocket, 10) == SOCKET_ERROR) {
-		closesocket(g_listenSocket);
-		g_listenSocket = INVALID_SOCKET;
+	if (listen(listenSock, 10) == SOCKET_ERROR) {
+		closesocket(listenSock);
 		g_serverRunning.store(false);
 		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_socketMutex);
+		if (!g_serverRunning.load()) {
+			closesocket(listenSock);
+			return;
+		}
+		g_listenSocket = listenSock;
 	}
 
 	printf("[WebRadar] Server listening on http://localhost:%d\n", port);
 
 	while (g_serverRunning.load()) {
+		SOCKET activeListen = INVALID_SOCKET;
+		{
+			std::lock_guard<std::mutex> lock(g_socketMutex);
+			activeListen = g_listenSocket;
+		}
+		if (activeListen == INVALID_SOCKET) break;
+
 		fd_set readSet;
 		FD_ZERO(&readSet);
-		FD_SET(g_listenSocket, &readSet);
+		FD_SET(activeListen, &readSet);
 
 		timeval tv{};
 		tv.tv_sec = 0;
@@ -860,9 +935,10 @@ void RunServerLoop(int port)
 
 		sockaddr_in clientAddr{};
 		int clientAddrLen = sizeof(clientAddr);
-		SOCKET client = accept(g_listenSocket, (sockaddr*)&clientAddr, &clientAddrLen);
+		SOCKET client = accept(activeListen, (sockaddr*)&clientAddr, &clientAddrLen);
 		if (client == INVALID_SOCKET) continue;
 
+		try {
 		// Set client timeouts to 2 seconds
 		DWORD timeoutMs = 2000;
 		setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
@@ -889,22 +965,22 @@ void RunServerLoop(int port)
 				"Access-Control-Allow-Headers: Content-Type\r\n"
 				"Content-Length: 0\r\n"
 				"Connection: close\r\n\r\n";
-			send(client, resp.data(), (int)resp.size(), 0);
+			SendAll(client, resp.data(), resp.size());
 			closesocket(client);
 			continue;
 		}
 
 		// Routing: Root / HTML SPA
 		if (path == "/" || path == "/index.html" || path.empty()) {
-			std::string body = kWebRadarHtml;
+			const std::string& body = kWebRadarHtml;
 			std::string header =
 				"HTTP/1.1 200 OK\r\n"
 				"Content-Type: text/html; charset=utf-8\r\n"
 				"Content-Length: " + std::to_string(body.size()) + "\r\n"
 				"Access-Control-Allow-Origin: *\r\n"
 				"Connection: close\r\n\r\n";
-			send(client, header.data(), (int)header.size(), 0);
-			send(client, body.data(), (int)body.size(), 0);
+			if (SendAll(client, header.data(), header.size()))
+				SendAll(client, body.data(), body.size());
 		}
 		// Routing: /api/state
 		else if (path.rfind("/api/state", 0) == 0) {
@@ -1009,31 +1085,28 @@ void RunServerLoop(int port)
 			j["loot"] = loot;
 			j["availableMaps"] = Radar::GetMapFiles();
 
-			std::string body = j.dump();
+			std::string body = j.dump(-1, ' ', false, json::error_handler_t::replace);
 			std::string header =
 				"HTTP/1.1 200 OK\r\n"
 				"Content-Type: application/json; charset=utf-8\r\n"
 				"Content-Length: " + std::to_string(body.size()) + "\r\n"
 				"Access-Control-Allow-Origin: *\r\n"
 				"Connection: close\r\n\r\n";
-			send(client, header.data(), (int)header.size(), 0);
-			send(client, body.data(), (int)body.size(), 0);
+			if (SendAll(client, header.data(), header.size()))
+				SendAll(client, body.data(), body.size());
 		}
 		// Routing: /api/setmap?name=...
 		else if (path.rfind("/api/setmap", 0) == 0) {
 			auto pos = path.find("name=");
 			if (pos != std::string::npos) {
-				std::string name = path.substr(pos + 5);
-				// URL decode simple spaces
-				for (size_t i = 0; i < name.size(); ++i) {
-					if (name[i] == '+' || (name[i] == '%' && i + 2 < name.size() && name[i+1] == '2' && name[i+2] == '0')) {
-						name[i] = ' ';
-					}
-				}
+				std::string rawName = path.substr(pos + 5);
+				const auto amp = rawName.find('&');
+				if (amp != std::string::npos) rawName.resize(amp);
+				const std::string name = UrlDecode(rawName);
 				const auto& files = Radar::GetMapFiles();
 				for (int i = 0; i < (int)files.size(); ++i) {
 					if (files[i] == name) {
-						Radar::SetMap(i);
+						Radar::RequestSetMap(i);
 						break;
 					}
 				}
@@ -1045,16 +1118,16 @@ void RunServerLoop(int port)
 				"Content-Length: " + std::to_string(body.size()) + "\r\n"
 				"Access-Control-Allow-Origin: *\r\n"
 				"Connection: close\r\n\r\n";
-			send(client, header.data(), (int)header.size(), 0);
-			send(client, body.data(), (int)body.size(), 0);
+			if (SendAll(client, header.data(), header.size()))
+				SendAll(client, body.data(), body.size());
 		}
 		// Routing: /api/bvh (2D collision wall contours)
 		else if (path == "/api/bvh") {
 			json lines = json::array();
-			const auto& scene = RobRunReader::GetBvhScene();
+			const auto scene = RobRunReader::GetBvhScene();
 			const auto snap = RobRunReader::GetSnapshot();
 
-			if (scene.valid && !scene.tris.empty()) {
+			if (scene && scene->valid && !scene->tris.empty()) {
 				float centerY = snap ? snap->localPosition.y : 0.f;
 				float range = 180.f;
 				float rangeSq = range * range;
@@ -1062,7 +1135,7 @@ void RunServerLoop(int port)
 				float cz = snap ? snap->localPosition.z : 0.f;
 
 				int count = 0;
-				for (const auto& tri : scene.tris) {
+				for (const auto& tri : scene->tris) {
 					// Check height range (near player Y)
 					float midY = (tri.v0.y + tri.v1.y + tri.v2.y) * 0.3333f;
 					if (std::abs(midY - centerY) > 8.0f) continue;
@@ -1096,57 +1169,71 @@ void RunServerLoop(int port)
 				"Content-Length: " + std::to_string(body.size()) + "\r\n"
 				"Access-Control-Allow-Origin: *\r\n"
 				"Connection: close\r\n\r\n";
-			send(client, header.data(), (int)header.size(), 0);
-			send(client, body.data(), (int)body.size(), 0);
+			if (SendAll(client, header.data(), header.size()))
+				SendAll(client, body.data(), body.size());
 		}
 		// Routing: /maps/<filename> (Map image binary)
 		else if (path.rfind("/maps/", 0) == 0) {
 			std::string filename = path.substr(6);
-			// Remove query strings if any
 			auto q = filename.find('?');
 			if (q != std::string::npos) filename = filename.substr(0, q);
+			filename = UrlDecode(filename);
 
-			// Security: prevent path traversal
-			if (filename.find("..") == std::string::npos && !filename.empty()) {
+			// Strict whitelist against known map filenames: prevents absolute
+			// paths (/..., C:\...), drive prefixes, and directory traversal.
+			bool allowed = !filename.empty() &&
+				filename.find("..") == std::string::npos &&
+				filename.find('/') == std::string::npos &&
+				filename.find('\\') == std::string::npos &&
+				filename.find(':') == std::string::npos &&
+				filename.find('\0') == std::string::npos;
+			if (allowed) {
+				const auto& knownMaps = Radar::GetMapFiles();
+				allowed = std::find(knownMaps.begin(), knownMaps.end(), filename) != knownMaps.end();
+			}
+
+			if (allowed) {
 				std::filesystem::path fullPath = Radar::GetMapsDirectory() / filename;
-				std::ifstream f(fullPath, std::ios::binary);
+				std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
 				if (f.is_open()) {
-					f.seekg(0, std::ios::end);
-					size_t size = (size_t)f.tellg();
-					f.seekg(0, std::ios::beg);
-
-					std::vector<char> buf(size);
-					f.read(buf.data(), size);
-
-					std::string header =
-						"HTTP/1.1 200 OK\r\n"
-						"Content-Type: image/png\r\n"
-						"Content-Length: " + std::to_string(size) + "\r\n"
-						"Cache-Control: public, max-age=600\r\n"
-						"Access-Control-Allow-Origin: *\r\n"
-						"Connection: close\r\n\r\n";
-					send(client, header.data(), (int)header.size(), 0);
-					send(client, buf.data(), (int)buf.size(), 0);
-					closesocket(client);
-					continue;
+					const std::streamoff rawSize = f.tellg();
+					constexpr std::streamoff kMaxMapBytes = 32 * 1024 * 1024;
+					if (rawSize > 0 && rawSize <= kMaxMapBytes) {
+						f.seekg(0, std::ios::beg);
+						std::vector<char> buf(static_cast<std::size_t>(rawSize));
+						if (f.read(buf.data(), rawSize)) {
+							std::string header =
+								"HTTP/1.1 200 OK\r\n"
+								"Content-Type: image/png\r\n"
+								"Content-Length: " + std::to_string(buf.size()) + "\r\n"
+								"Cache-Control: public, max-age=600\r\n"
+								"Access-Control-Allow-Origin: *\r\n"
+								"Connection: close\r\n\r\n";
+							if (SendAll(client, header.data(), header.size()))
+								SendAll(client, buf.data(), buf.size());
+							closesocket(client);
+							continue;
+						}
+					}
 				}
 			}
 
 			std::string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-			send(client, notFound.data(), (int)notFound.size(), 0);
+			SendAll(client, notFound.data(), notFound.size());
 		}
 		else {
 			std::string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-			send(client, notFound.data(), (int)notFound.size(), 0);
+			SendAll(client, notFound.data(), notFound.size());
+		}
+		} catch (...) {
+			std::string errResp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+			SendAll(client, errResp.data(), errResp.size());
 		}
 
 		closesocket(client);
 	}
 
-	if (g_listenSocket != INVALID_SOCKET) {
-		closesocket(g_listenSocket);
-		g_listenSocket = INVALID_SOCKET;
-	}
+	CloseListenSocket();
 }
 
 } // namespace
@@ -1170,15 +1257,10 @@ bool Start(int port)
 
 void Stop()
 {
-	if (g_serverRunning.load()) {
-		g_serverRunning.store(false);
-		if (g_listenSocket != INVALID_SOCKET) {
-			closesocket(g_listenSocket);
-			g_listenSocket = INVALID_SOCKET;
-		}
-		if (g_serverThread.joinable()) {
-			g_serverThread.join();
-		}
+	g_serverRunning.store(false);
+	CloseListenSocket();
+	if (g_serverThread.joinable()) {
+		g_serverThread.join();
 	}
 }
 
