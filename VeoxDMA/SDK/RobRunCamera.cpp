@@ -126,6 +126,13 @@ float ReadCinemachineFov()
     return 0.f;
 }
 
+std::uintptr_t GetCachedBrain()
+{
+    if (g_cachedBrain > 0x10000) return g_cachedBrain;
+    ReadCinemachineFov();
+    return g_cachedBrain;
+}
+
 CameraState Read(std::uintptr_t battleCameraModel)
 {
     CameraState camera{};

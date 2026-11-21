@@ -27,6 +27,9 @@ CameraState Read(std::uintptr_t battleCameraModel);
 // Returns 0 when the path is unavailable.
 float ReadCinemachineFov();
 
+// Returns cached active CinemachineBrain pointer (resolving if needed).
+std::uintptr_t GetCachedBrain();
+
 // Builds a row-vector view-projection matrix matching RobRunReader's
 // WorldToScreen convention. aspect = viewport width / viewport height.
 bool BuildViewProjection(const CameraState& camera, float aspect,

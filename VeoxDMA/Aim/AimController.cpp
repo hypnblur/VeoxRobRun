@@ -2,6 +2,7 @@
 #include "AimController.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
+#include "FovChanger.h"
 #include "RobRunSDK.h"
 #include "RobRunMemory.h"
 #include "Il2Cpp.h"
@@ -761,6 +762,7 @@ void StartAimWorker()
                     TickInstantLoot();
                     TickInstantUnlock();
                     TickCustomCamera();
+                    FovChanger::Tick();
                 }
             } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -774,6 +776,7 @@ void StopAimWorker()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    FovChanger::Restore();
 }
 
 // The reference memory aim also writes the local input model, the player
