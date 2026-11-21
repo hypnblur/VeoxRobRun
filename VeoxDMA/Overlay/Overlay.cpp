@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdio>
 #include <d3d11.h>
+#include <dxgi1_5.h>
 #include <dwmapi.h>
 #include <exception>
 #include <thread>
@@ -18,8 +19,13 @@
 #include <vector>
 #include <intrin.h>
 #pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "winmm.lib")
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 extern void RequestReattach();
 
@@ -29,6 +35,13 @@ ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 IDXGISwapChain* g_swapChain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
+HANDLE g_frameLatencyWaitable = nullptr;
+HANDLE g_paceTimer = nullptr;
+UINT g_swapChainFlags = 0;
+bool g_flipModel = false;
+bool g_tearingSupported = false;
+bool g_swapChainTransparent = false;
+std::atomic<float> g_currentFps{ 0.f };
 
 std::vector<RECT> g_monitors;
 int g_appliedMonitor = -1;
@@ -37,7 +50,7 @@ std::atomic<bool> g_menuOpen{ true };
 bool g_transparent = false;
 bool g_clickThrough = true;
 bool g_alwaysOnTop = true;
-int g_frameCap = 144;
+int g_frameCap = 240;
 std::atomic<bool> g_requestExit{ false };
 
 #ifdef _DEBUG
@@ -72,34 +85,158 @@ void CleanupRenderTarget()
 	if (g_rtv) { g_rtv->Release(); g_rtv = nullptr; }
 }
 
+void CleanupSwapChain()
+{
+	if (g_context) {
+		g_context->OMSetRenderTargets(0, nullptr, nullptr);
+		g_context->Flush();
+	}
+	CleanupRenderTarget();
+	if (g_frameLatencyWaitable) {
+		CloseHandle(g_frameLatencyWaitable);
+		g_frameLatencyWaitable = nullptr;
+	}
+	if (g_swapChain) {
+		g_swapChain->Release();
+		g_swapChain = nullptr;
+	}
+	g_swapChainFlags = 0;
+	g_flipModel = false;
+	g_tearingSupported = false;
+}
+
+bool CreateSwapChainForMode(HWND hWnd, bool transparent)
+{
+	if (!g_device) return false;
+	CleanupSwapChain();
+
+	IDXGIDevice1* dxgiDevice = nullptr;
+	if (FAILED(g_device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice)
+		return false;
+	// Cap the DXGI queue to 1 frame in flight (default is 3) in every mode so
+	// rendered overlays never pile up behind DWM or GPU backpressure.
+	dxgiDevice->SetMaximumFrameLatency(1);
+
+	IDXGIAdapter* adapter = nullptr;
+	HRESULT hr = dxgiDevice->GetAdapter(&adapter);
+	dxgiDevice->Release();
+	if (FAILED(hr) || !adapter)
+		return false;
+
+	IDXGIFactory2* factory2 = nullptr;
+	hr = adapter->GetParent(IID_PPV_ARGS(&factory2));
+	adapter->Release();
+	if (FAILED(hr) || !factory2)
+		return false;
+
+	factory2->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER);
+
+	RECT rc{};
+	GetClientRect(hWnd, &rc);
+	const UINT width = (rc.right > rc.left) ? static_cast<UINT>(rc.right - rc.left) : 0;
+	const UINT height = (rc.bottom > rc.top) ? static_cast<UINT>(rc.bottom - rc.top) : 0;
+
+	bool created = false;
+	if (!transparent) {
+		// Opaque overlay (e.g. DMA fuser): use Flip-Discard + Waitable Frame
+		// Latency + Allow Tearing so Windows can promote the overlay to Direct
+		// / Independent Flip and scan out immediately without DWM copy lag.
+		BOOL allowTearing = FALSE;
+		IDXGIFactory5* factory5 = nullptr;
+		if (SUCCEEDED(factory2->QueryInterface(IID_PPV_ARGS(&factory5))) && factory5) {
+			if (FAILED(factory5->CheckFeatureSupport(
+				DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing)))) {
+				allowTearing = FALSE;
+			}
+			factory5->Release();
+		}
+
+		DXGI_SWAP_CHAIN_DESC1 sd1{};
+		sd1.Width = width;
+		sd1.Height = height;
+		sd1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		sd1.SampleDesc.Count = 1;
+		sd1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		sd1.BufferCount = 2;
+		sd1.Scaling = DXGI_SCALING_STRETCH;
+		sd1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+		sd1.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+		sd1.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+		if (allowTearing)
+			sd1.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+
+		IDXGISwapChain1* sc1 = nullptr;
+		hr = factory2->CreateSwapChainForHwnd(g_device, hWnd, &sd1, nullptr, nullptr, &sc1);
+		if (FAILED(hr) && allowTearing) {
+			allowTearing = FALSE;
+			sd1.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+			hr = factory2->CreateSwapChainForHwnd(g_device, hWnd, &sd1, nullptr, nullptr, &sc1);
+		}
+		if (SUCCEEDED(hr) && sc1) {
+			g_swapChain = sc1;
+			g_swapChainFlags = sd1.Flags;
+			g_flipModel = true;
+			g_tearingSupported = (allowTearing != FALSE);
+			IDXGISwapChain2* sc2 = nullptr;
+			if (SUCCEEDED(sc1->QueryInterface(IID_PPV_ARGS(&sc2))) && sc2) {
+				sc2->SetMaximumFrameLatency(1);
+				g_frameLatencyWaitable = sc2->GetFrameLatencyWaitableObject();
+				sc2->Release();
+			}
+			created = true;
+		}
+	}
+
+	if (!created) {
+		// Transparent layered mode (or fallback on older/WARP drivers): keeps
+		// per-pixel DWM alpha via DwmExtendFrameIntoClientArea while still
+		// honoring SetMaximumFrameLatency(1) above.
+		DXGI_SWAP_CHAIN_DESC sd{};
+		sd.BufferCount = 2;
+		sd.BufferDesc.Width = width;
+		sd.BufferDesc.Height = height;
+		sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+		sd.OutputWindow = hWnd;
+		sd.SampleDesc.Count = 1;
+		sd.Windowed = TRUE;
+		sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+		sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
+
+		hr = factory2->CreateSwapChain(g_device, &sd, &g_swapChain);
+		if (SUCCEEDED(hr) && g_swapChain) {
+			g_swapChainFlags = sd.Flags;
+			g_flipModel = false;
+			g_tearingSupported = false;
+			created = true;
+		}
+	}
+
+	factory2->Release();
+	if (!created) return false;
+
+	g_swapChainTransparent = transparent;
+	CreateRenderTarget();
+	return g_rtv != nullptr;
+}
+
 bool CreateDeviceD3D(HWND hWnd)
 {
-	DXGI_SWAP_CHAIN_DESC sd{};
-	sd.BufferCount = 2;
-	sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	sd.OutputWindow = hWnd;
-	sd.SampleDesc.Count = 1;
-	sd.Windowed = TRUE;
-	sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-	sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-
 	const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
 	D3D_FEATURE_LEVEL level;
-	HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-		levels, 2, D3D11_SDK_VERSION, &sd, &g_swapChain, &g_device, &level, &g_context);
+	HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+		levels, 2, D3D11_SDK_VERSION, &g_device, &level, &g_context);
 	if (hr == DXGI_ERROR_UNSUPPORTED)
-		hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
-			levels, 2, D3D11_SDK_VERSION, &sd, &g_swapChain, &g_device, &level, &g_context);
+		hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0,
+			levels, 2, D3D11_SDK_VERSION, &g_device, &level, &g_context);
 	if (FAILED(hr)) return false;
-	CreateRenderTarget();
-	return true;
+
+	return CreateSwapChainForMode(hWnd, g_transparent);
 }
 
 void CleanupDeviceD3D()
 {
-	CleanupRenderTarget();
-	if (g_swapChain) { g_swapChain->Release(); g_swapChain = nullptr; }
+	CleanupSwapChain();
 	if (g_context) { g_context->Release(); g_context = nullptr; }
 	if (g_device) { g_device->Release(); g_device = nullptr; }
 }
@@ -169,6 +306,8 @@ void SyncOverlayWindowChrome(HWND hwnd)
 	ApplyOverlayPerPixelTransparency(hwnd, wanted.transparent);
 	SetWindowPos(hwnd, wanted.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
 		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+	if (g_device && wanted.transparent != g_swapChainTransparent)
+		CreateSwapChainForMode(hwnd, wanted.transparent);
 	g_appliedChrome = wanted;
 }
 
@@ -205,13 +344,24 @@ void WaitForFrameCap()
 	if (remain <= clock::duration::zero())
 		return;
 
-	// timeBeginPeriod(1) is already active in the render loop, but sleep_for
-	// still rounds up to the timer tick. Sleep the bulk, then spin briefly so
-	// the cap is honoured within a frame at 240+ fps. The spin is kept to
-	// 200 us: a 1 ms spin at 144 fps burns roughly 14% of a core for nothing.
-	const auto spin = std::chrono::microseconds(200);
-	if (remain > spin)
-		std::this_thread::sleep_for(remain - spin);
+	// Use a high-resolution waitable timer (~0.5 ms granularity) for the bulk
+	// wait so high-refresh caps (240/360/480 Hz) don't suffer Sleep(1) jitter,
+	// then spin the final 150 us for exact frame alignment.
+	const auto spin = std::chrono::microseconds(150);
+	if (remain > spin) {
+		const auto sleepNs = std::chrono::duration_cast<std::chrono::nanoseconds>(remain - spin).count();
+		if (g_paceTimer && sleepNs >= 100'000LL) {
+			LARGE_INTEGER due{};
+			due.QuadPart = -(sleepNs / 100LL); // 100 ns units, relative
+			if (SetWaitableTimer(g_paceTimer, &due, 0, nullptr, nullptr, FALSE)) {
+				WaitForSingleObject(g_paceTimer, INFINITE);
+			} else {
+				std::this_thread::sleep_for(remain - spin);
+			}
+		} else {
+			std::this_thread::sleep_for(remain - spin);
+		}
+	}
 	while (clock::now() < next) {
 		_mm_pause();
 	}
@@ -436,6 +586,18 @@ void SetFrameCap(int fps)
 	ConfigInstance.Overlay.FrameCap = g_frameCap;
 }
 
+const char* PresentModeName()
+{
+	if (g_flipModel)
+		return g_tearingSupported ? "FLIP+TEAR" : "FLIP";
+	return g_swapChainTransparent ? "DISCARD(transparent)" : "DISCARD";
+}
+
+float CurrentFps()
+{
+	return g_currentFps.load(std::memory_order_relaxed);
+}
+
 int MonitorCount() { return (int)g_monitors.size(); }
 int MonitorIndex() { return ConfigInstance.Overlay.MonitorIndex; }
 
@@ -480,8 +642,9 @@ static LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam
 			const UINT w = LOWORD(lParam);
 			const UINT h = HIWORD(lParam);
 			if (w > 0 && h > 0) {
+				if (g_context) g_context->OMSetRenderTargets(0, nullptr, nullptr);
 				CleanupRenderTarget();
-				if (SUCCEEDED(g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, 0)))
+				if (SUCCEEDED(g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_swapChainFlags)))
 					CreateRenderTarget();
 			}
 		}
@@ -594,6 +757,8 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	ImGui_ImplDX11_Init(g_device, g_context);
 
 	const bool timerPeriodSet = timeBeginPeriod(1) == TIMERR_NOERROR;
+	g_paceTimer = CreateWaitableTimerExW(
+		nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
 	KeyEdgeState menuEdge{};
 	KeyEdgeState panicEdge{};
@@ -605,12 +770,15 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	MSG msg{};
 	while (msg.message != WM_QUIT)
 	{
-		if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+		while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
 		{
 			TranslateMessage(&msg);
 			DispatchMessage(&msg);
-			continue;
+			if (msg.message == WM_QUIT)
+				break;
 		}
+		if (msg.message == WM_QUIT)
+			break;
 
 		if (g_requestExit.exchange(false))
 		{
@@ -644,11 +812,18 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		ApplyOverlayMonitor(hWnd);
 		SyncOverlayWindowChrome(hWnd);
 
+		// Wait until the previous frame's slot is free BEFORE sampling the
+		// camera and building draw lists, so projected positions reflect the
+		// latest camera at the instant of submission.
+		if (g_frameLatencyWaitable)
+			WaitForSingleObjectEx(g_frameLatencyWaitable, 100, TRUE);
+
 		if (callbacks.tick) callbacks.tick();
 
 		ImGui_ImplDX11_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 		ImGui::NewFrame();
+		g_currentFps.store(ImGui::GetIO().Framerate, std::memory_order_relaxed);
 
 		if (!ConfigInstance.Overlay.PanicMode)
 		{
@@ -664,18 +839,21 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 
 		ImGui::Render();
 
-		if (g_rtv && g_context && g_swapChain) {
+		if (g_rtv && g_context && g_swapChain)
+		{
 			const D2D1::ColorF& bg = ConfigInstance.Overlay.BackgroundColour;
 			const float clear[4] = { bg.r, bg.g, bg.b, g_transparent ? 0.f : 1.f };
 			g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
 			g_context->ClearRenderTargetView(g_rtv, clear);
 			ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-			g_swapChain->Present(0, 0);
+			const UINT presentFlags = (g_flipModel && g_tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0;
+			g_swapChain->Present(0, presentFlags);
 		}
 		WaitForFrameCap();
 	}
 
 	if (callbacks.shutdown) callbacks.shutdown();
+	if (g_paceTimer) { CloseHandle(g_paceTimer); g_paceTimer = nullptr; }
 	if (timerPeriodSet) timeEndPeriod(1);
 	ImGui_ImplDX11_Shutdown();
 	ImGui_ImplWin32_Shutdown();

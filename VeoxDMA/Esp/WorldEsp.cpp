@@ -299,7 +299,7 @@ void DrawWorldEntities()
 		const float dx = entity.position.x - localPos.x;
 		const float dy = entity.position.y - localPos.y;
 		const float dz = entity.position.z - localPos.z;
-		const float distance = haveLocalPosition ? std::sqrt(dx * dx + dy * dy + dz * dz) : 0.f;
+		const float distSq = dx * dx + dy * dy + dz * dz;
 		const bool hasItemRange = itemCfg && !itemCfg->useGlobalDistance && itemCfg->maxDistance > 0;
 
 		// With the filter on, the filter owns the range: the legacy ESP distance
@@ -325,8 +325,9 @@ void DrawWorldEntities()
 			continue;
 
 		// Keep items with an explicit limit hidden until an origin is available.
+		const float maxDistF = static_cast<float>(maxDist);
 		const bool outsideRange = haveLocalPosition
-			? maxDist > 0 && distance > maxDist
+			? maxDist > 0 && distSq > maxDistF * maxDistF
 			: hasItemRange;
 		if (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0)) {
 			static std::unordered_set<std::string> logged;
@@ -334,7 +335,8 @@ void DrawWorldEntities()
 				":" + rangeOrigin + ":" + std::to_string(hasItemRange) + ":" + std::to_string(outsideRange);
 			if (logged.size() < 64 && logged.insert(key).second)
 				VeoxDiag("trio range: placement=%d row='%s' origin=%s distance=%.1f limit=%d perItem=%d culled=%d",
-					entity.id, itemDef ? itemDef->id : "", rangeOrigin, distance, maxDist,
+					entity.id, itemDef ? itemDef->id : "", rangeOrigin,
+					haveLocalPosition ? std::sqrt(distSq) : 0.f, maxDist,
 					hasItemRange, outsideRange);
 		}
 		if (outsideRange)
@@ -357,6 +359,12 @@ void DrawWorldEntities()
 		Vector2 screen;
 		if (!RobRunReader::ProjectWorld(
 			viewProjection, entity.position, screenW, screenH, screen))
+			continue;
+
+		// Skip off-screen world items before allocating/measuring text or
+		// emitting draw commands.
+		if (screen.x < -120.f || screen.x > (float)screenW + 120.f ||
+			screen.y < -60.f || screen.y > (float)screenH + 60.f)
 			continue;
 
 		const bool filterOn = lf.Enabled;
@@ -455,7 +463,7 @@ void DrawWorldEntities()
 		};
 
 		if (wantDist && haveLocalPosition)
-			drawLine(std::to_string(static_cast<int>(distance)) + "m", IM_COL32(205, 205, 205, 235));
+			drawLine(std::to_string(static_cast<int>(std::sqrt(distSq))) + "m", IM_COL32(205, 205, 205, 235));
 
 		if (wantName) {
 			// The row owns the display name: the entity label is often the raw

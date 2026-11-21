@@ -554,7 +554,7 @@ bool IsKeyHeld(int keyIndex)
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
 static std::mutex g_debugMutex;
-static std::mutex g_aimWorkerMutex;
+static std::mutex g_workerLifecycleMutex;
 static std::atomic<bool> g_aimWorkerStop{ false };
 static std::thread g_aimWorkerThread;
 
@@ -736,14 +736,24 @@ static void TickCustomCamera()
     TargetProcess.Write(snap->cameraModel + rr::BattleCameraModelOffsets::Distance, targetDistance);
 }
 
-void StartAimWorker()
+static void StartRecoilWorkerLocked();
+static void StopRecoilWorkerLocked();
+
+static void StopAimWorkerLocked()
 {
-    std::lock_guard<std::mutex> lock(g_aimWorkerMutex);
-    StopRecoilWorker();
+    StopRecoilWorkerLocked();
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
-    StartRecoilWorker();
+    Keyboard::SetAsyncKeyPolling(false);
+}
+
+void StartAimWorker()
+{
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopAimWorkerLocked();
+    StartRecoilWorkerLocked();
+    Keyboard::SetAsyncKeyPolling(true);
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
         using clock = std::chrono::steady_clock;
@@ -752,11 +762,10 @@ void StartAimWorker()
         while (!g_aimWorkerStop.load(std::memory_order_relaxed)) {
             const auto now = clock::now();
             try {
-                // Camera refresh stays at the loop rate (one scatter read); the
-                // full entity scan and the loot poke do not need 500 Hz. The
-                // write path is throttled to 16 ms and the device to 6 ms, so
-                // running the scan faster than that only burns CPU.
-                RobRunReader::RefreshCamera();
+                // Keep the game-PC key bitmap warm on the worker so the render
+                // thread never blocks on kernel DMA reads. Camera polling runs
+                // on RobRunReader's dedicated high-priority camera thread.
+                Keyboard::PollKeysAsync();
                 if (now - lastTick >= std::chrono::milliseconds(6)) {
                     lastTick = now;
                     Tick();
@@ -777,11 +786,8 @@ void StartAimWorker()
 
 void StopAimWorker()
 {
-    std::lock_guard<std::mutex> lock(g_aimWorkerMutex);
-    StopRecoilWorker();
-    g_aimWorkerStop.store(true, std::memory_order_relaxed);
-    if (g_aimWorkerThread.joinable())
-        g_aimWorkerThread.join();
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopAimWorkerLocked();
     FovChanger::Restore();
 }
 
@@ -1387,7 +1393,6 @@ static std::uintptr_t g_cachedPlayerClient = 0;
 static std::uint64_t g_lastRecoilGen = 0;
 
 // ---- No Recoil: per-shot kick budget (dedicated worker) -------------------
-static std::mutex g_recoilWorkerMutex;
 static std::atomic<bool> g_recoilStop{true};
 static std::thread g_recoilThread;
 
@@ -1570,12 +1575,16 @@ static void TickRecoil()
     g_rcWasFiring = firing;
 }
 
-void StartRecoilWorker()
+static void StopRecoilWorkerLocked()
 {
-    std::lock_guard<std::mutex> lock(g_recoilWorkerMutex);
     g_recoilStop.store(true, std::memory_order_relaxed);
     if (g_recoilThread.joinable())
         g_recoilThread.join();
+}
+
+static void StartRecoilWorkerLocked()
+{
+    StopRecoilWorkerLocked();
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
@@ -1585,12 +1594,16 @@ void StartRecoilWorker()
     });
 }
 
+void StartRecoilWorker()
+{
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StartRecoilWorkerLocked();
+}
+
 void StopRecoilWorker()
 {
-    std::lock_guard<std::mutex> lock(g_recoilWorkerMutex);
-    g_recoilStop.store(true, std::memory_order_relaxed);
-    if (g_recoilThread.joinable())
-        g_recoilThread.join();
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopRecoilWorkerLocked();
 }
 
 void TickRecoilSpread()

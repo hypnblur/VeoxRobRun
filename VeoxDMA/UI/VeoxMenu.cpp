@@ -1288,6 +1288,32 @@ void DrawRadar()
 			Note("Open on any browser, second monitor, or mobile phone on Wi-Fi.");
 		}
 		EndCard();
+
+		ImGui::Dummy(ImVec2(0, 10));
+		BeginCard("IN-GAME MAP OVERLAY", kCardW);
+		ToggleRow("Top-Left Minimap", &ConfigInstance.Radar.InGameMinimap);
+		ToggleRow("Fullscreen Map (M)", &ConfigInstance.Radar.InGameFullMap);
+		ToggleRow("Hide 3D ESP on Full Map", &ConfigInstance.Radar.Hide3DEspOnFullMap);
+		SectionLabel("MARKERS");
+		ToggleRow("Player Arrows", &ConfigInstance.Radar.InGameMapPlayers);
+		ToggleRow("Vehicle Icons", &ConfigInstance.Radar.InGameMapVehicles);
+		ToggleRow("Player Names (Full Map)", &ConfigInstance.Radar.InGameMapPlayerNames);
+		ToggleRow("Dropped Bags", &ConfigInstance.Radar.InGameMapDroppedBags);
+		ToggleRow("Valuables & Cargo", &ConfigInstance.Radar.InGameMapValuables);
+		SliderFloatRow("Icon Scale", &ConfigInstance.Radar.InGameMapScale, 0.5f, 2.0f, "x");
+		if (const auto snap = RobRunReader::GetSnapshot()) {
+			if (snap->inGameMap.valid) {
+				const auto& v = snap->inGameMap.fullscreenOpen ? snap->inGameMap.fullscreen : snap->inGameMap.minimap;
+				char buf[96];
+				std::snprintf(buf, sizeof(buf), "%s | camSize=%.0fm | rect=%s",
+					snap->inGameMap.fullscreenOpen ? "Full Map (M)" : "Minimap",
+					v.cameraSize, v.rectValid ? "OK" : "pending");
+				Note(buf);
+			} else {
+				Note("Waiting for in-game map state...");
+			}
+		}
+		EndCard();
 	}
 	ImGui::EndGroup();
 

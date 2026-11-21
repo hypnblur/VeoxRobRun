@@ -7,16 +7,24 @@
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include "DebugLog.h"
+#include "Overlay.h"
 #include <atomic>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
+#include <intrin.h>
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 namespace RobRunReader {
 
@@ -98,9 +106,47 @@ struct WeaponDescCache {
 };
 static std::unordered_map<std::uintptr_t, WeaponDescCache> g_weaponDescCache;
 
+static std::atomic<bool> g_cameraInvalidated{ false };
+
+// Lightweight render-thread visibility feedback (written lock-free from
+// PlayerEsp::DrawPlayers, read by the worker and world threads to time
+// manual VMM Mem/TLB cache refreshes when nobody is in sight or nearby).
+static std::atomic<bool> g_renderAnyOnScreen{ false };
+static std::atomic<float> g_renderNearestDist{ 9999.f };
+static std::atomic<std::uint64_t> g_renderReportMs{ 0 };
+static std::atomic<std::uint64_t> g_lastCacheRefreshMs{ 0 };
+
+void ReportRenderState(bool anyOnScreen, float nearestOnScreenDist)
+{
+    g_renderAnyOnScreen.store(anyOnScreen, std::memory_order_relaxed);
+    g_renderNearestDist.store(nearestOnScreenDist, std::memory_order_relaxed);
+    g_renderReportMs.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+static bool MaybeRefreshDmaCaches(const char* reason, std::uint64_t cooldownMs)
+{
+    const std::uint64_t now = GetTickCount64();
+    std::uint64_t prev = g_lastCacheRefreshMs.load(std::memory_order_relaxed);
+    if (cooldownMs > 0 && prev != 0 && now >= prev && (now - prev) < cooldownMs)
+        return false;
+    if (!g_lastCacheRefreshMs.compare_exchange_strong(prev, now, std::memory_order_relaxed))
+        return false;
+    TargetProcess.RefreshAllCaches();
+    static std::uint64_t lastLogMs = 0;
+    if (now - lastLogMs >= 5000) {
+        lastLogMs = now;
+        DLOG("DmaCacheRefresh: reason=%s", reason ? reason : "manual");
+    }
+    return true;
+}
+
+static void ClearEntityCaches();
+
 static void MarkSessionChanged()
 {
     ++sessionGeneration;
+    g_cameraInvalidated.store(true, std::memory_order_release);
+    MaybeRefreshDmaCaches("sessionChanged", 0);
     DLOG("SessionChange: gen=%llu bm=0x%llx be=0x%llx lc=0x%llx game=0x%llx",
          (unsigned long long)sessionGeneration,
          (unsigned long long)cachedBattleModel,
@@ -112,6 +158,7 @@ static void MarkSessionChanged()
     cachedViews.clear();
     cachedViewOwner.clear();
     viewOwnerMisses.clear();
+    ClearEntityCaches();
     g_slotIdentityCache.clear();
     g_roleCache.clear();
     g_weaponDescCache.clear();
@@ -172,6 +219,7 @@ static std::shared_ptr<const RobRunWorld::PlotState> g_plotState =
 static std::uint64_t worldRefreshStamp = 0;
 static std::uint64_t inventoryRefreshStamp = 0;
 static RobRunCamera::CameraState cameraState;
+static InGameMapState inGameMapState;
 static Vector3 localPosition{};
 static float localYaw = 0.f;
 static float localPitch = 0.f;
@@ -286,8 +334,65 @@ struct RigCacheEntry {
     Vector3 lastSampledPos{};
     std::vector<Matrix4x4> worldMatrices;
     std::vector<Matrix4x4> smoothedWorldMatrices;
+    // 3-sample ring buffer of pelvis-relative bone postures. Taking the
+    // 3-sample temporal median on (bone - pelvis) and adding back the live,
+    // undelayed pelvis world position keeps moving players at full worker
+    // refresh rate (0 ms position lag) while mathematically erasing isolated
+    // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
+    std::vector<Skeleton::BoneSegment> relBoneHist[3];
+    Skeleton::BonePoints relPtsHist[3]{};
+    int poseHistCount = 0;
+    int poseHistCursor = 0;
+    int upgradeAttempts = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
+
+struct RectTransformCache {
+    std::uintptr_t managed = 0;
+    std::uint64_t stampMs = 0;
+    bool valid = false;
+    float uiMinX = 0.f, uiMinY = 0.f, uiMaxX = 0.f, uiMaxY = 0.f;
+    float uiCenterX = 0.f, uiCenterY = 0.f;
+    float uiScaleX = 1.f, uiScaleY = 1.f;
+    float uiScreenW = 0.f, uiScreenH = 0.f;
+};
+static std::uintptr_t cachedMapDialogModel = 0;
+static std::uintptr_t cachedMapConfigModel = 0;
+static std::uintptr_t cachedMapFullVar = 0;
+static std::uintptr_t cachedMapMiniVar = 0;
+static std::uintptr_t cachedMapModelPtr = 0;
+static RectTransformCache g_miniRectCache{};
+static RectTransformCache g_fullRectCache{};
+static std::int32_t s_rectTransformRectOffset = -1;
+static std::atomic<std::uintptr_t> g_liveFullMapVarPtr{ 0 };
+static std::mutex g_liveFullMapMutex;
+static struct {
+    bool valid = false;
+    Vector2 pos{};
+    float rot = 0.f;
+    float camSize = 0.f;
+} g_liveFullMap{};
+static std::atomic<bool> g_fullMapFastMode{ false };
+
+static void ClearEntityCaches()
+{
+    rigCache.clear();
+    detailCache.clear();
+    cachedMapDialogModel = 0;
+    cachedMapConfigModel = 0;
+    cachedMapFullVar = 0;
+    cachedMapMiniVar = 0;
+    cachedMapModelPtr = 0;
+    g_miniRectCache = RectTransformCache{};
+    g_fullRectCache = RectTransformCache{};
+    inGameMapState = InGameMapState{};
+    g_liveFullMapVarPtr.store(0, std::memory_order_release);
+    g_fullMapFastMode.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+        g_liveFullMap.valid = false;
+    }
+}
 
 static void PruneCaches()
 {
@@ -309,31 +414,82 @@ static std::thread g_workerThread;
 static std::atomic<bool> g_worldWorkerStop{ false };
 static std::thread g_worldWorkerThread;
 
-// Render-thread camera refresh. The worker publishes cachedCameraModel via
-// this atomic; RefreshCamera() re-reads the camera block with uncached DMA
-// and stores it here so GetViewProjection() can use it instead of the
-// worker's ~30 Hz snapshot.
+// Dedicated camera polling thread. Reads the native Unity camera at ~0.5 ms
+// intervals and publishes into a lock-free seqlock so the render thread never
+// blocks on DMA or mutexes while panning.
+static std::atomic<bool> g_cameraStop{ false };
+static std::atomic<bool> g_cameraRunning{ false };
+static std::thread g_cameraThread;
+static std::atomic<std::uint64_t> g_perfWorkerPasses{ 0 };
+static std::atomic<std::uint64_t> g_perfWorkerUs{ 0 };
+static std::atomic<std::uint64_t> g_perfWorkerMaxUs{ 0 };
+static std::atomic<std::uint64_t> g_perfP1Us{ 0 };
+static std::atomic<std::uint64_t> g_perfP2Us{ 0 };
+static std::atomic<std::uint64_t> g_perfP3Us{ 0 };
+static std::atomic<std::uint64_t> g_perfDetUs{ 0 };
+static std::atomic<std::uint64_t> g_perfP5Us{ 0 };
+static std::atomic<std::uint64_t> g_perfRebuilds{ 0 };
+static std::atomic<std::uint64_t> g_perfFallbacks{ 0 };
+static std::atomic<int> g_perfSkels{ 0 };
+static std::atomic<int> g_perfLiving{ 0 };
+static void StartCameraWorker();
+static void StopCameraWorker();
+
+// Worker publishes cachedCameraModel via this atomic; the camera thread reads
+// either the native Unity Camera (fast path) or BattleCameraModel (fallback).
 static std::atomic<std::uintptr_t> g_renderCameraModel{ 0 };
 static std::mutex g_freshCameraMutex;
 static RobRunCamera::CameraState g_freshCamera;
 
-// Native Unity main-camera view-projection, re-read on the render thread.
-// Memory aim rewrites the managed BattleCameraModel block, so building the ESP
-// matrix from that block makes the overlay project with a camera the game never
-// rendered (skeletons drift/lag behind the character). The native Camera
-// component is the camera the GPU actually used, so it is preferred whenever it
-// is readable; the managed block stays as the fallback.
-static std::mutex g_nativeCameraMutex;
-static Matrix4x4 g_nativeView{};
-static Matrix4x4 g_nativeProjection{};
-static bool g_nativeViewProjectionValid = false;
-static float g_nativePositionError = -1.f;
-static float g_nativeForwardDot = -1.f;
-// World pose parsed from the native view matrix. Aim uses it as its angle and
-// occlusion origin so the origin and the projection come from one camera read.
-static Vector3 g_nativeCameraPosition{};
-static Vector3 g_nativeCameraForward{};
-static bool g_nativeCameraPoseValid = false;
+// Native Unity main-camera view-projection, published via a single-writer
+// lock-free seqlock. Memory aim rewrites the managed BattleCameraModel block,
+// so the native Camera component is the camera the GPU actually used and is
+// preferred whenever readable; the managed block stays as the fallback.
+struct NativeCameraSnapshot {
+    Matrix4x4 view{};
+    Matrix4x4 projection{};
+    Vector3 position{};
+    Vector3 forward{};
+    float positionError = -1.f;
+    float forwardDot = -1.f;
+    std::uint64_t stampUs = 0;
+    bool valid = false;
+    bool poseValid = false;
+};
+
+static std::atomic<std::uint64_t> g_nativeCamSeq{ 0 };
+static NativeCameraSnapshot g_nativeCamBuf{};
+static std::mutex g_nativeCamWriteMutex;
+
+static void PublishNativeCamera(const NativeCameraSnapshot& next)
+{
+    std::lock_guard<std::mutex> lock(g_nativeCamWriteMutex);
+    const std::uint64_t seq = g_nativeCamSeq.load(std::memory_order_relaxed);
+    g_nativeCamSeq.store(seq + 1, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_release);
+    g_nativeCamBuf = next;
+    std::atomic_thread_fence(std::memory_order_release);
+    g_nativeCamSeq.store(seq + 2, std::memory_order_release);
+}
+
+static NativeCameraSnapshot LoadNativeCamera()
+{
+    NativeCameraSnapshot out{};
+    for (int tries = 0; tries < 64; ++tries) {
+        const std::uint64_t s1 = g_nativeCamSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) {
+            _mm_pause();
+            continue;
+        }
+        out = g_nativeCamBuf;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t s2 = g_nativeCamSeq.load(std::memory_order_acquire);
+        if (s1 == s2)
+            return out;
+    }
+    std::lock_guard<std::mutex> lock(g_nativeCamWriteMutex);
+    return g_nativeCamBuf;
+}
 
 static std::mutex g_bvhMutex;
 static std::shared_ptr<const CollisionBVH::Scene> g_bvhScene =
@@ -644,6 +800,7 @@ static void PublishSnapshot()
         snapshot->inventory = g_inventoryState;
     }
     snapshot->camera = cameraState;
+    snapshot->inGameMap = inGameMapState;
     snapshot->localEntityId = localEntityId;
     snapshot->localPosition = localPosition;
     snapshot->localYaw = localYaw;
@@ -701,6 +858,7 @@ static void PublishSnapshot()
 
 void Shutdown()
 {
+    StopCameraWorker();
     g_workerStop.store(true, std::memory_order_relaxed);
     g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
@@ -721,17 +879,13 @@ void Shutdown()
         g_inventoryState = std::make_shared<RobRunInventory::State>();
     }
     g_renderCameraModel.store(0, std::memory_order_relaxed);
+    g_cameraInvalidated.store(false, std::memory_order_relaxed);
+    CameraFinder::InvalidateCache();
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         g_freshCamera = RobRunCamera::CameraState{};
     }
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        g_nativeViewProjectionValid = false;
-        g_nativeCameraPoseValid = false;
-        g_nativeCameraPosition = Vector3{};
-        g_nativeCameraForward = Vector3{};
-    }
+    PublishNativeCamera(NativeCameraSnapshot{});
     gaBase = 0;
     upBase = 0;
 }
@@ -824,12 +978,23 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerThread = std::thread([] {
         DLOG("Worker thread started");
         while (!g_workerStop.load(std::memory_order_relaxed)) {
+            const std::uint64_t t0 = SteadyMicros();
             Update();
-            // Adaptive sleep: 1 ms when entities are active to keep snapshots fresh (50-60 Hz),
-            // or 10 ms during empty lobbies / scene transitions.
-            const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 1 : 10;
-            for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
-                Sleep(1);
+            const std::uint64_t dt = SteadyMicros() - t0;
+            g_perfWorkerPasses.fetch_add(1, std::memory_order_relaxed);
+            g_perfWorkerUs.fetch_add(dt, std::memory_order_relaxed);
+            std::uint64_t prevMax = g_perfWorkerMaxUs.load(std::memory_order_relaxed);
+            while (dt > prevMax && !g_perfWorkerMaxUs.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {}
+            // Adaptive sleep: 0 ms (yield only) when fullscreen map is open and
+            // 3D ESP is hidden so map positions refresh at 300-500 Hz, 2 ms when
+            // normal 3D entities are active, or 10 ms during empty lobbies.
+            if (g_fullMapFastMode.load(std::memory_order_relaxed)) {
+                SwitchToThread();
+            } else {
+                const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
+                for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
+                    Sleep(1);
+            }
         }
     });
 
@@ -841,6 +1006,18 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
             try {
                 ++wwCount;
+                // Controlled partial MemProcFS cache expiry (paired with
+                // -norefresh): purely in-RAM invalidation with zero background
+                // FPGA stalls. Expire 33% data cache every tick (~0.6-1s) and
+                // 33% TLB faster when no enemy is close on screen (~2.5-3s) vs
+                // ~6-8s during close-range visibility.
+                TargetProcess.RefreshMemCachePartial();
+                const bool renderQuiet =
+                    !g_renderAnyOnScreen.load(std::memory_order_relaxed) ||
+                    g_renderNearestDist.load(std::memory_order_relaxed) > 40.f;
+                const int tlbDiv = renderQuiet ? 4 : 10;
+                if ((wwCount % tlbDiv) == 0)
+                    TargetProcess.RefreshTlbCachePartial();
                 const std::uint64_t gen = sessionGeneration;
                 const std::uintptr_t bm = cachedBattleModel;
                 const std::uintptr_t be = cachedBattleEntities;
@@ -885,12 +1062,13 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             } catch (...) {
                 DLOG("WorldWorker UNKNOWN EXCEPTION #%d", wwCount);
             }
-            for (int i = 0; i < 25 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
+            for (int i = 0; i < 50 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(10);
         }
     });
 
-    DLOG("RobRunReader::Init: complete, both workers launched");
+    StartCameraWorker();
+    DLOG("RobRunReader::Init: complete, workers and camera thread launched");
 }
 
 static std::uintptr_t ReadPtr(std::uintptr_t address)
@@ -1974,6 +2152,30 @@ static void RevalidateSession()
         DLOG("GameRoot: class check failed for cachedGame=0x%llx", (unsigned long long)cachedGame);
         cachedGame = 0;
     }
+    // Check live Game -> GameModel -> BattleModel with uncached DMA so leaving
+    // a map or loading into a new session is caught immediately instead of
+    // sticking to an old (not yet GC'd) BattleModel under -norefresh.
+    if (cachedGame > 0x10000) {
+        std::uintptr_t liveGameModel = 0;
+        if (TargetProcess.ReadFresh(cachedGame + rr::Game::GameModel, &liveGameModel, sizeof(liveGameModel)) &&
+            liveGameModel > 0x10000)
+        {
+            std::uintptr_t liveBattleModel = 0;
+            if (TargetProcess.ReadFresh(liveGameModel + rr::GameModel::BattleModel, &liveBattleModel, sizeof(liveBattleModel))) {
+                if (liveBattleModel != cachedBattleModel) {
+                    DLOG("ReaderRoot: BattleModel changed 0x%llx -> 0x%llx, refreshing DMA caches",
+                         (unsigned long long)cachedBattleModel, (unsigned long long)liveBattleModel);
+                    MaybeRefreshDmaCaches("battleModelChanged", 0);
+                    cachedBattleModel = (liveBattleModel > 0x10000 && IsClass(liveBattleModel, "BattleModel"))
+                        ? liveBattleModel : 0;
+                    cachedBattleEntities = 0;
+                    cachedUpdater = 0;
+                    cachedCameraModel = 0;
+                    cachedLocalCharacter = 0;
+                }
+            }
+        }
+    }
     if (cachedBattleModel && !IsClass(cachedBattleModel, "BattleModel")) {
         DLOG("ReaderRoot: class check failed for BattleModel=0x%llx", (unsigned long long)cachedBattleModel);
         cachedBattleModel = 0;
@@ -2030,8 +2232,588 @@ static bool RestoreDefaultCrosshair()
     return restored;
 }
 
+static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache, bool forceRefresh, const char* tag)
+{
+    if (managedRect <= 0x10000) {
+        cache.valid = false;
+        return false;
+    }
+    const std::uint64_t now = GetTickCount64();
+    if (!forceRefresh && cache.managed == managedRect && (now - cache.stampMs) < 500)
+        return cache.valid;
+
+    cache.managed = managedRect;
+    cache.stampMs = now;
+
+    // Uncached-first read helpers: under -norefresh, newly instantiated UI
+    // dialogs (e.g. MapDialogView on pressing 'M') may not be in VMM's cache.
+    auto mapReadBytes = [](std::uintptr_t addr, void* buf, std::size_t sz) -> bool {
+        if (addr <= 0x10000 || !buf || !sz) return false;
+        if (TargetProcess.ReadFresh(addr, buf, sz)) return true;
+        return TargetProcess.Read(addr, buf, sz);
+    };
+    auto mapReadPtr = [&](std::uintptr_t addr) -> std::uintptr_t {
+        std::uintptr_t v = 0;
+        return mapReadBytes(addr, &v, sizeof(v)) ? v : 0;
+    };
+    auto mapReadI32 = [&](std::uintptr_t addr, std::int32_t& out) -> bool {
+        return mapReadBytes(addr, &out, sizeof(out));
+    };
+
+    const std::uintptr_t native = mapReadPtr(managedRect + rr::UnityTransform::native);
+    if (native <= 0x10000) { cache.valid = false; return false; }
+    const std::uintptr_t hierarchy = mapReadPtr(native + rr::UnityTransform::hierarchy);
+    if (hierarchy <= 0x10000) { cache.valid = false; return false; }
+
+    const std::uintptr_t matrices = mapReadPtr(hierarchy + rr::UnityTransform::matrices);
+    const std::uintptr_t parents  = mapReadPtr(hierarchy + rr::UnityTransform::parents);
+    const std::uintptr_t pointers = mapReadPtr(hierarchy + rr::UnityTransform::pointers);
+    if (matrices <= 0x10000 || parents <= 0x10000) {
+        cache.valid = false;
+        return false;
+    }
+
+    // 1. Resolve transform index inside the hierarchy.
+    // Fast path: Native Transform + 0x30 holds the uint32 transform index
+    // (verified in single 8-byte read against hierarchy.pointers[idx] == native).
+    int idx = -1;
+    if (pointers > 0x10000) {
+        constexpr std::uintptr_t kIdxOffsets[] = {
+            rr::UnityTransform::index, 0x20, 0x34, 0x38, 0x40, 0x44, 0x48
+        };
+        for (std::uintptr_t off : kIdxOffsets) {
+            std::int32_t cand = -1;
+            if (mapReadI32(native + off, cand) && cand >= 0 && cand < 131072) {
+                if (mapReadPtr(pointers + static_cast<std::uintptr_t>(cand) * sizeof(std::uintptr_t)) == native) {
+                    idx = cand;
+                    break;
+                }
+            }
+        }
+        // Fallback: chunked 4 KB scan of hierarchy.pointers (tolerates large
+        // UI Canvas hierarchies with >4096 elements without multi-page cache misses).
+        if (idx < 0) {
+            std::int32_t count = 0;
+            if (!mapReadI32(hierarchy + rr::UnityTransform::count, count) || count < 1 || count > 65536) {
+                if (!mapReadI32(hierarchy + 0x10, count) || count < 1 || count > 65536)
+                    count = 16384;
+            }
+            constexpr int kChunkPtrs = 512;
+            std::uintptr_t chunk[kChunkPtrs];
+            for (int base = 0; base < count && idx < 0; base += kChunkPtrs) {
+                const int n = std::min(kChunkPtrs, count - base);
+                if (!mapReadBytes(pointers + static_cast<std::uintptr_t>(base) * sizeof(std::uintptr_t),
+                                  chunk, static_cast<std::size_t>(n) * sizeof(std::uintptr_t)))
+                    break;
+                for (int i = 0; i < n; ++i) {
+                    if (chunk[i] == native) { idx = base + i; break; }
+                }
+            }
+        }
+    } else {
+        std::int32_t cand = -1;
+        if (mapReadI32(native + rr::UnityTransform::index, cand) && cand >= 0 && cand < 65536)
+            idx = cand;
+    }
+
+    if (idx < 0) {
+        static bool loggedIdxFail = false;
+        if (!loggedIdxFail) {
+            loggedIdxFail = true;
+            std::printf("[MapProbe] %s idx resolve failed: rc=0x%llX native=0x%llX hier=0x%llX ptrs=0x%llX\n",
+                tag ? tag : "?", (unsigned long long)managedRect,
+                (unsigned long long)native, (unsigned long long)hierarchy, (unsigned long long)pointers);
+        }
+        cache.valid = false;
+        return false;
+    }
+
+    // 2. Walk ancestor chain from idx up to the Canvas root one parent at a time
+    // (typically 4-10 hops; avoids reading the entire Canvas parent array).
+    std::vector<int> chain;
+    chain.reserve(16);
+    for (int cur = idx, steps = 0; cur >= 0 && cur < 131072 && steps < 32; ++steps) {
+        bool cycle = false;
+        for (int existing : chain) {
+            if (existing == cur) { cycle = true; break; }
+        }
+        if (cycle) break;
+        chain.push_back(cur);
+        std::int32_t p = -1;
+        if (!mapReadI32(parents + static_cast<std::uintptr_t>(cur) * sizeof(std::int32_t), p))
+            break;
+        if (p < 0 || p == cur) break;
+        cur = p;
+    }
+    if (chain.empty()) { cache.valid = false; return false; }
+    std::reverse(chain.begin(), chain.end());
+
+    struct UiTRS {
+        float px, py, pz, padP;
+        float qx, qy, qz, qw;
+        float sx, sy, sz, padS;
+    };
+    static_assert(sizeof(UiTRS) == 48);
+
+    std::vector<UiTRS> chainTrs(chain.size());
+    std::vector<std::uintptr_t> chainNative(chain.size(), 0);
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (!mapReadBytes(matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
+                          &chainTrs[i], sizeof(UiTRS))) {
+            cache.valid = false;
+            return false;
+        }
+        if (pointers > 0x10000) {
+            chainNative[i] = mapReadPtr(
+                pointers + static_cast<std::uintptr_t>(chain[i]) * sizeof(std::uintptr_t));
+        }
+    }
+    chainNative.back() = native;
+
+    auto rotateV = [](float qx, float qy, float qz, float qw, float vx, float vy, float vz,
+                      float& ox, float& oy, float& oz) {
+        const float tx = 2.f * (qy * vz - qz * vy);
+        const float ty = 2.f * (qz * vx - qx * vz);
+        const float tz = 2.f * (qx * vy - qy * vx);
+        ox = vx + qw * tx + (qy * tz - qz * ty);
+        oy = vy + qw * ty + (qz * tx - qx * tz);
+        oz = vz + qw * tz + (qx * ty - qy * tx);
+    };
+    auto mulQ = [](float ax, float ay, float az, float aw,
+                   float bx, float by, float bz, float bw,
+                   float& ox, float& oy, float& oz, float& ow) {
+        ox = aw * bx + ax * bw + ay * bz - az * by;
+        oy = aw * by - ax * bz + ay * bw + az * bx;
+        oz = aw * bz + ax * by - ay * bx + az * bw;
+        ow = aw * bw - ax * bx - ay * by - az * bz;
+    };
+
+    std::vector<float> nodeWx(chainTrs.size(), 0.f);
+    std::vector<float> nodeWy(chainTrs.size(), 0.f);
+    std::vector<float> nodeWsx(chainTrs.size(), 1.f);
+    std::vector<float> nodeWsy(chainTrs.size(), 1.f);
+
+    float wx = 0.f, wy = 0.f, wz = 0.f;
+    float rqx = 0.f, rqy = 0.f, rqz = 0.f, rqw = 1.f;
+    float wsx = 1.f, wsy = 1.f, wsz = 1.f;
+    for (std::size_t i = 0; i < chainTrs.size(); ++i) {
+        const auto& t = chainTrs[i];
+        const float n = t.qx*t.qx + t.qy*t.qy + t.qz*t.qz + t.qw*t.qw;
+        if (!std::isfinite(t.px) || !std::isfinite(t.py) || !std::isfinite(t.sx) || !std::isfinite(t.sy) ||
+            !std::isfinite(n) || n < 0.5f || n > 1.5f) {
+            cache.valid = false;
+            return false;
+        }
+        const float pz = std::isfinite(t.pz) ? t.pz : 0.f;
+        const float sz = (std::isfinite(t.sz) && std::fabs(t.sz) > 1e-4f) ? t.sz : 1.f;
+        const float inv = 1.f / std::sqrt(n);
+        const float qx = t.qx * inv, qy = t.qy * inv, qz = t.qz * inv, qw = t.qw * inv;
+        if (i == 0) {
+            wx = t.px; wy = t.py; wz = pz;
+            rqx = qx; rqy = qy; rqz = qz; rqw = qw;
+            wsx = t.sx; wsy = t.sy; wsz = sz;
+        } else {
+            float dx = 0.f, dy = 0.f, dz = 0.f;
+            rotateV(rqx, rqy, rqz, rqw, wsx * t.px, wsy * t.py, wsz * pz, dx, dy, dz);
+            wx += dx; wy += dy; wz += dz;
+            float nqx, nqy, nqz, nqw;
+            mulQ(rqx, rqy, rqz, rqw, qx, qy, qz, qw, nqx, nqy, nqz, nqw);
+            rqx = nqx; rqy = nqy; rqz = nqz; rqw = nqw;
+            wsx *= t.sx; wsy *= t.sy; wsz *= sz;
+        }
+        nodeWx[i] = wx;
+        nodeWy[i] = wy;
+        nodeWsx[i] = wsx;
+        nodeWsy[i] = wsy;
+    }
+
+    cache.uiCenterX = wx;
+    cache.uiCenterY = wy;
+    cache.uiScaleX = (std::fabs(wsx) > 1e-4f) ? std::fabs(wsx) : 1.f;
+    cache.uiScaleY = (std::fabs(wsy) > 1e-4f) ? std::fabs(wsy) : 1.f;
+
+    // 3. Read native UI::RectTransform fields (+0x30..+0x170) across the chain.
+    // Unity's C++ UI::RectTransform stores five contiguous Vector2f properties:
+    //   m_AnchorMin (+0x00), m_AnchorMax (+0x08), m_AnchoredPosition (+0x10),
+    //   m_SizeDelta (+0x18), m_Pivot (+0x20)
+    // and computes get_rect() recursively from parentSize:
+    //   size = sizeDelta + parentSize * (anchorMax - anchorMin)
+    //   rect = (-size * pivot, size)
+    constexpr std::uintptr_t kScanBase = 0x30;
+    constexpr std::size_t kScanFloats = 80; // 0x140 bytes (+0x30..+0x170)
+    std::vector<std::array<float, kScanFloats>> nodeRaw(chain.size());
+    std::vector<bool> hasRaw(chain.size(), false);
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (chainNative[i] > 0x10000 &&
+            mapReadBytes(chainNative[i] + kScanBase, nodeRaw[i].data(), sizeof(float) * kScanFloats)) {
+            hasRaw[i] = true;
+        }
+    }
+    if (!hasRaw.back()) {
+        cache.valid = false;
+        return false;
+    }
+
+    auto validAnchorPivot = [](float ax0, float ay0, float ax1, float ay1,
+                               float apx, float apy, float sdx, float sdy,
+                               float px, float py) -> bool {
+        if (!std::isfinite(ax0) || !std::isfinite(ay0) || !std::isfinite(ax1) || !std::isfinite(ay1) ||
+            !std::isfinite(apx) || !std::isfinite(apy) || !std::isfinite(sdx) || !std::isfinite(sdy) ||
+            !std::isfinite(px)  || !std::isfinite(py))
+            return false;
+        if (ax0 < -0.02f || ax0 > 1.02f || ay0 < -0.02f || ay0 > 1.02f ||
+            ax1 < -0.02f || ax1 > 1.02f || ay1 < -0.02f || ay1 > 1.02f ||
+            px  < -0.02f || px  > 1.02f || py  < -0.02f || py  > 1.02f)
+            return false;
+        if (ax1 < ax0 - 0.01f || ay1 < ay0 - 0.01f)
+            return false;
+        if (std::fabs(apx) > 20000.f || std::fabs(apy) > 20000.f ||
+            std::fabs(sdx) > 20000.f || std::fabs(sdy) > 20000.f)
+            return false;
+        return true;
+    };
+
+    auto evalRectFieldsAt = [&](int fi,
+                                float& outMinX, float& outMinY, float& outMaxX, float& outMaxY,
+                                float& outScreenW, float& outScreenH,
+                                float& outRw, float& outRh, float& outPivX, float& outPivY) -> int {
+        if (fi < 0 || fi + 9 >= static_cast<int>(kScanFloats))
+            return 0;
+
+        const auto& leafF = nodeRaw.back();
+        if (!validAnchorPivot(leafF[fi + 0], leafF[fi + 1], leafF[fi + 2], leafF[fi + 3],
+                              leafF[fi + 4], leafF[fi + 5], leafF[fi + 6], leafF[fi + 7],
+                              leafF[fi + 8], leafF[fi + 9]))
+            return 0;
+
+        int score = 20;
+        std::size_t canvasIdx = 0;
+        float canvasRefW = 1920.f;
+        float canvasRefH = 1080.f;
+        bool haveCanvasRef = false;
+
+        // Locate the root Canvas RectTransform in chain (anchorMin=(0,0),
+        // anchorMax=(0,0), pivot=(0.5,0.5), sizeDelta=(canvasRefW, canvasRefH)).
+        for (std::size_t k = 0; k + 1 < chain.size(); ++k) {
+            if (!hasRaw[k]) continue;
+            const auto& rf = nodeRaw[k];
+            const float ax0 = rf[fi + 0], ay0 = rf[fi + 1];
+            const float ax1 = rf[fi + 2], ay1 = rf[fi + 3];
+            const float sdx = rf[fi + 6], sdy = rf[fi + 7];
+            const float px  = rf[fi + 8], py  = rf[fi + 9];
+            if (std::fabs(ax0) < 0.01f && std::fabs(ay0) < 0.01f &&
+                std::fabs(ax1) < 0.01f && std::fabs(ay1) < 0.01f &&
+                std::fabs(px - 0.5f) < 0.01f && std::fabs(py - 0.5f) < 0.01f &&
+                sdx >= 600.f && sdx <= 8000.f && sdy >= 360.f && sdy <= 5000.f) {
+                const float aspect = sdx / sdy;
+                if (aspect >= 1.1f && aspect <= 3.8f) {
+                    canvasIdx = k;
+                    canvasRefW = sdx;
+                    canvasRefH = sdy;
+                    haveCanvasRef = true;
+                    score += 200;
+                    break;
+                }
+            }
+        }
+
+        if (!haveCanvasRef) {
+            for (std::size_t k = 0; k + 1 < chain.size(); ++k) {
+                if (nodeWx[k] >= 300.f && nodeWx[k] <= 4000.f &&
+                    nodeWy[k] >= 180.f && nodeWy[k] <= 2500.f &&
+                    std::fabs(nodeWsx[k]) > 1e-4f && std::fabs(nodeWsy[k]) > 1e-4f) {
+                    canvasIdx = k;
+                    canvasRefW = (2.f * nodeWx[k]) / std::fabs(nodeWsx[k]);
+                    canvasRefH = (2.f * nodeWy[k]) / std::fabs(nodeWsy[k]);
+                    haveCanvasRef = true;
+                    break;
+                }
+            }
+        }
+
+        float pw = canvasRefW;
+        float ph = canvasRefH;
+        float ppivX = 0.5f;
+        float ppivY = 0.5f;
+        float cx = 0.f;
+        float cy = 0.f;
+        float csx = 1.f;
+        float csy = 1.f;
+
+        for (std::size_t k = canvasIdx + 1; k < chain.size(); ++k) {
+            const float tx = chainTrs[k].px;
+            const float ty = chainTrs[k].py;
+            cx += csx * tx;
+            cy += csy * ty;
+            if (std::fabs(chainTrs[k].sx) > 1e-4f) csx *= chainTrs[k].sx;
+            if (std::fabs(chainTrs[k].sy) > 1e-4f) csy *= chainTrs[k].sy;
+
+            if (!hasRaw[k]) continue;
+            const auto& rf = nodeRaw[k];
+            const float ax0 = rf[fi + 0], ay0 = rf[fi + 1];
+            const float ax1 = rf[fi + 2], ay1 = rf[fi + 3];
+            const float apx = rf[fi + 4], apy = rf[fi + 5];
+            const float sdx = rf[fi + 6], sdy = rf[fi + 7];
+            const float px  = rf[fi + 8], py  = rf[fi + 9];
+            if (!validAnchorPivot(ax0, ay0, ax1, ay1, apx, apy, sdx, sdy, px, py)) {
+                if (k + 1 == chain.size()) return 0;
+                continue;
+            }
+
+            // Unity uGUI invariant: localPosition.xy == anchoredPosition + anchorRef
+            const float expX = apx + pw * (ax0 + (ax1 - ax0) * px - ppivX);
+            const float expY = apy + ph * (ay0 + (ay1 - ay0) * py - ppivY);
+            const float err  = std::fabs(expX - tx) + std::fabs(expY - ty);
+            if (err < 2.5f) {
+                score += 160;
+            } else if (err < 12.f) {
+                score += 60;
+            } else if (haveCanvasRef && err > 90.f) {
+                return 0;
+            }
+
+            pw = sdx + pw * (ax1 - ax0);
+            ph = sdy + ph * (ay1 - ay0);
+            ppivX = px;
+            ppivY = py;
+        }
+
+        const float rw = pw;
+        const float rh = ph;
+        const float absCsx = (std::fabs(csx) > 1e-4f) ? std::fabs(csx) : 1.f;
+        const float absCsy = (std::fabs(csy) > 1e-4f) ? std::fabs(csy) : 1.f;
+        const float sw = rw * absCsx;
+        const float sh = rh * absCsy;
+        if (!std::isfinite(sw) || !std::isfinite(sh) ||
+            sw < 50.f || sw > 8000.f || sh < 50.f || sh > 8000.f)
+            return 0;
+
+        // Standard UI pivots (0, 0.5, 1) and square/screen-sized containers earn bonus confidence.
+        auto isStandard01 = [](float v) {
+            return std::fabs(v) < 0.01f || std::fabs(v - 0.5f) < 0.01f || std::fabs(v - 1.f) < 0.01f;
+        };
+        if (isStandard01(ppivX) && isStandard01(ppivY))
+            score += 40;
+        if (std::fabs(sw - sh) < 6.f)
+            score += 30;
+
+        const float rx = -rw * ppivX;
+        const float ry = -rh * ppivY;
+        outMinX = (canvasRefW * 0.5f) + cx + rx * absCsx;
+        outMaxX = outMinX + sw;
+        outMinY = (canvasRefH * 0.5f) + cy + ry * absCsy;
+        outMaxY = outMinY + sh;
+        outScreenW = canvasRefW;
+        outScreenH = canvasRefH;
+        outRw = rw;
+        outRh = rh;
+        outPivX = ppivX;
+        outPivY = ppivY;
+        return score;
+    };
+
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    float screenW = 0.f, screenH = 0.f;
+    float rw = 0.f, rh = 0.f, pivX = 0.5f, pivY = 0.5f;
+    bool foundRect = false;
+
+    if (s_rectTransformRectOffset >= static_cast<std::int32_t>(kScanBase)) {
+        const int fi = (s_rectTransformRectOffset - static_cast<std::int32_t>(kScanBase)) / 4;
+        if (evalRectFieldsAt(fi, minX, minY, maxX, maxY, screenW, screenH, rw, rh, pivX, pivY) >= 100)
+            foundRect = true;
+    }
+    if (!foundRect) {
+        int bestScore = 0;
+        int bestFi = -1;
+        for (int fi = 0; fi + 9 < static_cast<int>(kScanFloats); ++fi) {
+            float tMinX, tMinY, tMaxX, tMaxY, tSW, tSH, tRw, tRh, tPx, tPy;
+            const int score = evalRectFieldsAt(fi, tMinX, tMinY, tMaxX, tMaxY, tSW, tSH, tRw, tRh, tPx, tPy);
+            if (score > bestScore) {
+                bestScore = score;
+                bestFi = fi;
+                minX = tMinX; minY = tMinY; maxX = tMaxX; maxY = tMaxY;
+                screenW = tSW; screenH = tSH;
+                rw = tRw; rh = tRh; pivX = tPx; pivY = tPy;
+            }
+        }
+        if (bestFi >= 0 && bestScore >= 60) {
+            s_rectTransformRectOffset = static_cast<std::int32_t>(kScanBase) + bestFi * 4;
+            foundRect = true;
+            std::printf("[MapProbe] RectTransform fields discovered at native+0x%X (score=%d): size=(%.1fx%.1f) pivot=(%.2f,%.2f) canvas=(%.0fx%.0f) bounds=(%.0f,%.0f..%.0f,%.0f)\n",
+                s_rectTransformRectOffset, bestScore, rw, rh, pivX, pivY, screenW, screenH, minX, minY, maxX, maxY);
+        }
+    }
+
+    if (!foundRect) {
+        static bool loggedRectFail = false;
+        if (!loggedRectFail || forceRefresh) {
+            loggedRectFail = true;
+            std::printf("[MapProbe] %s RectTransform probe missed: native=0x%llX idx=%d chain=%zu wx=(%.1f,%.1f) scale=(%.3f,%.3f)\n",
+                tag ? tag : "?", (unsigned long long)native, idx, chain.size(), wx, wy, cache.uiScaleX, cache.uiScaleY);
+        }
+        cache.valid = false;
+        return false;
+    }
+
+    cache.uiMinX = minX;
+    cache.uiMaxX = maxX;
+    cache.uiMinY = minY;
+    cache.uiMaxY = maxY;
+    cache.uiScreenW = screenW;
+    cache.uiScreenH = screenH;
+    cache.valid = (cache.uiMaxX - cache.uiMinX >= 50.f) && (cache.uiMaxY - cache.uiMinY >= 50.f);
+    return cache.valid;
+}
+
+static void ReadInGameMapState()
+{
+    const auto& rcfg = ConfigInstance.Radar;
+    if (!rcfg.InGameMinimap && !rcfg.InGameFullMap) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+    if (cachedBattleModel <= 0x10000) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+
+    if (cachedMapDialogModel <= 0x10000) {
+        std::uintptr_t dlg = 0;
+        if (!TargetProcess.ReadFresh(cachedBattleModel + rr::BattleModel::MapDialogModel, &dlg, sizeof(dlg)))
+            dlg = ReadPtr(cachedBattleModel + rr::BattleModel::MapDialogModel);
+        if (dlg > 0x10000 && IsClass(dlg, "MapDialogModel"))
+            cachedMapDialogModel = dlg;
+    }
+    if (cachedMapConfigModel <= 0x10000) {
+        std::uintptr_t cfg = 0;
+        if (!TargetProcess.ReadFresh(cachedBattleModel + rr::BattleModel::MapConfigModel, &cfg, sizeof(cfg)))
+            cfg = ReadPtr(cachedBattleModel + rr::BattleModel::MapConfigModel);
+        if (cfg > 0x10000 && IsClass(cfg, "MapConfigModel")) {
+            cachedMapConfigModel = cfg;
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::FullScreen, &cachedMapFullVar, sizeof(cachedMapFullVar)))
+                cachedMapFullVar = ReadPtr(cfg + rr::MapConfigModel::FullScreen);
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::Minimap, &cachedMapMiniVar, sizeof(cachedMapMiniVar)))
+                cachedMapMiniVar = ReadPtr(cfg + rr::MapConfigModel::Minimap);
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::MapModel, &cachedMapModelPtr, sizeof(cachedMapModelPtr)))
+                cachedMapModelPtr = ReadPtr(cfg + rr::MapConfigModel::MapModel);
+        }
+    }
+    if (cachedMapConfigModel <= 0x10000) {
+        inGameMapState = InGameMapState{};
+        return;
+    }
+
+    // Read ScreenState fresh so pressing/closing 'M' responds on the very next frame.
+    bool fullOpen = false;
+    if (cachedMapDialogModel > 0x10000) {
+        std::int32_t state = 0;
+        if (TargetProcess.ReadFresh(cachedMapDialogModel + rr::ScreenModel::ScreenState, &state, sizeof(state)))
+            fullOpen = (state == 1);
+    }
+
+    const bool modeFlipped = (inGameMapState.fullscreenOpen != fullOpen);
+    inGameMapState.fullscreenOpen = fullOpen;
+
+    if (cachedMapModelPtr > 0x10000) {
+        float nz = 0.f;
+        if (TargetProcess.Read(cachedMapModelPtr + rr::MapModel::NormalizedZoom, &nz, sizeof(nz)) && std::isfinite(nz))
+            inGameMapState.normalizedZoom = nz;
+    }
+
+    auto readVariance = [&](std::uintptr_t varPtr, InGameMapVariance& out, RectTransformCache& rCache, const char* tag) {
+        out = InGameMapVariance{};
+        if (varPtr <= 0x10000) return;
+
+        struct VarBlock {
+            float posX, posY;
+            float rotation;
+            float cameraSize;
+            std::uintptr_t resizeContainer;
+        };
+        static_assert(sizeof(VarBlock) == 24);
+        VarBlock blk{};
+        if (!TargetProcess.ReadFresh(varPtr + rr::MapConfigVariance::Position, &blk, sizeof(blk)))
+            return;
+        if (!std::isfinite(blk.posX) || !std::isfinite(blk.posY) ||
+            !std::isfinite(blk.rotation) || !std::isfinite(blk.cameraSize) ||
+            blk.cameraSize <= 0.1f || blk.cameraSize > 50000.f)
+            return;
+
+        out.position = Vector2(blk.posX, blk.posY);
+        out.rotation = blk.rotation;
+        out.cameraSize = blk.cameraSize;
+        out.valid = true;
+
+        if (blk.resizeContainer > 0x10000 &&
+            ReadRectTransformUiBounds(blk.resizeContainer, rCache, modeFlipped, tag))
+        {
+            out.rectValid = true;
+            out.uiMinX = rCache.uiMinX;
+            out.uiMinY = rCache.uiMinY;
+            out.uiMaxX = rCache.uiMaxX;
+            out.uiMaxY = rCache.uiMaxY;
+            out.uiCenterX = rCache.uiCenterX;
+            out.uiCenterY = rCache.uiCenterY;
+            out.uiScaleX = rCache.uiScaleX;
+            out.uiScaleY = rCache.uiScaleY;
+            out.uiScreenW = rCache.uiScreenW;
+            out.uiScreenH = rCache.uiScreenH;
+        }
+
+        // One-shot / mode-flip diagnostic log for 2nd-PC verification.
+        static bool loggedMini = false;
+        static bool loggedFull = false;
+        bool& loggedFlag = (tag[0] == 'F') ? loggedFull : loggedMini;
+        if (!loggedFlag || modeFlipped) {
+            loggedFlag = true;
+            const float camYawDeg = cameraState.valid
+                ? (std::atan2(cameraState.forward.x, cameraState.forward.z) * 57.2957795f)
+                : 0.f;
+            std::printf("[MapProbe] %s: pos=(%.1f,%.1f) local=(%.1f,%.1f) rot=%.2f camYaw=%.1fdeg camSize=%.1f rc=0x%llX rect=%d(%.0f,%.0f..%.0f,%.0f / %.0fx%.0f)\n",
+                tag, out.position.x, out.position.y,
+                localPosition.x, localPosition.z,
+                out.rotation, camYawDeg, out.cameraSize,
+                (unsigned long long)blk.resizeContainer,
+                out.rectValid ? 1 : 0,
+                out.uiMinX, out.uiMinY, out.uiMaxX, out.uiMaxY,
+                out.uiScreenW, out.uiScreenH);
+        }
+    };
+
+    if (fullOpen) {
+        if (rcfg.InGameFullMap)
+            readVariance(cachedMapFullVar, inGameMapState.fullscreen, g_fullRectCache, "Full");
+    } else {
+        if (rcfg.InGameMinimap)
+            readVariance(cachedMapMiniVar, inGameMapState.minimap, g_miniRectCache, "Mini");
+    }
+
+    inGameMapState.valid = fullOpen ? inGameMapState.fullscreen.valid : inGameMapState.minimap.valid;
+    const bool fastFull = fullOpen && rcfg.InGameFullMap && rcfg.Hide3DEspOnFullMap;
+    g_fullMapFastMode.store(fastFull, std::memory_order_relaxed);
+    if (fullOpen && rcfg.InGameFullMap && cachedMapFullVar > 0x10000) {
+        g_liveFullMapVarPtr.store(cachedMapFullVar, std::memory_order_release);
+        if (inGameMapState.fullscreen.valid) {
+            std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+            g_liveFullMap.pos = inGameMapState.fullscreen.position;
+            g_liveFullMap.rot = inGameMapState.fullscreen.rotation;
+            g_liveFullMap.camSize = inGameMapState.fullscreen.cameraSize;
+            g_liveFullMap.valid = true;
+        }
+    } else {
+        g_liveFullMapVarPtr.store(0, std::memory_order_release);
+        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+        g_liveFullMap.valid = false;
+    }
+}
+
 static void UpdateInternal()
 {
+    const std::uint64_t tPassStart = SteadyMicros();
+    std::uint64_t tRootsUs = 0, tViewsUs = 0, tP1Us = 0, tP2Us = 0, tP3Us = 0, tDetUs = 0, tP5Us = 0, tMatchUs = 0;
+    int passRebuilds = 0;
+    int passFallbacks = 0;
+
     static int uiCount = 0;
     ++uiCount;
 
@@ -2059,6 +2841,7 @@ static void UpdateInternal()
         RevalidateSession();
 
     static int gameResolveFails = 0;
+    static std::uint64_t lastWaitLogMs = 0;
     if (!cachedGame) {
         if (gameRetryCountdown <= 0) {
             cachedGame = ResolveGameViaGom();
@@ -2069,13 +2852,23 @@ static void UpdateInternal()
             if (!cachedGame) {
                 if (gameResolveFails == 0)
                     DLOG("GameRoot: GOM resolve failed, backing off");
-                if (++gameResolveFails >= 300) {
-                    DLOG("GameRoot: sustained failure (%d attempts), attempting CR3 fix", gameResolveFails);
+                const std::uint64_t nowMs = GetTickCount64();
+                if (lastWaitLogMs == 0 || nowMs - lastWaitLogMs >= 5000) {
+                    lastWaitLogMs = nowMs;
+                    std::printf("[Reader] Waiting for Game root (GOM walk failed, attempt %d)...\n",
+                        gameResolveFails + 1);
+                }
+                if (++gameResolveFails >= 20) {
+                    DLOG("GameRoot: sustained failure (%d attempts), flushing DMA caches & retrying CR3 fix", gameResolveFails);
+                    std::printf("[Reader] Sustained GOM failure (%d attempts) — flushing DMA caches & retrying CR3 fix...\n",
+                        gameResolveFails);
                     gameResolveFails = 0;
+                    MaybeRefreshDmaCaches("gomResolveFail", 2000);
                     TargetProcess.FixCr3();
                 }
             } else {
                 gameResolveFails = 0;
+                lastWaitLogMs = 0;
             }
         } else {
             --gameRetryCountdown;
@@ -2149,6 +2942,12 @@ static void UpdateInternal()
     }
 
     if (!cachedBattleModel) {
+        const std::uint64_t nowMs = GetTickCount64();
+        if (cachedGame > 0x10000 && (lastWaitLogMs == 0 || nowMs - lastWaitLogMs >= 5000)) {
+            lastWaitLogMs = nowMs;
+            std::printf("[Reader] Game=0x%llX — waiting for BattleModel (in menu/loading)...\n",
+                (unsigned long long)cachedGame);
+        }
         {
             std::lock_guard<std::mutex> lock(g_worldMutex);
             g_worldState = std::make_shared<RobRunWorld::State>();
@@ -2164,6 +2963,7 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
         cachedLocalCharacter = 0;
+        MaybeRefreshDmaCaches("noBattleModel", 2000);
         NoteSessionState();
         ++failureCount;
         DLOG("ReaderRoot: BattleModel lost, failures=%u game=0x%llx",
@@ -2189,6 +2989,7 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
         cachedLocalCharacter = 0;
+        MaybeRefreshDmaCaches("noBattleEntities", 2000);
         NoteSessionState();
         ++failureCount;
         return;
@@ -2206,10 +3007,25 @@ static void UpdateInternal()
                 std::wstring wide;
                 if (RobRunMemory::ReadString(idStr, wide)) {
                     std::string id = RobRunMemory::WideToUtf8(wide);
-                    std::lock_guard<std::mutex> lk(locationMutex);
-                    if (id != cachedLocationId)
-                        DLOG("Location: '%s' -> '%s'", cachedLocationId.c_str(), id.c_str());
-                    cachedLocationId = std::move(id);
+                    bool mapChanged = false;
+                    {
+                        std::lock_guard<std::mutex> lk(locationMutex);
+                        if (id != cachedLocationId) {
+                            DLOG("Location: '%s' -> '%s'", cachedLocationId.c_str(), id.c_str());
+                            mapChanged = !cachedLocationId.empty() && !id.empty();
+                        }
+                        cachedLocationId = std::move(id);
+                    }
+                    if (mapChanged) {
+                        MaybeRefreshDmaCaches("locationChanged", 0);
+                        cachedViews.clear();
+                        cachedViewOwner.clear();
+                        viewOwnerMisses.clear();
+                        rigCache.clear();
+                        viewRefreshStamp = 0;
+                        slotRefreshStamp = 0;
+                        fullResolveStamp = 0;
+                    }
                 }
             }
         }
@@ -2228,7 +3044,23 @@ static void UpdateInternal()
         }
     }
     g_renderCameraModel.store(cachedCameraModel, std::memory_order_release);
-    cameraState = RobRunCamera::Read(cachedCameraModel);
+    {
+        // When the dedicated camera thread is streaming a fresh native camera,
+        // avoid issuing two extra uncached DMA reads (BattleCameraModel +
+        // CinemachineBrain FOV) on every entity worker pass.
+        const NativeCameraSnapshot nativeSnap = LoadNativeCamera();
+        const std::uint64_t nowUs = SteadyMicros();
+        const bool nativeFresh = ConfigInstance.Player.NativeEspCamera &&
+            nativeSnap.valid && nativeSnap.poseValid &&
+            nowUs >= nativeSnap.stampUs &&
+            (nowUs - nativeSnap.stampUs) < 500000ULL;
+        if (nativeFresh && cameraState.valid) {
+            cameraState.position = nativeSnap.position;
+            cameraState.forward = nativeSnap.forward;
+        } else {
+            cameraState = RobRunCamera::Read(cachedCameraModel);
+        }
+    }
 
     // Resolve the native Unity camera fallback here, on the worker, so the
     // render thread never walks the GameObjectManager when the managed camera
@@ -2294,6 +3126,41 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
     }
+
+    // Detect full respawn / fast-travel / zone teleport: a >25 m instant jump
+    // in local position means Unity streamed in new character views and bone
+    // hierarchies on freshly mapped pages whose TLB/Mem cache entries may be
+    // stale under -norefresh.
+    {
+        static Vector3 s_prevLocalPos{};
+        static bool s_hadLocalPos = false;
+        const bool nowValid = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+        if (nowValid) {
+            const bool jumped = s_hadLocalPos && Distance(s_prevLocalPos, localPosition) > 25.f;
+            if (jumped) {
+                DLOG("Respawn/Teleport detected (jump=%.1fm), refreshing DMA caches & views",
+                     Distance(s_prevLocalPos, localPosition));
+                MaybeRefreshDmaCaches("respawnTeleport", 1500);
+                cachedViews.clear();
+                cachedViewOwner.clear();
+                viewOwnerMisses.clear();
+                rigCache.clear();
+                viewRefreshStamp = 0;
+                slotRefreshStamp = 0;
+                fullResolveStamp = 0;
+            }
+            s_prevLocalPos = localPosition;
+            s_hadLocalPos = true;
+        } else {
+            s_hadLocalPos = false;
+        }
+    }
+
+    const std::uint64_t tAfterRoots = SteadyMicros();
+    tRootsUs = tAfterRoots - tPassStart;
+
+    // Live in-game minimap / fullscreen ('M') map camera & rect state (~2 reads).
+    ReadInGameMapState();
 
     // Drop a stale updater when the scene changes; otherwise the view
     // dictionary silently stays empty across a map transition.
@@ -2448,6 +3315,9 @@ static void UpdateInternal()
         RefreshParty(cachedGame, localEntityId, localPublicId);
     }
 
+    const std::uint64_t tAfterViews = SteadyMicros();
+    tViewsUs = tAfterViews - tAfterRoots;
+
     if (uiCount <= 3) DLOG("UpdateInternal #%d: pre-entity, battleModel=0x%llx, battleEntities=0x%llx",
         uiCount, (unsigned long long)cachedBattleModel, (unsigned long long)cachedBattleEntities);
 
@@ -2457,6 +3327,28 @@ static void UpdateInternal()
     static int entityDictFailures = 0;
     if (RobRunMemory::ReadDictInt(entityDictionary, entityEntries)) {
         entityDictFailures = 0;
+
+        // Also merge any BattleCharacterModels from WorldEntitiesModel
+        // (_battleCharacters at +0x18 and _notSpawnedBattleCharacters at +0x10)
+        // that aren't in BattleEntitiesModel._models so the fullscreen map sees
+        // every character known to the client regardless of 3D view spawn state.
+        const std::uintptr_t worldModelPtr = ReadPtr(cachedBattleEntities + 0x60);
+        if (worldModelPtr > 0x10000) {
+            std::unordered_set<std::int32_t> seenIds;
+            seenIds.reserve(entityEntries.size() + 32);
+            for (const auto& e : entityEntries) seenIds.insert(e.key);
+            for (std::uintptr_t dictOff : { std::uintptr_t(0x18), std::uintptr_t(0x10) }) {
+                const std::uintptr_t charDict = ReadPtr(worldModelPtr + dictOff);
+                if (charDict <= 0x10000) continue;
+                std::vector<RobRunMemory::DictEntry> extra;
+                if (!RobRunMemory::ReadDictInt(charDict, extra, false)) continue;
+                for (const auto& e : extra) {
+                    if (e.value > 0x10000 && seenIds.insert(e.key).second)
+                        entityEntries.push_back(e);
+                }
+            }
+        }
+
         entities.reserve(entityEntries.size());
 
         struct TransformBlock {
@@ -2633,7 +3525,18 @@ static void UpdateInternal()
         std::vector<unsigned char> poseBuf;
         std::size_t poseTotal = 0;
 
+        const bool haveLocalPos = !localPosition.IsZero();
+        const float poseCullDist = static_cast<float>(ConfigInstance.Player.MaxDistance) + 25.0f;
+        const bool fullMapFastMode = g_fullMapFastMode.load(std::memory_order_relaxed);
+
+        if (!fullMapFastMode)
         for (auto& w : work) {
+            // Skip expensive multi-KB skeleton reads for the local player,
+            // already-dead entities, and players far past ESP MaxDistance.
+            if (w.entityId == localEntityId) continue;
+            const auto dIt = detailCache.find(w.entityId);
+            if (dIt != detailCache.end() && dIt->second.isDead) continue;
+
             const auto viewIt = views.find(w.entityId);
             const std::uintptr_t viewPtr =
                 (viewIt != views.end()) ? viewIt->second : 0;
@@ -2641,6 +3544,9 @@ static void UpdateInternal()
             if (rigIt != rigCache.end() && rigIt->second.layoutValid &&
                 rigIt->second.view == viewPtr)
             {
+                if (haveLocalPos && !rigIt->second.lastSampledPos.IsZero() &&
+                    Distance(rigIt->second.lastSampledPos, localPosition) > poseCullDist)
+                    continue;
                 const std::size_t sz = Skeleton::PoseDataSize(rigIt->second.layout);
                 w.needsPose = true;
                 w.poseOffset = poseTotal;
@@ -2650,14 +3556,25 @@ static void UpdateInternal()
         }
         poseBuf.resize(poseTotal, 0);
 
+        const std::uint64_t tAfterP1 = SteadyMicros();
+        tP1Us = tAfterP1 - tAfterViews;
+
         // ---------------------------------------------------------------
-        // Phase 2: Scatter-read positions AND poses in one DMA call
-        // so skeletons are sampled at the same instant as positions.
+        // Phase 2: Chunked scatter-read of positions AND poses.
+        // Splitting into small batches (max 4 pose-bearing entities per
+        // transaction) prevents a full lobby from locking the FPGA bus for
+        // 15-25 ms at once, letting the high-priority camera thread interleave
+        // sub-millisecond physical camera reads between chunks.
         // ---------------------------------------------------------------
         if (!work.empty()) {
             Memory::ScopedScatter scatter(TargetProcess);
             if (scatter.handle) {
-                for (auto& w : work) {
+                constexpr int kMaxPosesPerChunk = 4;
+                constexpr int kMaxEntsPerChunk = 12;
+                int chunkPoses = 0;
+                int chunkEnts = 0;
+                for (std::size_t wi = 0; wi < work.size(); ++wi) {
+                    auto& w = work[wi];
                     TargetProcess.AddScatterReadRequest(scatter,
                         w.blockAddress, &w.block, sizeof(TransformBlock));
                     if (w.needsPose) {
@@ -2665,9 +3582,20 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(scatter,
                             rig.layout.matrices,
                             poseBuf.data() + w.poseOffset, w.poseSize);
+                        ++chunkPoses;
+                    }
+                    ++chunkEnts;
+                    const bool flush = (wi + 1 == work.size()) ||
+                        chunkPoses >= kMaxPosesPerChunk ||
+                        chunkEnts >= kMaxEntsPerChunk;
+                    if (flush) {
+                        TargetProcess.ExecuteReadScatter(scatter);
+                        chunkPoses = 0;
+                        chunkEnts = 0;
+                        if (wi + 1 < work.size())
+                            SwitchToThread();
                     }
                 }
-                TargetProcess.ExecuteReadScatter(scatter);
             }
         }
 
@@ -2689,17 +3617,29 @@ static void UpdateInternal()
 
         if (uiCount <= 3) DLOG("UpdateInternal #%d: phase2 done, %zu work items", uiCount, work.size());
 
+        const std::uint64_t tAfterP2 = SteadyMicros();
+        tP2Us = tAfterP2 - tAfterP1;
+
         // ---------------------------------------------------------------
         // Phase 3: Rig layout rebuilds and late pose collection.
         // Layouts already valid had their pose read above; newly
         // rebuilt layouts get a supplementary scatter.
+        // Budgeted to at most 1 layout build/upgrade per pass so a wave
+        // of spawns or refreshes can never stall the worker thread.
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
         std::vector<std::size_t> lateResolve;
+        int rebuildBudget = fullMapFastMode ? 0 : 1;
 
+        if (!fullMapFastMode)
         for (std::size_t wi = 0; wi < work.size(); ++wi) {
             auto& w = work[wi];
             if (!w.positionValid) continue;
+            if (w.entityId == localEntityId) continue;
+            const auto dIt = detailCache.find(w.entityId);
+            if (dIt != detailCache.end() && dIt->second.isDead) continue;
+            if (haveLocalPos && Distance(w.block.position, localPosition) > poseCullDist)
+                continue;
 
             const auto viewIt = views.find(w.entityId);
             const std::uintptr_t viewPtr =
@@ -2710,6 +3650,7 @@ static void UpdateInternal()
                 rig.view = viewPtr;
                 rig.layoutValid = false;
                 rig.layoutStamp = 0;
+                rig.upgradeAttempts = 0;
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
@@ -2718,34 +3659,109 @@ static void UpdateInternal()
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
+                rig.poseHistCount = 0;
+                rig.poseHistCursor = 0;
             }
 
             // Skeleton layout rebuild is wrapped in try/catch because the
             // DMA reads through the entity view hierarchy can trigger AVs
             // on some hardware setups. With /EHa this catch handles SEH.
             try {
-            if (rig.layoutValid && now - rig.layoutStamp >= 1500) {
-                rig.layoutStamp = now;
+            auto limbScore = [](const Skeleton::RigLayout& l) -> int {
+                int s = 0;
+                if (l.leftHip >= 0)       s += 4;
+                if (l.leftKnee >= 0)      s += 4;
+                if (l.leftFoot >= 0)      s += 2;
+                if (l.rightHip >= 0)      s += 4;
+                if (l.rightKnee >= 0)     s += 4;
+                if (l.rightFoot >= 0)     s += 2;
+                if (l.leftShoulder >= 0)  s += 2;
+                if (l.leftElbow >= 0)     s += 2;
+                if (l.leftHand >= 0)      s += 1;
+                if (l.rightShoulder >= 0) s += 2;
+                if (l.rightElbow >= 0)    s += 2;
+                if (l.rightHand >= 0)     s += 1;
+                return s;
+            };
+            auto layoutMissingLimbs = [](const Skeleton::RigLayout& l) -> bool {
+                return l.leftHip < 0 || l.rightHip < 0 ||
+                       l.leftKnee < 0 || l.rightKnee < 0 ||
+                       l.leftShoulder < 0 || l.rightShoulder < 0;
+            };
+
+            auto buildBestLayout = [&](const Skeleton::ReadFn& readFn,
+                                       Skeleton::RigLayout& best) -> bool {
+                bool ok = Skeleton::BuildLayoutFromView(viewPtr, readFn, best);
+                if (!ok) {
+                    ok = Skeleton::BuildLayoutByName(viewPtr, readFn, best);
+                } else if (layoutMissingLimbs(best)) {
+                    Skeleton::RigLayout byName;
+                    if (Skeleton::BuildLayoutByName(viewPtr, readFn, byName) &&
+                        limbScore(byName) > limbScore(best)) {
+                        best = std::move(byName);
+                    }
+                }
+                return ok;
+            };
+
+            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout) &&
+                rig.upgradeAttempts < 4;
+            const std::uint64_t upgradeIntervalMs =
+                (rig.upgradeAttempts == 0) ? 500 :
+                (rig.upgradeAttempts == 1) ? 1500 : 4000;
+            const std::uint64_t checkIntervalMs = incomplete ? upgradeIntervalMs : 1500;
+            if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
+                    rig.layoutStamp = now;
                     rig.layoutValid = false;
                     rig.layoutStamp = 0;
+                    rig.upgradeAttempts = 0;
+                } else if (incomplete && rebuildBudget > 0) {
+                    rig.layoutStamp = now;
+                    --rebuildBudget;
+                    ++passRebuilds;
+                    ++rig.upgradeAttempts;
+                    // Silently try upgrading an incomplete layout using cached
+                    // DMA (bone name lookup inside uses 3 fast scatter calls).
+                    Skeleton::RigLayout candidate;
+                    const bool ok = buildBestLayout(DmaRead, candidate);
+                    SwitchToThread();
+                    if (ok && limbScore(candidate) > limbScore(rig.layout)) {
+                        const bool sameBuf =
+                            candidate.matrices == rig.layout.matrices &&
+                            candidate.count == rig.layout.count;
+                        rig.layout = std::move(candidate);
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
+                        rig.smoothedValid = false;
+                        if (!layoutMissingLimbs(rig.layout))
+                            rig.upgradeAttempts = 0;
+                        if (!sameBuf) w.needsPose = false;
+                    }
+                } else if (!incomplete) {
+                    rig.layoutStamp = now;
                 }
             }
             const bool dueForRebuild = !rig.layoutValid && viewPtr > 0x10000 &&
+                rebuildBudget > 0 &&
                 (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250);
             if (dueForRebuild) {
                 rig.layoutStamp = now;
+                --rebuildBudget;
+                ++passRebuilds;
                 Skeleton::RigLayout candidate;
-                bool ok = Skeleton::BuildLayoutFromView(viewPtr, DmaRead, candidate);
-                if (!ok)
-                    ok = Skeleton::BuildLayoutByName(viewPtr, DmaRead, candidate);
+                const bool ok = buildBestLayout(DmaRead, candidate);
+                SwitchToThread();
                 if (ok) {
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     rig.smoothedValid = false;
+                    rig.poseHistCount = 0;
+                    rig.poseHistCursor = 0;
+                    rig.upgradeAttempts = 0;
                 } else {
                     if (rig.poseFailureSince == 0)
                         rig.poseFailureSince = now;
@@ -2754,6 +3770,8 @@ static void UpdateInternal()
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
                         rig.smoothedWorldMatrices.clear();
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
                     }
                 }
             }
@@ -2783,6 +3801,9 @@ static void UpdateInternal()
                 TargetProcess.ExecuteReadScatter(scatter);
             }
         }
+
+        const std::uint64_t tAfterP3 = SteadyMicros();
+        tP3Us = tAfterP3 - tAfterP2;
 
         // ---------------------------------------------------------------
         // Phase 5: Process poses, build entities, wall check.
@@ -2929,6 +3950,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 1 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 2: second-level pointers
                 for (int i = 0; i < seCount; ++i) {
@@ -2961,6 +3983,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 2 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 3: third-level pointers + block reads
                 for (int i = 0; i < seCount; ++i) {
@@ -2992,6 +4015,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 3 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 4: wrapper primitive values (all at +0x18)
                 constexpr std::uintptr_t V = rr::PrimitiveData::value;
@@ -3196,6 +4220,10 @@ static void UpdateInternal()
             }
         }
 
+        const std::uint64_t tAfterDet = SteadyMicros();
+        tDetUs = tAfterDet - tAfterP3;
+
+        int fallbackBudget = 1;
         for (auto& w : work) {
             if (!w.positionValid) continue;
             if (uiCount <= 3) DLOG("UpdateInternal #%d: entity id=%d, cp=A (init)", uiCount, w.entityId);
@@ -3326,9 +4354,100 @@ static void UpdateInternal()
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
                         rig.smoothedWorldMatrices.clear();
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
                     }
                 } else {
-                    // Commit the good frame.
+                    // Pelvis-relative 3-sample temporal median:
+                    // anchor is taken from the SAME TransformHierarchy read so
+                    // world-space movement has 0 ms lag while any isolated
+                    // 1-frame pre-LateUpdate / torn-DMA flicker is erased.
+                    const Skeleton::Vec anchor = tmpPoints.hasPelvis
+                        ? tmpPoints.pelvis
+                        : (tmpPoints.hasChest
+                            ? tmpPoints.chest
+                            : Skeleton::Vec{ entity.position.x, entity.position.y, entity.position.z });
+
+                    if (rig.poseHistCount > 0 &&
+                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
+                    {
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
+                    }
+
+                    const int slot = rig.poseHistCursor;
+                    auto& relSegs = rig.relBoneHist[slot];
+                    relSegs.resize(tmpBones.size());
+                    for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                        relSegs[i].a = { tmpBones[i].a.x - anchor.x, tmpBones[i].a.y - anchor.y, tmpBones[i].a.z - anchor.z };
+                        relSegs[i].b = { tmpBones[i].b.x - anchor.x, tmpBones[i].b.y - anchor.y, tmpBones[i].b.z - anchor.z };
+                        relSegs[i].visible = tmpBones[i].visible;
+                    }
+                    auto subVec = [&](const Skeleton::Vec& v) -> Skeleton::Vec {
+                        return { v.x - anchor.x, v.y - anchor.y, v.z - anchor.z };
+                    };
+                    auto& relPts = rig.relPtsHist[slot];
+                    relPts = tmpPoints;
+                    relPts.head          = subVec(tmpPoints.head);
+                    relPts.neck          = subVec(tmpPoints.neck);
+                    relPts.chest         = subVec(tmpPoints.chest);
+                    relPts.pelvis        = subVec(tmpPoints.pelvis);
+                    relPts.leftShoulder  = subVec(tmpPoints.leftShoulder);
+                    relPts.leftElbow     = subVec(tmpPoints.leftElbow);
+                    relPts.leftHand      = subVec(tmpPoints.leftHand);
+                    relPts.rightShoulder = subVec(tmpPoints.rightShoulder);
+                    relPts.rightElbow    = subVec(tmpPoints.rightElbow);
+                    relPts.rightHand     = subVec(tmpPoints.rightHand);
+                    relPts.leftHip       = subVec(tmpPoints.leftHip);
+                    relPts.leftKnee      = subVec(tmpPoints.leftKnee);
+                    relPts.leftFoot      = subVec(tmpPoints.leftFoot);
+                    relPts.rightHip      = subVec(tmpPoints.rightHip);
+                    relPts.rightKnee     = subVec(tmpPoints.rightKnee);
+                    relPts.rightFoot     = subVec(tmpPoints.rightFoot);
+
+                    rig.poseHistCursor = (slot + 1) % 3;
+                    if (rig.poseHistCount < 3) ++rig.poseHistCount;
+
+                    if (rig.poseHistCount == 3) {
+                        auto med3f = [](float a, float b, float c) -> float {
+                            return (std::max)((std::min)(a, b), (std::min)((std::max)(a, b), c));
+                        };
+                        auto med3v = [&](const Skeleton::Vec& v0, const Skeleton::Vec& v1, const Skeleton::Vec& v2) -> Skeleton::Vec {
+                            return {
+                                anchor.x + med3f(v0.x, v1.x, v2.x),
+                                anchor.y + med3f(v0.y, v1.y, v2.y),
+                                anchor.z + med3f(v0.z, v1.z, v2.z)
+                            };
+                        };
+                        const auto& h0 = rig.relBoneHist[0];
+                        const auto& h1 = rig.relBoneHist[1];
+                        const auto& h2 = rig.relBoneHist[2];
+                        for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
+                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                        }
+                        const auto& p0 = rig.relPtsHist[0];
+                        const auto& p1 = rig.relPtsHist[1];
+                        const auto& p2 = rig.relPtsHist[2];
+                        tmpPoints.head          = med3v(p0.head, p1.head, p2.head);
+                        tmpPoints.neck          = med3v(p0.neck, p1.neck, p2.neck);
+                        tmpPoints.chest         = med3v(p0.chest, p1.chest, p2.chest);
+                        tmpPoints.pelvis        = med3v(p0.pelvis, p1.pelvis, p2.pelvis);
+                        tmpPoints.leftShoulder  = med3v(p0.leftShoulder, p1.leftShoulder, p2.leftShoulder);
+                        tmpPoints.leftElbow     = med3v(p0.leftElbow, p1.leftElbow, p2.leftElbow);
+                        tmpPoints.leftHand      = med3v(p0.leftHand, p1.leftHand, p2.leftHand);
+                        tmpPoints.rightShoulder = med3v(p0.rightShoulder, p1.rightShoulder, p2.rightShoulder);
+                        tmpPoints.rightElbow    = med3v(p0.rightElbow, p1.rightElbow, p2.rightElbow);
+                        tmpPoints.rightHand     = med3v(p0.rightHand, p1.rightHand, p2.rightHand);
+                        tmpPoints.leftHip       = med3v(p0.leftHip, p1.leftHip, p2.leftHip);
+                        tmpPoints.leftKnee      = med3v(p0.leftKnee, p1.leftKnee, p2.leftKnee);
+                        tmpPoints.leftFoot      = med3v(p0.leftFoot, p1.leftFoot, p2.leftFoot);
+                        tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
+                        tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
+                        tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+                    }
+
+                    // Commit every pass so world position stays at full worker rate.
                     rig.bones = std::move(tmpBones);
                     rig.points = tmpPoints;
                     rig.curLocal = std::move(tmpLocal);
@@ -3338,7 +4457,7 @@ static void UpdateInternal()
                     constexpr float kPosEpsSq  = 1.0e-6f;
                     constexpr float kRotEps    = 1.0e-6f;
                     constexpr float kScaleEps  = 1.0e-6f;
-                    constexpr std::uint64_t kFreezeMs = 150;
+                    constexpr std::uint64_t kFreezeMs = 500;
 
                     bool moved = !rig.prevLocalValid ||
                         rig.prevLocal.size() != rig.curLocal.size();
@@ -3473,20 +4592,27 @@ static void UpdateInternal()
                         rig.smoothedValid = true;
                     }
                 }
-            } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
+            } else if (!fullMapFastMode &&
+                       !rig.layoutValid &&
+                       entity.entityId != localEntityId &&
+                       !entity.isDead &&
+                       (!haveLocalPos || Distance(entity.position, localPosition) <= poseCullDist) &&
+                       fallbackBudget > 0 &&
+                       now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D2 (pre-BuildSkeleton)", uiCount);
-                // Never replace good bones with an empty result: this fallback
-                // runs on a timer, so a single failed read used to blank the
-                // skeleton for a full second (a visible strobe).
-                auto fallback = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
-                    entity.entityId, DmaRead);
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D3 (post-BuildSkeleton, %zu bones)", uiCount, fallback.size());
-                if (!fallback.empty()) {
-                    rig.bones = std::move(fallback);
-                    rig.points = Skeleton::BonePoints{};
-                    rig.smoothedValid = false;
-                    rig.smoothedWorldMatrices.clear();
+                --fallbackBudget;
+                ++passFallbacks;
+                // Promote unmatched entities straight into cachedViewOwner so
+                // Phase 3 caches their RigLayout and samples them at full worker
+                // rate instead of re-running BuildSkeleton at 1 Hz forever.
+                const std::uintptr_t foundView = static_cast<std::uintptr_t>(
+                    Skeleton::FindEntityView(cachedGame, cachedBattleModel, entity.entityId, DmaRead));
+                if (foundView > 0x10000) {
+                    cachedViewOwner[entity.entityId] = foundView;
+                    rig.view = foundView;
+                    rig.layoutValid = false;
+                    rig.layoutStamp = 0;
+                    rig.upgradeAttempts = 0;
                 }
             }
 
@@ -3533,7 +4659,8 @@ static void UpdateInternal()
                     seg.visible = false;
                 }
             }
-            else if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
+            else if (!fullMapFastMode &&
+                (ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
                 bvh && bvh->valid && visCamera.valid &&
                 entity.entityId != localEntityId)
             {
@@ -3648,6 +4775,8 @@ static void UpdateInternal()
                     e.isClanMate = true;
             }
         }
+        const std::uint64_t tAfterP5 = SteadyMicros();
+        tP5Us = tAfterP5 - tAfterDet;
     } else {
         if (++entityDictFailures >= 50) {
             cachedBattleEntities = 0;
@@ -3661,11 +4790,84 @@ static void UpdateInternal()
     // was just cleared.
     if (viewsRefreshed)
     {
+        const std::uint64_t tMatchStart = SteadyMicros();
         viewsRefreshed = false;
         MatchViewsToEntities();
+        tMatchUs = SteadyMicros() - tMatchStart;
     }
 
     const std::uint64_t passNow = GetTickCount64();
+
+    // Opportunistic manual Mem/TLB cache refresh under -norefresh:
+    // 1) When no enemy is currently rendered on screen, everyone on screen is
+    //    far away (> 80 m), or the lobby is empty, refresh caches every 2.5 s
+    //    so newly mapped pages stay warm with zero combat stutter.
+    // 2) Safety net: if nearby living players exist yet most/all have no bones
+    //    for >= 600 ms (e.g. spawned straight into a new area with stale TLB),
+    //    force a cache/TLB refresh and immediately re-read views + layouts.
+    {
+        const std::uint64_t reportMs = g_renderReportMs.load(std::memory_order_relaxed);
+        const bool reportFresh = reportMs != 0 && passNow >= reportMs && (passNow - reportMs) < 1500;
+        const bool anyOnScreen = reportFresh && g_renderAnyOnScreen.load(std::memory_order_relaxed);
+        const float nearestDist = reportFresh ? g_renderNearestDist.load(std::memory_order_relaxed) : 9999.f;
+
+        if (!anyOnScreen || nearestDist > 80.f || entities.size() <= 1) {
+            MaybeRefreshDmaCaches("idleOrOutOfSight", 2500);
+        }
+
+        const bool haveLocal = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+        const float boneRange = static_cast<float>(ConfigInstance.Player.MaxDistance);
+        int nearbyLiving = 0;
+        int nearbyWithBones = 0;
+        for (const auto& e : entities) {
+            if (e.entityId == localEntityId || e.isDead) continue;
+            if (haveLocal && Distance(e.position, localPosition) > boneRange) continue;
+            ++nearbyLiving;
+            if (!e.bones.empty()) ++nearbyWithBones;
+        }
+
+        static std::uint64_t s_boneStarveSince = 0;
+        if (nearbyLiving > 0 && (nearbyWithBones == 0 || nearbyWithBones * 2 < nearbyLiving)) {
+            if (s_boneStarveSince == 0)
+                s_boneStarveSince = passNow;
+            if (passNow - s_boneStarveSince >= 600) {
+                if (MaybeRefreshDmaCaches("boneStarvation", 2500)) {
+                    viewRefreshStamp = 0;
+                    for (auto& kv : rigCache) {
+                        if (kv.second.bones.empty()) {
+                            kv.second.layoutValid = false;
+                            kv.second.layoutStamp = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            s_boneStarveSince = 0;
+        }
+        g_perfSkels.store(nearbyWithBones, std::memory_order_relaxed);
+        g_perfLiving.store(nearbyLiving, std::memory_order_relaxed);
+        g_perfP1Us.fetch_add(tP1Us, std::memory_order_relaxed);
+        g_perfP2Us.fetch_add(tP2Us, std::memory_order_relaxed);
+        g_perfP3Us.fetch_add(tP3Us, std::memory_order_relaxed);
+        g_perfDetUs.fetch_add(tDetUs, std::memory_order_relaxed);
+        g_perfP5Us.fetch_add(tP5Us, std::memory_order_relaxed);
+        if (passRebuilds) g_perfRebuilds.fetch_add(static_cast<std::uint64_t>(passRebuilds), std::memory_order_relaxed);
+        if (passFallbacks) g_perfFallbacks.fetch_add(static_cast<std::uint64_t>(passFallbacks), std::memory_order_relaxed);
+
+        const std::uint64_t totalPassUs = SteadyMicros() - tPassStart;
+        if (totalPassUs >= 50'000ULL) {
+            static std::uint64_t s_lastSlowLogMs = 0;
+            if (passNow - s_lastSlowLogMs >= 2000) {
+                s_lastSlowLogMs = passNow;
+                std::printf("[SlowPass] total=%.1fms (roots=%.1f views=%.1f p1=%.1f p2=%.1f p3=%.1f det=%.1f p5=%.1f match=%.1f) reb=%d fb=%d skel=%d/%d ents=%zu\n",
+                    totalPassUs / 1000.0,
+                    tRootsUs / 1000.0, tViewsUs / 1000.0,
+                    tP1Us / 1000.0, tP2Us / 1000.0, tP3Us / 1000.0,
+                    tDetUs / 1000.0, tP5Us / 1000.0, tMatchUs / 1000.0,
+                    passRebuilds, passFallbacks, nearbyWithBones, nearbyLiving, entities.size());
+            }
+        }
+    }
 
     // World and inventory reading runs on dedicated g_worldWorkerThread
     // so this player pose pass runs at full speed without latency spikes.
@@ -3766,62 +4968,79 @@ std::string GetLocationId()
 
 void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
-void RefreshCamera()
-{
-    // Both the render thread and the aim worker call this. Each call is a DMA
-    // device transaction, and the two consumers only need the newest camera, so
-    // collapse calls that land within 3 ms of each other. The loser simply uses
-    // the camera the winner just published.
-    static std::atomic<std::int64_t> lastRefreshUs{ 0 };
-    const std::int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    std::int64_t previous = lastRefreshUs.load(std::memory_order_relaxed);
-    if (nowUs - previous < 3000) return;
-    if (!lastRefreshUs.compare_exchange_strong(previous, nowUs, std::memory_order_relaxed))
-        return;
+struct CameraStepResult {
+    bool active = false;
+    bool usedPhysical = false;
+    bool changed = false;
+};
 
-    // Fast path: when the native camera was valid last frame, skip the
-    // managed read entirely and scatter-read just view+projection in one
-    // device transaction (~2ms instead of ~8ms).
+static bool MatrixChanged(const Matrix4x4& a, const Matrix4x4& b)
+{
+    return std::memcmp(&a.matrix[0][0], &b.matrix[0][0], sizeof(a.matrix)) != 0;
+}
+
+static CameraStepResult RefreshCameraStep()
+{
+    CameraStepResult res{};
+    if (g_cameraInvalidated.exchange(false, std::memory_order_acq_rel)) {
+        CameraFinder::InvalidateCache();
+        PublishNativeCamera(NativeCameraSnapshot{});
+    }
+
+    // Fast path: when the native camera is already locked on, skip the managed
+    // read entirely and fetch view+projection via cached PA + direct LcRead
+    // (~150-300 us on a healthy DMA link).
     if (ConfigInstance.Player.NativeEspCamera) {
-        bool nativeWasValid;
-        {
-            std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-            nativeWasValid = g_nativeViewProjectionValid;
-        }
-        if (nativeWasValid) {
+        const NativeCameraSnapshot prev = LoadNativeCamera();
+        if (prev.valid) {
             CameraFinder::CameraData fast = CameraFinder::GetCameraMatricesFast();
             if (fast.valid) {
-                {
-                    std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-                    g_nativeViewProjectionValid = true;
-                    g_nativeView = fast.view;
-                    g_nativeProjection = fast.projection;
-                    g_nativePositionError = -1.f;
-                    g_nativeForwardDot = -1.f;
-                    // Keep the aim/occlusion origin glued to the rendered
-                    // camera too, not just the projection.
-                    g_nativeCameraPoseValid = !fast.position.IsZero();
-                    if (g_nativeCameraPoseValid) {
-                        g_nativeCameraPosition = fast.position;
-                        g_nativeCameraForward = fast.forward;
-                    }
+                NativeCameraSnapshot snap{};
+                snap.view = fast.view;
+                snap.projection = fast.projection;
+                snap.valid = true;
+                snap.positionError = prev.positionError;
+                snap.forwardDot = prev.forwardDot;
+                snap.poseValid = !fast.position.IsZero();
+                if (snap.poseValid) {
+                    snap.position = fast.position;
+                    snap.forward = fast.forward;
                 }
-                return;
+                snap.stampUs = SteadyMicros();
+                PublishNativeCamera(snap);
+                res.active = true;
+                res.usedPhysical = fast.usedPhysical;
+                res.changed = MatrixChanged(prev.view, fast.view);
+                return res;
             }
         }
     }
 
-    // Full path: read managed camera, then validate native against it.
+    // Full path: read managed camera, then validate/re-resolve native against it.
     RobRunCamera::CameraState managed{};
+    bool managedChanged = false;
     const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
     if (model) {
         managed = RobRunCamera::Read(model);
         if (managed.valid) {
-            const float nativeFov = CameraFinder::ReadNativeFov();
-            if (nativeFov > 0.f)
-                managed.verticalFov = nativeFov;
+            static std::uint64_t lastNativeFovMs = 0;
+            static float cachedNativeFov = 0.f;
+            const std::uint64_t fovNowMs = GetTickCount64();
+            if (fovNowMs - lastNativeFovMs >= 8) {
+                lastNativeFovMs = fovNowMs;
+                const float nf = CameraFinder::ReadNativeFov();
+                if (nf > 0.f) cachedNativeFov = nf;
+            }
+            if (cachedNativeFov > 0.f)
+                managed.verticalFov = cachedNativeFov;
             std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+            managedChanged = !g_freshCamera.valid ||
+                g_freshCamera.position.x != managed.position.x ||
+                g_freshCamera.position.y != managed.position.y ||
+                g_freshCamera.position.z != managed.position.z ||
+                g_freshCamera.forward.x != managed.forward.x ||
+                g_freshCamera.forward.y != managed.forward.y ||
+                g_freshCamera.forward.z != managed.forward.z;
             g_freshCamera = managed;
         }
     }
@@ -3834,26 +5053,180 @@ void RefreshCamera()
         if (snapshot) managed = snapshot->camera;
     }
 
-    CameraFinder::CameraData native;
+    CameraFinder::CameraData native{};
     if (ConfigInstance.Player.NativeEspCamera)
         native = CameraFinder::GetCameraMatricesValidated(
             managed.position, managed.forward, managed.verticalFov);
 
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        g_nativeViewProjectionValid = native.valid;
-        if (native.valid) {
-            g_nativeView = native.view;
-            g_nativeProjection = native.projection;
-        }
-        g_nativePositionError = native.positionError;
-        g_nativeForwardDot = native.forwardDot;
-        g_nativeCameraPoseValid = native.valid && !native.position.IsZero();
-        if (g_nativeCameraPoseValid) {
-            g_nativeCameraPosition = native.position;
-            g_nativeCameraForward = native.forward;
+    const NativeCameraSnapshot prev = LoadNativeCamera();
+    NativeCameraSnapshot snap{};
+    snap.valid = native.valid;
+    if (native.valid) {
+        snap.view = native.view;
+        snap.projection = native.projection;
+    }
+    snap.positionError = native.positionError;
+    snap.forwardDot = native.forwardDot;
+    snap.poseValid = native.valid && !native.position.IsZero();
+    if (snap.poseValid) {
+        snap.position = native.position;
+        snap.forward = native.forward;
+    }
+    snap.stampUs = SteadyMicros();
+    PublishNativeCamera(snap);
+    res.active = native.valid || managed.valid;
+    res.usedPhysical = native.valid ? native.usedPhysical : managed.usedPhysical;
+    res.changed = native.valid
+        ? (!prev.valid || MatrixChanged(prev.view, native.view))
+        : managedChanged;
+    return res;
+}
+
+static void WaitCameraInterval(HANDLE timer, std::int64_t micros)
+{
+    if (timer) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -micros * 10LL; // 100 ns units, relative
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(timer, INFINITE);
+            return;
         }
     }
+    std::this_thread::sleep_for(std::chrono::microseconds(micros));
+}
+
+static void StartCameraWorker()
+{
+    StopCameraWorker();
+    g_cameraStop.store(false, std::memory_order_relaxed);
+    g_cameraRunning.store(true, std::memory_order_release);
+    g_cameraThread = std::thread([] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        HANDLE timer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
+        std::uint64_t winStartUs = SteadyMicros();
+        std::uint64_t reads = 0;
+        std::uint64_t physHits = 0;
+        std::uint64_t changes = 0;
+        std::uint64_t rttSumUs = 0;
+        std::uint64_t rttMaxUs = 0;
+
+        while (!g_cameraStop.load(std::memory_order_relaxed)) {
+            const std::uint64_t tStart = SteadyMicros();
+            CameraStepResult res{};
+            try {
+                const std::uintptr_t fullMapPtr = g_liveFullMapVarPtr.load(std::memory_order_acquire);
+                if (fullMapPtr > 0x10000) {
+                    struct LiveMapCam {
+                        float posX, posY, rot, camSize;
+                    } mc{};
+                    if (TargetProcess.ReadFresh(fullMapPtr + rr::MapConfigVariance::Position, &mc, sizeof(mc)) &&
+                        std::isfinite(mc.posX) && std::isfinite(mc.posY) &&
+                        std::isfinite(mc.rot) && std::isfinite(mc.camSize) &&
+                        mc.camSize > 0.1f && mc.camSize < 50000.f)
+                    {
+                        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+                        g_liveFullMap.pos = Vector2(mc.posX, mc.posY);
+                        g_liveFullMap.rot = mc.rot;
+                        g_liveFullMap.camSize = mc.camSize;
+                        g_liveFullMap.valid = true;
+                    }
+                }
+                res = RefreshCameraStep();
+            } catch (const std::exception& e) {
+                DLOG("CameraWorker: %s", e.what());
+            } catch (...) {
+                DLOG("CameraWorker: unknown exception");
+            }
+            const std::uint64_t tEnd = SteadyMicros();
+            const std::uint64_t rttUs = (tEnd >= tStart) ? (tEnd - tStart) : 0;
+
+            if (res.active) {
+                ++reads;
+                if (res.usedPhysical) ++physHits;
+                if (res.changed) ++changes;
+                rttSumUs += rttUs;
+                if (rttUs > rttMaxUs) rttMaxUs = rttUs;
+
+                // Periodic live diagnostics every 3 seconds so real-world DMA
+                // camera RTT, physical-read ratio, and DXGI present mode are visible.
+                if (tEnd - winStartUs >= 3'000'000ULL) {
+                    const double sec = static_cast<double>(tEnd - winStartUs) / 1'000'000.0;
+                    const double camHz = sec > 0.0 ? (reads / sec) : 0.0;
+                    const double chgHz = sec > 0.0 ? (changes / sec) : 0.0;
+                    const double physPct = reads ? (100.0 * physHits / reads) : 0.0;
+                    const std::uint64_t avgUs = reads ? (rttSumUs / reads) : 0;
+                    const std::uint64_t wPasses = g_perfWorkerPasses.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wUs = g_perfWorkerUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wMaxUs = g_perfWorkerMaxUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p1Us = g_perfP1Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p2Us = g_perfP2Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p3Us = g_perfP3Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t detUs = g_perfDetUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p5Us = g_perfP5Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t rebs = g_perfRebuilds.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t fbs = g_perfFallbacks.exchange(0, std::memory_order_relaxed);
+                    const int skels = g_perfSkels.load(std::memory_order_relaxed);
+                    const int living = g_perfLiving.load(std::memory_order_relaxed);
+                    const double wHz = sec > 0.0 ? (wPasses / sec) : 0.0;
+                    const double wMs = wPasses ? (static_cast<double>(wUs) / wPasses / 1000.0) : 0.0;
+                    const double invP = wPasses ? (1.0 / (wPasses * 1000.0)) : 0.0;
+                    std::printf("[Perf] cam=%.0fHz src=%s (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (avg=%.1fms max=%.1fms p1/p2/p3/det/p5=%.1f/%.1f/%.1f/%.1f/%.1fms reb=%llu fb=%llu skel=%d/%d) | overlay=%.0ffps mode=%s cap=%d\n",
+                        camHz, GetViewProjectionSource(), physPct,
+                        (unsigned long long)avgUs, (unsigned long long)rttMaxUs, chgHz,
+                        wHz, wMs, wMaxUs / 1000.0,
+                        p1Us * invP, p2Us * invP, p3Us * invP, detUs * invP, p5Us * invP,
+                        (unsigned long long)rebs, (unsigned long long)fbs, skels, living,
+                        Overlay::CurrentFps(), Overlay::PresentModeName(), Overlay::FrameCap());
+                    winStartUs = tEnd;
+                    reads = physHits = changes = rttSumUs = rttMaxUs = 0;
+                }
+
+                // True sub-millisecond start-to-start pacing (~250 us target =
+                // up to 4000 Hz) with zero 1 ms sleep penalty. Always yield
+                // briefly so the entity worker can acquire LeechCore fairly.
+                constexpr std::uint64_t kTargetCycleUs = 250;
+                SwitchToThread();
+                while (!g_cameraStop.load(std::memory_order_relaxed) &&
+                       (SteadyMicros() - tStart) < kTargetCycleUs) {
+                    _mm_pause();
+                }
+            } else {
+                // Back off to 5 ms in menus/lobbies when no camera is active.
+                winStartUs = tEnd;
+                reads = physHits = changes = rttSumUs = rttMaxUs = 0;
+                WaitCameraInterval(timer, 5000);
+            }
+        }
+        if (timer) CloseHandle(timer);
+        g_cameraRunning.store(false, std::memory_order_release);
+    });
+}
+
+static void StopCameraWorker()
+{
+    g_cameraStop.store(true, std::memory_order_relaxed);
+    if (g_cameraThread.joinable())
+        g_cameraThread.join();
+    g_cameraRunning.store(false, std::memory_order_release);
+}
+
+void RefreshCamera()
+{
+    // When the dedicated camera thread is active, callers never block on DMA
+    // here — they read the newest seqlock-published sample directly.
+    if (g_cameraRunning.load(std::memory_order_acquire))
+        return;
+
+    static std::atomic<std::uint64_t> lastRefreshUs{ 0 };
+    const std::uint64_t nowUs = SteadyMicros();
+    std::uint64_t previous = lastRefreshUs.load(std::memory_order_relaxed);
+    if (nowUs - previous < 1000) return;
+    if (!lastRefreshUs.compare_exchange_strong(previous, nowUs, std::memory_order_relaxed))
+        return;
+
+    RefreshCameraStep();
 }
 
 bool GetFreshCamera(RobRunCamera::CameraState& out)
@@ -3867,20 +5240,12 @@ bool GetFreshCamera(RobRunCamera::CameraState& out)
     // The native camera is the one the frame was rendered with. When its pose
     // is known it wins; the managed camera stays as the fallback (and supplies
     // the FOV, which the native fast path does not re-read).
-    Vector3 nativePosition{};
-    Vector3 nativeForward{};
-    bool haveNativePose = false;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        haveNativePose = g_nativeCameraPoseValid;
-        nativePosition = g_nativeCameraPosition;
-        nativeForward = g_nativeCameraForward;
-    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
 
     out = managed;
-    if (haveNativePose) {
-        out.position = nativePosition;
-        out.forward = nativeForward;
+    if (native.poseValid) {
+        out.position = native.position;
+        out.forward = native.forward;
         out.valid = true;
     }
     return out.valid;
@@ -3890,34 +5255,32 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
 
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        if (g_nativeViewProjectionValid) {
-            // Keep the rendered camera's view and vertical FOV, but rebuild the
-            // horizontal scale for the overlay surface. When the overlay and
-            // the game render target share an aspect (borderless fullscreen)
-            // this is bit-for-bit the matrix the game used.
-            Matrix4x4 projection = g_nativeProjection;
-            const float aspect =
-                static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
-            const float yScale = projection.matrix[1][1];
-            if (std::isfinite(yScale) && yScale > 0.01f && aspect > 0.01f)
-                projection.matrix[0][0] = yScale / aspect;
-            Matrix4x4 combined = g_nativeView * projection;
-            bool valid = true;
-            for (int r = 0; r < 4; ++r) {
-                for (int c = 0; c < 4; ++c) {
-                    if (!std::isfinite(combined.matrix[r][c])) {
-                        valid = false;
-                        break;
-                    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
+    if (native.valid) {
+        // Keep the rendered camera's view and vertical FOV, but rebuild the
+        // horizontal scale for the overlay surface. When the overlay and
+        // the game render target share an aspect (borderless fullscreen)
+        // this is bit-for-bit the matrix the game used.
+        Matrix4x4 projection = native.projection;
+        const float aspect =
+            static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
+        const float yScale = projection.matrix[1][1];
+        if (std::isfinite(yScale) && yScale > 0.01f && aspect > 0.01f)
+            projection.matrix[0][0] = yScale / aspect;
+        Matrix4x4 combined = native.view * projection;
+        bool valid = true;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (!std::isfinite(combined.matrix[r][c])) {
+                    valid = false;
+                    break;
                 }
-                if (!valid) break;
             }
-            if (valid && (std::abs(combined.matrix[2][3]) > 0.001f || std::abs(combined.matrix[3][2]) > 0.001f)) {
-                out = combined;
-                return true;
-            }
+            if (!valid) break;
+        }
+        if (valid && (std::abs(combined.matrix[2][3]) > 0.001f || std::abs(combined.matrix[3][2]) > 0.001f)) {
+            out = combined;
+            return true;
         }
     }
 
@@ -3950,9 +5313,40 @@ bool GetFallbackViewProjection(Matrix4x4& out)
     return true;
 }
 
+static thread_local bool tl_frameActive = false;
+static thread_local bool tl_frameValid = false;
+static thread_local int tl_frameW = 0;
+static thread_local int tl_frameH = 0;
+static thread_local Matrix4x4 tl_frameVP{};
+
+void BeginRenderFrame(int screenWidth, int screenHeight)
+{
+    tl_frameActive = true;
+    tl_frameW = screenWidth;
+    tl_frameH = screenHeight;
+    tl_frameValid = false;
+    if (screenWidth <= 0 || screenHeight <= 0)
+        return;
+    if (GetViewProjection(tl_frameVP, screenWidth, screenHeight) ||
+        GetFallbackViewProjection(tl_frameVP)) {
+        tl_frameValid = true;
+    }
+}
+
+void EndRenderFrame()
+{
+    tl_frameActive = false;
+    tl_frameValid = false;
+}
+
 bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
+    if (tl_frameActive && tl_frameW == screenWidth && tl_frameH == screenHeight) {
+        if (!tl_frameValid) return false;
+        out = tl_frameVP;
+        return true;
+    }
     if (GetViewProjection(out, screenWidth, screenHeight)) return true;
     return GetFallbackViewProjection(out);
 }
@@ -3968,10 +5362,7 @@ std::string RoleLabel(int role, const std::string& name)
 
 const char* GetViewProjectionSource()
 {
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        if (g_nativeViewProjectionValid) return "native";
-    }
+    if (LoadNativeCamera().valid) return "native";
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         if (g_freshCamera.valid) return "managed";
@@ -3985,12 +5376,10 @@ CameraDebug GetCameraDebug()
 {
     CameraDebug debug;
     debug.nativeEnabled = ConfigInstance.Player.NativeEspCamera;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        debug.nativeValid = g_nativeViewProjectionValid;
-        debug.positionError = g_nativePositionError;
-        debug.forwardDot = g_nativeForwardDot;
-    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
+    debug.nativeValid = native.valid;
+    debug.positionError = native.positionError;
+    debug.forwardDot = native.forwardDot;
     const auto snapshot = GetSnapshot();
     if (snapshot && snapshot->stampMs != 0)
         debug.snapshotAgeMs =
@@ -4074,6 +5463,17 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
         dyn = &dynCopy;
     }
     return CollisionBVH::IsOccluded(*bvh, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+}
+
+bool GetFreshFullMapVariance(Vector2& pos, float& rot, float& cameraSize)
+{
+    std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+    if (!g_liveFullMap.valid)
+        return false;
+    pos = g_liveFullMap.pos;
+    rot = g_liveFullMap.rot;
+    cameraSize = g_liveFullMap.camSize;
+    return true;
 }
 
 } // namespace RobRunReader

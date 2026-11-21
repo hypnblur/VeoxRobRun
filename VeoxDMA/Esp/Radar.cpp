@@ -13,6 +13,8 @@
 #include <cmath>
 #include <filesystem>
 #include <mutex>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace {
 
@@ -1052,6 +1054,669 @@ void DrawFullMap()
 	ImGui::End();
 	ImGui::PopStyleColor(3);
 	ImGui::PopStyleVar(2);
+}
+
+namespace {
+
+ImU32 GetInGameMapRoleColor(int role, const std::string& roleName, bool isTeammate)
+{
+	if (isTeammate)
+		return IM_COL32(75, 235, 235, 255);
+	const std::string label = RobRunReader::RoleLabel(role, roleName);
+	if (label == "Criminal")
+		return IM_COL32(255, 68, 68, 255);
+	if (label == "Police Officer")
+		return IM_COL32(55, 145, 255, 255);
+	if (label == "Civilian" || label == "Hubber")
+		return IM_COL32(70, 225, 90, 255);
+	return IM_COL32(255, 68, 68, 255);
+}
+
+int RolePriority(int role, const std::string& roleName, bool isTeammate)
+{
+	if (isTeammate) return 1;
+	const std::string label = RobRunReader::RoleLabel(role, roleName);
+	if (label == "Criminal") return 4;
+	if (label == "Police Officer") return 3;
+	return 2;
+}
+
+ImU32 LightenColor(ImU32 col, int add)
+{
+	const int r = std::min(255, static_cast<int>((col >> IM_COL32_R_SHIFT) & 0xFF) + add);
+	const int g = std::min(255, static_cast<int>((col >> IM_COL32_G_SHIFT) & 0xFF) + add);
+	const int b = std::min(255, static_cast<int>((col >> IM_COL32_B_SHIFT) & 0xFF) + add);
+	const int a = static_cast<int>((col >> IM_COL32_A_SHIFT) & 0xFF);
+	return IM_COL32(r, g, b, a);
+}
+
+// Clean Rob Run flat-vector comic car icon (2-pass seamless black outer contour).
+void DrawCarIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
+{
+	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
+	// Fuser-safe dark charcoal (pure/near-black gets luma-keyed transparent on DMA fusers).
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 20));
+	const ImU32 glassCol = IM_COL32(54, 68, 86, alpha);
+	const ImU32 glassHi = IM_COL32(150, 195, 235, std::min(170, alpha));
+	const ImU32 tireCol = IM_COL32(44, 48, 56, alpha);
+	const ImU32 rimCol = IM_COL32(225, 232, 240, alpha);
+
+	const float out = std::max(1.8f, 1.55f * scale);
+	const float bw = 7.2f * scale;   // half-width of lower chassis
+	const float bh = 2.6f * scale;   // half-height of lower chassis
+	const float bodyTop = c.y - bh * 0.45f;
+	const float bodyBot = c.y + bh * 1.15f;
+	const float cabWTop = 3.5f * scale;
+	const float cabWBot = 5.4f * scale;
+	const float cabTop = bodyTop - 3.3f * scale;
+	const float wheelY = bodyBot - 0.1f * scale;
+	const float wheelX = bw * 0.56f;
+	const float wheelR = 2.25f * scale;
+	const float round = 2.6f * scale;
+
+	// Pass 1: seamless outer black contour
+	const ImVec2 cabOut[4] = {
+		ImVec2(c.x - cabWBot - out, bodyTop + out * 0.35f),
+		ImVec2(c.x - cabWTop - out * 0.85f, cabTop - out),
+		ImVec2(c.x + cabWTop + out * 0.85f, cabTop - out),
+		ImVec2(c.x + cabWBot + out, bodyTop + out * 0.35f),
+	};
+	dl->AddQuadFilled(cabOut[0], cabOut[1], cabOut[2], cabOut[3], outline);
+	dl->AddCircleFilled(ImVec2(c.x - cabWTop * 0.92f, cabTop + 0.3f * scale), out * 1.05f, outline, 10);
+	dl->AddCircleFilled(ImVec2(c.x + cabWTop * 0.92f, cabTop + 0.3f * scale), out * 1.05f, outline, 10);
+	dl->AddRectFilled(
+		ImVec2(c.x - bw - out, bodyTop - out * 0.7f),
+		ImVec2(c.x + bw + out, bodyBot + out),
+		outline, round + out * 0.6f);
+	dl->AddCircleFilled(ImVec2(c.x - wheelX, wheelY), wheelR + out * 0.85f, outline, 12);
+	dl->AddCircleFilled(ImVec2(c.x + wheelX, wheelY), wheelR + out * 0.85f, outline, 12);
+
+	// Pass 2: inner vibrant car body + roof fill
+	const ImVec2 cabIn[4] = {
+		ImVec2(c.x - cabWBot, bodyTop + 0.4f * scale),
+		ImVec2(c.x - cabWTop, cabTop),
+		ImVec2(c.x + cabWTop, cabTop),
+		ImVec2(c.x + cabWBot, bodyTop + 0.4f * scale),
+	};
+	dl->AddQuadFilled(cabIn[0], cabIn[1], cabIn[2], cabIn[3], fillCol);
+	dl->AddRectFilled(ImVec2(c.x - bw, bodyTop), ImVec2(c.x + bw, bodyBot), fillCol, round);
+
+	// Subtle top-hood shine for native flat-vector depth
+	dl->AddLine(
+		ImVec2(c.x - bw * 0.78f, bodyTop + 0.55f * scale),
+		ImVec2(c.x + bw * 0.78f, bodyTop + 0.55f * scale),
+		LightenColor(fillCol, 45), std::max(1.0f, 0.75f * scale));
+
+	// Clean front & rear side windows (split by center B-pillar)
+	const float winTop = cabTop + 0.75f * scale;
+	const float winBot = bodyTop - 0.15f * scale;
+	const float pillar = 0.55f * scale;
+	const ImVec2 winL[4] = {
+		ImVec2(c.x - cabWBot * 0.78f, winBot),
+		ImVec2(c.x - cabWTop * 0.82f, winTop),
+		ImVec2(c.x - pillar, winTop),
+		ImVec2(c.x - pillar, winBot),
+	};
+	const ImVec2 winR[4] = {
+		ImVec2(c.x + pillar, winBot),
+		ImVec2(c.x + pillar, winTop),
+		ImVec2(c.x + cabWTop * 0.82f, winTop),
+		ImVec2(c.x + cabWBot * 0.78f, winBot),
+	};
+	dl->AddQuadFilled(winL[0], winL[1], winL[2], winL[3], glassCol);
+	dl->AddQuadFilled(winR[0], winR[1], winR[2], winR[3], glassCol);
+	dl->AddLine(
+		ImVec2(c.x - cabWTop * 0.65f, winTop + 0.35f * scale),
+		ImVec2(c.x - pillar - 0.3f * scale, winTop + 0.35f * scale),
+		glassHi, std::max(1.0f, 0.65f * scale));
+
+	// Clean round wheels + bright hubcaps
+	dl->AddCircleFilled(ImVec2(c.x - wheelX, wheelY), wheelR, tireCol, 12);
+	dl->AddCircleFilled(ImVec2(c.x + wheelX, wheelY), wheelR, tireCol, 12);
+	dl->AddCircleFilled(ImVec2(c.x - wheelX, wheelY), wheelR * 0.48f, rimCol, 10);
+	dl->AddCircleFilled(ImVec2(c.x + wheelX, wheelY), wheelR * 0.48f, rimCol, 10);
+}
+
+// Clean Rob Run flat-vector helicopter icon (2-pass seamless black outer contour).
+void DrawHeliIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
+{
+	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 20));
+	const ImU32 glassCol = IM_COL32(54, 68, 86, alpha);
+	const ImU32 rotorIn = IM_COL32(232, 238, 246, alpha);
+
+	const float out = std::max(1.8f, 1.55f * scale);
+	const float bodyR = 4.5f * scale;
+	const float bodyCx = c.x + 1.2f * scale;
+	const float bodyCy = c.y + 0.4f * scale;
+	const float tailEndX = c.x - 8.2f * scale;
+	const float tailY = bodyCy - 0.5f * scale;
+	const float skidY = bodyCy + bodyR + 1.5f * scale;
+	const float rotorY = bodyCy - bodyR - 1.6f * scale;
+	const float rotorHalf = 8.4f * scale;
+
+	// Pass 1: seamless outer black silhouette (skids, tail, fin, cabin, rotor mast + blades)
+	dl->AddLine(ImVec2(bodyCx - 4.4f * scale, skidY), ImVec2(bodyCx + 4.8f * scale, skidY), outline, out * 2.1f);
+	dl->AddLine(ImVec2(bodyCx - 2.2f * scale, bodyCy + bodyR * 0.6f), ImVec2(bodyCx - 2.2f * scale, skidY), outline, out * 1.6f);
+	dl->AddLine(ImVec2(bodyCx + 2.2f * scale, bodyCy + bodyR * 0.6f), ImVec2(bodyCx + 2.2f * scale, skidY), outline, out * 1.6f);
+
+	const ImVec2 tailOut[4] = {
+		ImVec2(bodyCx - bodyR * 0.4f, tailY - 1.9f * scale - out),
+		ImVec2(tailEndX - out, tailY - 0.8f * scale - out),
+		ImVec2(tailEndX - out, tailY + 1.0f * scale + out),
+		ImVec2(bodyCx - bodyR * 0.4f, tailY + 2.1f * scale + out),
+	};
+	dl->AddQuadFilled(tailOut[0], tailOut[1], tailOut[2], tailOut[3], outline);
+	dl->AddCircleFilled(ImVec2(tailEndX, tailY - 1.2f * scale), 2.2f * scale + out * 0.8f, outline, 12);
+	dl->AddCircleFilled(ImVec2(bodyCx, bodyCy), bodyR + out, outline, 18);
+	dl->AddLine(ImVec2(bodyCx, bodyCy - bodyR), ImVec2(bodyCx, rotorY), outline, out * 1.8f);
+	dl->AddLine(ImVec2(bodyCx - rotorHalf, rotorY), ImVec2(bodyCx + rotorHalf, rotorY), outline, out * 2.1f);
+
+	// Pass 2: inner role-colored fuselage + tail boom + tail rotor
+	const ImVec2 tailIn[4] = {
+		ImVec2(bodyCx - bodyR * 0.35f, tailY - 1.6f * scale),
+		ImVec2(tailEndX, tailY - 0.6f * scale),
+		ImVec2(tailEndX, tailY + 0.8f * scale),
+		ImVec2(bodyCx - bodyR * 0.35f, tailY + 1.8f * scale),
+	};
+	dl->AddQuadFilled(tailIn[0], tailIn[1], tailIn[2], tailIn[3], fillCol);
+	dl->AddCircleFilled(ImVec2(tailEndX, tailY - 1.2f * scale), 1.9f * scale, fillCol, 12);
+	dl->AddCircleFilled(ImVec2(tailEndX, tailY - 1.2f * scale), 0.75f * scale, outline, 8);
+	dl->AddCircleFilled(ImVec2(bodyCx, bodyCy), bodyR, fillCol, 18);
+
+	// Cockpit bubble canopy (front-upper quadrant)
+	const ImVec2 canopy[4] = {
+		ImVec2(bodyCx + 0.2f * scale, bodyCy - bodyR * 0.72f),
+		ImVec2(bodyCx + bodyR * 0.76f, bodyCy - bodyR * 0.48f),
+		ImVec2(bodyCx + bodyR * 0.82f, bodyCy + bodyR * 0.18f),
+		ImVec2(bodyCx + 0.2f * scale, bodyCy + bodyR * 0.18f),
+	};
+	dl->AddQuadFilled(canopy[0], canopy[1], canopy[2], canopy[3], glassCol);
+
+	// Bright inner top rotor blade & skids highlight
+	dl->AddLine(ImVec2(bodyCx - rotorHalf * 0.92f, rotorY), ImVec2(bodyCx + rotorHalf * 0.92f, rotorY),
+		rotorIn, std::max(1.2f, 1.0f * scale));
+	dl->AddLine(ImVec2(bodyCx - 4.0f * scale, skidY), ImVec2(bodyCx + 4.4f * scale, skidY),
+		rotorIn, std::max(1.0f, 0.8f * scale));
+}
+
+// Smooth rounded-corner, flat-notched player arrow matching Rob Run's native green player arrow.
+void DrawPlayerArrow(ImDrawList* dl, const ImVec2& c, float relYaw, float radius, ImU32 fillCol)
+{
+	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 25));
+
+	const float dirX = std::sin(relYaw);
+	const float dirY = -std::cos(relYaw);
+	const float perpX = -dirY;
+	const float perpY = dirX;
+
+	auto ptAt = [&](float fwd, float side) -> ImVec2 {
+		return ImVec2(
+			c.x + dirX * (fwd * radius) + perpX * (side * radius),
+			c.y + dirY * (fwd * radius) + perpY * (side * radius));
+	};
+
+	// Exact silhouette of the native Rob Run arrow: wide arrowhead with shallow flat tail notch
+	const ImVec2 tip     = ptAt( 1.00f,  0.00f);
+	const ImVec2 wingL   = ptAt(-0.76f, -0.82f);
+	const ImVec2 tailL   = ptAt(-0.76f, -0.44f);
+	const ImVec2 notchL  = ptAt(-0.44f, -0.34f);
+	const ImVec2 notchR  = ptAt(-0.44f,  0.34f);
+	const ImVec2 tailR   = ptAt(-0.76f,  0.44f);
+	const ImVec2 wingR   = ptAt(-0.76f,  0.82f);
+
+	const float outT = std::max(2.0f, radius * 0.24f);
+	const float capR = outT * 0.52f;
+
+	// Pass 1: smooth black outer contour + rounded corner caps (no sharp miter spikes)
+	const ImVec2 poly[7] = { tip, wingL, tailL, notchL, notchR, tailR, wingR };
+	dl->AddPolyline(poly, 7, outline, ImDrawFlags_Closed, outT);
+	dl->AddCircleFilled(tip,   capR, outline, 10);
+	dl->AddCircleFilled(wingL, capR, outline, 10);
+	dl->AddCircleFilled(wingR, capR, outline, 10);
+	dl->AddCircleFilled(tailL, capR * 0.85f, outline, 8);
+	dl->AddCircleFilled(tailR, capR * 0.85f, outline, 8);
+
+	// Pass 2: clean convex-decomposed vibrant fill
+	const ImVec2 center = ptAt(-0.10f, 0.00f);
+	dl->AddTriangleFilled(tip, wingL, center, fillCol);
+	dl->AddTriangleFilled(tip, center, wingR, fillCol);
+	dl->AddQuadFilled(center, wingL, tailL, notchL, fillCol);
+	dl->AddQuadFilled(center, notchR, tailR, wingR, fillCol);
+	dl->AddTriangleFilled(center, notchL, notchR, fillCol);
+
+	// Crisp outer border stroke on top so edges stay razor-sharp like the native arrow
+	dl->AddPolyline(poly, 7, outline, ImDrawFlags_Closed, std::max(1.5f, outT * 0.55f));
+
+	// Subtle inner highlight along the leading edges for a crisp native-sprite feel
+	const ImU32 hiCol = LightenColor(fillCol, 42);
+	dl->AddLine(ptAt(0.76f, 0.00f), ptAt(-0.45f, -0.52f), hiCol, std::max(1.0f, radius * 0.08f));
+}
+
+} // namespace
+
+void DrawInGameMapOverlay()
+{
+	const auto& cfg = ConfigInstance.Radar;
+	if (!cfg.InGameMinimap && !cfg.InGameFullMap)
+		return;
+
+	const auto snapshot = RobRunReader::GetSnapshot();
+	if (!snapshot || !snapshot->inGameMap.valid)
+		return;
+
+	const auto& map = snapshot->inGameMap;
+	const bool isFull = map.fullscreenOpen;
+	if (isFull && !cfg.InGameFullMap) return;
+	if (!isFull && !cfg.InGameMinimap) return;
+
+	const auto& var = isFull ? map.fullscreen : map.minimap;
+	if (!var.valid || var.cameraSize <= 0.1f)
+		return;
+
+	Vector2 mapPos = var.position;
+	float mapRot = var.rotation;
+	float mapCamSize = var.cameraSize;
+	if (isFull) {
+		Vector2 livePos{};
+		float liveRot = 0.f, liveSize = 0.f;
+		if (RobRunReader::GetFreshFullMapVariance(livePos, liveRot, liveSize)) {
+			mapPos = livePos;
+			mapRot = liveRot;
+			mapCamSize = liveSize;
+		}
+	}
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	if (display.x <= 0.f || display.y <= 0.f)
+		return;
+
+	// Convert Unity bottom-left UI Canvas reference pixels to ImGui top-left
+	// screen pixels, scaling proportionally when CanvasScaler reference size
+	// (e.g. 1920x1080) differs from the current display resolution.
+	float minX = 0.f, maxX = 0.f, minY = 0.f, maxY = 0.f;
+	if (var.rectValid) {
+		const float sx = (var.uiScreenW > 100.f) ? (display.x / var.uiScreenW) : 1.f;
+		const float sy = (var.uiScreenH > 100.f) ? (display.y / var.uiScreenH) : 1.f;
+		minX = var.uiMinX * sx;
+		maxX = var.uiMaxX * sx;
+		minY = display.y - var.uiMaxY * sy;
+		maxY = display.y - var.uiMinY * sy;
+	} else if (isFull) {
+		// Fallback on the first frame 'M' opens if RectTransform hasn't resolved yet:
+		// MapMeshView.Camera renders into a 1:1 square container centered on screen.
+		const float side = display.x;
+		minX = (display.x - side) * 0.5f;
+		maxX = minX + side;
+		minY = (display.y - side) * 0.5f;
+		maxY = minY + side;
+	} else {
+		const float uiScale = display.y / 1080.f;
+		const float pad = 24.f * uiScale;
+		const float side = 250.f * uiScale;
+		minX = pad;
+		minY = pad;
+		maxX = pad + side;
+		maxY = pad + side;
+	}
+
+	const float rectW = maxX - minX;
+	const float rectH = maxY - minY;
+	if (rectW < 40.f || rectH < 40.f)
+		return;
+
+	const float cx = (minX + maxX) * 0.5f;
+	const float cy = (minY + maxY) * 0.5f;
+	const float halfH = mapCamSize;
+	const float halfW = halfH * (rectW / rectH);
+	if (halfW <= 0.01f || halfH <= 0.01f)
+		return;
+
+	// Fullscreen ('M') map is always North-up (rotRad = 0).
+	// Rotating minimap aligns its top edge (+Y in UI, -Y on screen) with the
+	// 3D camera's horizontal forward direction in world XZ space.
+	constexpr float kDegToRad = 3.1415926535f / 180.f;
+	float rotRad = 0.f;
+	if (!isFull && std::fabs(mapRot) > 0.01f) {
+		RobRunCamera::CameraState freshCam{};
+		bool haveCam = RobRunReader::GetFreshCamera(freshCam) && freshCam.valid;
+		const Vector3& fwd = haveCam ? freshCam.forward : snapshot->camera.forward;
+		const bool camOk = haveCam || snapshot->camera.valid;
+		if (camOk && (fwd.x * fwd.x + fwd.z * fwd.z) > 1e-4f) {
+			rotRad = std::atan2(fwd.x, fwd.z);
+		} else {
+			rotRad = -mapRot * kDegToRad;
+		}
+	}
+	const float cosR = std::cos(rotRad);
+	const float sinR = std::sin(rotRad);
+
+	const float clipMinX = std::clamp(minX, 0.f, display.x);
+	const float clipMinY = std::clamp(minY, 0.f, display.y);
+	const float clipMaxX = std::clamp(maxX, 0.f, display.x);
+	const float clipMaxY = std::clamp(maxY, 0.f, display.y);
+	if (clipMaxX - clipMinX < 20.f || clipMaxY - clipMinY < 20.f)
+		return;
+
+	auto worldToMap = [&](const Vector3& world, ImVec2& out) -> bool {
+		if (!std::isfinite(world.x) || !std::isfinite(world.z)) return false;
+		const float dx = world.x - mapPos.x;
+		const float dz = world.z - mapPos.y;
+		// Unity top-down orthographic camera rotated by rotRad clockwise from +Z:
+		//   right = (cosR, -sinR), up/forward = (sinR, cosR)
+		const float right = dx * cosR - dz * sinR;
+		const float up    = dx * sinR + dz * cosR;
+		const float nx = right / halfW;
+		const float ny = up    / halfH;
+		if (!isFull && (nx < -0.98f || nx > 0.98f || ny < -0.98f || ny > 0.98f))
+			return false;
+		out.x = cx + nx * (rectW * 0.5f);
+		out.y = cy - ny * (rectH * 0.5f);
+		const float margin = isFull ? 36.f : -1.f;
+		if (out.x < clipMinX - margin || out.x > clipMaxX + margin ||
+			out.y < clipMinY - margin || out.y > clipMaxY + margin)
+			return false;
+		return true;
+	};
+
+	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	if (!dl) return;
+
+	// Bold 2x native-matched icon scaling for both minimap and fullscreen map.
+	const float scale = std::clamp(cfg.InGameMapScale, 0.5f, 2.0f) * (isFull ? 2.15f : 1.85f);
+	ImFont* font = ImGui::GetFont();
+	const float fontSize = std::max(15.f, 8.2f * scale);
+
+	dl->PushClipRect(ImVec2(clipMinX, clipMinY), ImVec2(clipMaxX, clipMaxY), true);
+
+	// 1. Optional valuables & dropped bags (drawn underneath vehicles/players)
+	if (snapshot->world && snapshot->world->valid &&
+		(cfg.InGameMapValuables || cfg.InGameMapDroppedBags))
+	{
+		for (const auto& we : snapshot->world->entities) {
+			ImVec2 pt{};
+			if (cfg.InGameMapDroppedBags && we.kind == RobRunWorld::Kind::DroppedBag) {
+				if (!worldToMap(we.position, pt)) continue;
+				const float r = 4.2f * scale;
+				dl->AddQuadFilled(
+					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
+					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
+					IM_COL32(255, 200, 50, 240));
+				dl->AddQuad(
+					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
+					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
+					IM_COL32(38, 40, 46, 235), 1.4f);
+			} else if (cfg.InGameMapValuables &&
+				(we.kind == RobRunWorld::Kind::Cargo ||
+				 we.kind == RobRunWorld::Kind::CashLootNode ||
+				 we.kind == RobRunWorld::Kind::SettlementCash ||
+				 we.kind == RobRunWorld::Kind::SafeDoor)) {
+				if (!worldToMap(we.position, pt)) continue;
+				const float r = 3.6f * scale;
+				const ImU32 col = (we.kind == RobRunWorld::Kind::Cargo)
+					? IM_COL32(255, 110, 230, 235)
+					: IM_COL32(100, 255, 140, 235);
+				dl->AddRectFilled(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), col);
+				dl->AddRect(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), IM_COL32(38, 40, 46, 235), 0.f, 0, 1.4f);
+			}
+		}
+	}
+
+	// Match players currently driving/riding to their live world vehicle (car vs heli)
+	// so occupied vehicles are colored by driver role (red=criminal, blue=cop, green=civilian).
+	const auto& pcfg = ConfigInstance.Player;
+	const std::int32_t localId = snapshot->localEntityId;
+	const bool haveWorld = snapshot->world && snapshot->world->valid;
+	const std::size_t worldCount = haveWorld ? snapshot->world->entities.size() : 0;
+
+	struct VehicleOccupantInfo {
+		bool occupied = false;
+		bool localOccupied = false;
+		int priority = 0;
+		ImU32 color = IM_COL32(215, 220, 228, 220);
+		Vector3 driverPos{};
+		bool hasDriverPos = false;
+	};
+	std::vector<VehicleOccupantInfo> worldVehOcc(worldCount);
+	std::vector<int> playerMatchedWorldVeh(snapshot->entities.size(), -1);
+
+	auto isWorldVehicle = [](RobRunWorld::Kind k) {
+		return k == RobRunWorld::Kind::Car ||
+			   k == RobRunWorld::Kind::Helicopter ||
+			   k == RobRunWorld::Kind::Vehicle;
+	};
+
+	if (haveWorld) {
+		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
+			const auto& ent = snapshot->entities[ei];
+			if (ent.isDead) continue;
+			if (!ent.inVehicle && ent.vehicleId <= 0) continue;
+
+			const bool isLocal = (ent.entityId == localId);
+			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
+
+			int matchedIdx = -1;
+			if (ent.vehicleId > 0) {
+				for (std::size_t wi = 0; wi < worldCount; ++wi) {
+					const auto& we = snapshot->world->entities[wi];
+					if (isWorldVehicle(we.kind) && we.id == ent.vehicleId) {
+						matchedIdx = static_cast<int>(wi);
+						break;
+					}
+				}
+			}
+			if (matchedIdx < 0 && ent.inVehicle &&
+				std::isfinite(ent.position.x) && std::isfinite(ent.position.z))
+			{
+				float bestDistSq = 36.f; // 6 m XZ fallback radius
+				for (std::size_t wi = 0; wi < worldCount; ++wi) {
+					const auto& we = snapshot->world->entities[wi];
+					if (!isWorldVehicle(we.kind)) continue;
+					const float dx = we.position.x - ent.position.x;
+					const float dz = we.position.z - ent.position.z;
+					const float dSq = dx * dx + dz * dz;
+					if (dSq < bestDistSq) {
+						bestDistSq = dSq;
+						matchedIdx = static_cast<int>(wi);
+					}
+				}
+			}
+
+			if (matchedIdx >= 0) {
+				playerMatchedWorldVeh[ei] = matchedIdx;
+				auto& occ = worldVehOcc[static_cast<std::size_t>(matchedIdx)];
+				if (isLocal) {
+					occ.localOccupied = true;
+				} else {
+					const int prio = RolePriority(ent.role, ent.roleName, isTeammate);
+					if (!occ.occupied || prio > occ.priority) {
+						occ.occupied = true;
+						occ.priority = prio;
+						occ.color = GetInGameMapRoleColor(ent.role, ent.roleName, isTeammate);
+						if (std::isfinite(ent.position.x) && std::isfinite(ent.position.z)) {
+							occ.driverPos = ent.position;
+							occ.hasDriverPos = true;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Vehicles (cars & helicopters — colored by driver role when occupied)
+	if (cfg.InGameMapVehicles && haveWorld)
+	{
+		for (std::size_t wi = 0; wi < worldCount; ++wi) {
+			const auto& we = snapshot->world->entities[wi];
+			if (!isWorldVehicle(we.kind))
+				continue;
+			const auto& occ = worldVehOcc[wi];
+			if (occ.localOccupied && !occ.occupied)
+				continue; // Don't clutter under the local player's own arrow
+
+			ImVec2 pt{};
+			// Use the driver's high-frequency entity position (80-500 Hz) for
+			// occupied vehicles so driven cars/helis never lag behind their arrow.
+			const Vector3& vehWorldPos = (occ.occupied && occ.hasDriverPos) ? occ.driverPos : we.position;
+			if (!worldToMap(vehWorldPos, pt)) continue;
+
+			const ImU32 vehCol = occ.occupied
+				? occ.color
+				: IM_COL32(210, 216, 224, 210);
+			const float vehScale = occ.occupied ? scale : (scale * 0.85f);
+			if (we.kind == RobRunWorld::Kind::Helicopter) {
+				DrawHeliIcon(dl, pt, vehScale, vehCol);
+			} else {
+				DrawCarIcon(dl, pt, vehScale, vehCol);
+			}
+		}
+	}
+
+	// 3. Players (sleek directional chevron arrows; names + last-known ghosts on fullscreen map)
+	if (cfg.InGameMapPlayers)
+	{
+		struct LastKnownPlayer {
+			Vector3 position{};
+			float yaw = 0.f;
+			bool hasYaw = false;
+			int role = 0;
+			std::string roleName;
+			std::string nicknameUtf8;
+			bool isTeammate = false;
+			std::uint64_t lastSeenMs = 0;
+		};
+		static std::unordered_map<std::int32_t, LastKnownPlayer> s_lastKnown;
+		static std::uint64_t s_lastSessionGen = 0;
+
+		const std::uint64_t nowMs = GetTickCount64();
+		if (snapshot->sessionGeneration != s_lastSessionGen) {
+			s_lastSessionGen = snapshot->sessionGeneration;
+			s_lastKnown.clear();
+		}
+
+		std::unordered_set<std::int32_t> liveIds;
+		liveIds.reserve(snapshot->entities.size());
+
+		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
+			const auto& ent = snapshot->entities[ei];
+			if (ent.entityId == localId)
+				continue;
+			if (ent.isDead) {
+				s_lastKnown.erase(ent.entityId);
+				continue;
+			}
+			liveIds.insert(ent.entityId);
+
+			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			if (pcfg.HideTeammates && isTeammate)
+				continue;
+
+			float entYaw = ent.yaw;
+			const float lookHorizSq = ent.lookDirection.x * ent.lookDirection.x + ent.lookDirection.z * ent.lookDirection.z;
+			if (std::isfinite(lookHorizSq) && lookHorizSq > 0.01f)
+				entYaw = std::atan2(ent.lookDirection.x, ent.lookDirection.z);
+
+			if (std::isfinite(ent.position.x) && std::isfinite(ent.position.z) &&
+				(ent.position.x != 0.f || ent.position.z != 0.f))
+			{
+				auto& lk = s_lastKnown[ent.entityId];
+				lk.position = ent.position;
+				lk.yaw = entYaw;
+				lk.hasYaw = std::isfinite(entYaw);
+				lk.role = ent.role;
+				lk.roleName = ent.roleName;
+				if (!ent.nicknameUtf8.empty())
+					lk.nicknameUtf8 = ent.nicknameUtf8;
+				lk.isTeammate = isTeammate;
+				lk.lastSeenMs = nowMs;
+			}
+
+			ImVec2 pt{};
+			if (!worldToMap(ent.position, pt))
+				continue;
+
+			const ImU32 col = GetInGameMapRoleColor(ent.role, ent.roleName, isTeammate);
+
+			// If player is driving a vehicle that wasn't matched in the world list
+			// yet (e.g. world worker hasn't ticked), still draw a role-colored vehicle
+			// icon underneath their arrow.
+			if (cfg.InGameMapVehicles && ent.inVehicle && playerMatchedWorldVeh[ei] < 0) {
+				DrawCarIcon(dl, pt, scale, col);
+			}
+
+			const float arrowR = (isFull ? 9.5f : 8.2f) * scale;
+			if (std::isfinite(entYaw)) {
+				DrawPlayerArrow(dl, pt, entYaw - rotRad, arrowR, col);
+			} else {
+				const float dotR = (isFull ? 6.0f : 5.2f) * scale;
+				dl->AddCircleFilled(pt, dotR, col, 14);
+				dl->AddCircle(pt, dotR, IM_COL32(38, 40, 46, 250), 14, 1.8f);
+			}
+
+			// Player names are only shown on the fullscreen ('M') map, never on the minimap.
+			if (isFull && cfg.InGameMapPlayerNames && font && !ent.nicknameUtf8.empty()) {
+				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, ent.nicknameUtf8.c_str());
+				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - arrowR - sz.y - 3.f);
+				const float padX = 4.f;
+				const float padY = 1.5f;
+				dl->AddRectFilled(
+					ImVec2(textPos.x - padX, textPos.y - padY),
+					ImVec2(textPos.x + sz.x + padX, textPos.y + sz.y + padY),
+					IM_COL32(34, 36, 42, 220), 3.f);
+				Esp::DrawOutlinedText(dl, textPos, col, font, fontSize, ent.nicknameUtf8.c_str());
+			}
+		}
+
+		// On the fullscreen ('M') map, render last-known positions of players who
+		// left the server's replication range (faded over 90 s) so you keep
+		// long-range map awareness beyond the client network bubble.
+		constexpr std::uint64_t kLastKnownMaxAgeMs = 90'000ULL;
+		for (auto it = s_lastKnown.begin(); it != s_lastKnown.end(); ) {
+			const std::uint64_t ageMs = (nowMs >= it->second.lastSeenMs) ? (nowMs - it->second.lastSeenMs) : 0;
+			if (ageMs > kLastKnownMaxAgeMs) {
+				it = s_lastKnown.erase(it);
+				continue;
+			}
+			if (isFull && !liveIds.count(it->first)) {
+				const auto& lk = it->second;
+				if (!(pcfg.HideTeammates && lk.isTeammate)) {
+					ImVec2 pt{};
+					if (worldToMap(lk.position, pt)) {
+						const float fade = 1.f - 0.55f * (static_cast<float>(ageMs) / static_cast<float>(kLastKnownMaxAgeMs));
+						const ImU32 baseCol = GetInGameMapRoleColor(lk.role, lk.roleName, lk.isTeammate);
+						const int alpha = static_cast<int>(155.f * fade);
+						const ImU32 fadedCol = (baseCol & 0x00FFFFFFu) | (static_cast<ImU32>(std::clamp(alpha, 55, 165)) << 24);
+						const float arrowR = 8.5f * scale;
+						if (lk.hasYaw) {
+							DrawPlayerArrow(dl, pt, lk.yaw - rotRad, arrowR, fadedCol);
+						} else {
+							dl->AddCircleFilled(pt, 5.2f * scale, fadedCol, 12);
+						}
+						if (cfg.InGameMapPlayerNames && font) {
+							char label[96];
+							const int ageSec = static_cast<int>(ageMs / 1000ULL);
+							if (!lk.nicknameUtf8.empty())
+								std::snprintf(label, sizeof(label), "%s (%ds)", lk.nicknameUtf8.c_str(), ageSec);
+							else
+								std::snprintf(label, sizeof(label), "(%ds)", ageSec);
+							const ImVec2 sz = font->CalcTextSizeA(fontSize * 0.92f, FLT_MAX, 0.f, label);
+							const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - arrowR - sz.y - 3.f);
+							dl->AddRectFilled(
+								ImVec2(textPos.x - 3.5f, textPos.y - 1.5f),
+								ImVec2(textPos.x + sz.x + 3.5f, textPos.y + sz.y + 1.5f),
+								IM_COL32(34, 36, 42, 190), 3.f);
+							Esp::DrawOutlinedText(dl, textPos, fadedCol, font, fontSize * 0.92f, label);
+						}
+					}
+				}
+			}
+			++it;
+		}
+	}
+
+	dl->PopClipRect();
 }
 
 void Shutdown()
