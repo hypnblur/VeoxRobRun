@@ -1435,13 +1435,43 @@ void DrawInGameMapOverlay()
 		}
 	}
 
-	// Match players currently driving/riding to their live world vehicle (car vs heli)
-	// so occupied vehicles are colored by driver role (red=criminal, blue=cop, green=civilian).
+	// Match players currently driving/riding to their live vehicle (car vs heli)
+	// using high-frequency snapshot->fastVehicles (80-500 Hz) with world fallback.
 	const auto& pcfg = ConfigInstance.Player;
 	const std::int32_t localId = snapshot->localEntityId;
+	const bool useFastVeh = !snapshot->fastVehicles.empty();
 	const bool haveWorld = snapshot->world && snapshot->world->valid;
-	const std::size_t worldCount = haveWorld ? snapshot->world->entities.size() : 0;
 
+	struct MapVehicle {
+		int id = 0;
+		RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
+		Vector3 position{};
+		std::string ownerRoleName;
+		std::string ownerNicknameUtf8;
+		bool hasDriver = false;
+	};
+	std::vector<MapVehicle> mapVehicles;
+	auto isWorldVehicle = [](RobRunWorld::Kind k) {
+		return k == RobRunWorld::Kind::Car ||
+			   k == RobRunWorld::Kind::Helicopter ||
+			   k == RobRunWorld::Kind::Vehicle;
+	};
+
+	if (useFastVeh) {
+		mapVehicles.reserve(snapshot->fastVehicles.size());
+		for (const auto& fv : snapshot->fastVehicles) {
+			mapVehicles.push_back(MapVehicle{
+				fv.id, fv.kind, fv.position, fv.ownerRoleName, fv.ownerNicknameUtf8, fv.hasDriver
+			});
+		}
+	} else if (haveWorld) {
+		for (const auto& we : snapshot->world->entities) {
+			if (!isWorldVehicle(we.kind)) continue;
+			mapVehicles.push_back(MapVehicle{ we.id, we.kind, we.position, {}, {}, false });
+		}
+	}
+
+	const std::size_t vehCount = mapVehicles.size();
 	struct VehicleOccupantInfo {
 		bool occupied = false;
 		bool localOccupied = false;
@@ -1450,16 +1480,10 @@ void DrawInGameMapOverlay()
 		Vector3 driverPos{};
 		bool hasDriverPos = false;
 	};
-	std::vector<VehicleOccupantInfo> worldVehOcc(worldCount);
-	std::vector<int> playerMatchedWorldVeh(snapshot->entities.size(), -1);
+	std::vector<VehicleOccupantInfo> vehOcc(vehCount);
+	std::vector<int> playerMatchedVeh(snapshot->entities.size(), -1);
 
-	auto isWorldVehicle = [](RobRunWorld::Kind k) {
-		return k == RobRunWorld::Kind::Car ||
-			   k == RobRunWorld::Kind::Helicopter ||
-			   k == RobRunWorld::Kind::Vehicle;
-	};
-
-	if (haveWorld) {
+	if (vehCount > 0) {
 		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
 			const auto& ent = snapshot->entities[ei];
 			if (ent.isDead) continue;
@@ -1471,10 +1495,9 @@ void DrawInGameMapOverlay()
 
 			int matchedIdx = -1;
 			if (ent.vehicleId > 0) {
-				for (std::size_t wi = 0; wi < worldCount; ++wi) {
-					const auto& we = snapshot->world->entities[wi];
-					if (isWorldVehicle(we.kind) && we.id == ent.vehicleId) {
-						matchedIdx = static_cast<int>(wi);
+				for (std::size_t vi = 0; vi < vehCount; ++vi) {
+					if (mapVehicles[vi].id == ent.vehicleId) {
+						matchedIdx = static_cast<int>(vi);
 						break;
 					}
 				}
@@ -1483,22 +1506,20 @@ void DrawInGameMapOverlay()
 				std::isfinite(ent.position.x) && std::isfinite(ent.position.z))
 			{
 				float bestDistSq = 36.f; // 6 m XZ fallback radius
-				for (std::size_t wi = 0; wi < worldCount; ++wi) {
-					const auto& we = snapshot->world->entities[wi];
-					if (!isWorldVehicle(we.kind)) continue;
-					const float dx = we.position.x - ent.position.x;
-					const float dz = we.position.z - ent.position.z;
+				for (std::size_t vi = 0; vi < vehCount; ++vi) {
+					const float dx = mapVehicles[vi].position.x - ent.position.x;
+					const float dz = mapVehicles[vi].position.z - ent.position.z;
 					const float dSq = dx * dx + dz * dz;
 					if (dSq < bestDistSq) {
 						bestDistSq = dSq;
-						matchedIdx = static_cast<int>(wi);
+						matchedIdx = static_cast<int>(vi);
 					}
 				}
 			}
 
 			if (matchedIdx >= 0) {
-				playerMatchedWorldVeh[ei] = matchedIdx;
-				auto& occ = worldVehOcc[static_cast<std::size_t>(matchedIdx)];
+				playerMatchedVeh[ei] = matchedIdx;
+				auto& occ = vehOcc[static_cast<std::size_t>(matchedIdx)];
 				if (isLocal) {
 					occ.localOccupied = true;
 				} else {
@@ -1517,31 +1538,76 @@ void DrawInGameMapOverlay()
 		}
 	}
 
-	// 2. Vehicles (cars & helicopters — colored by driver role when occupied)
-	if (cfg.InGameMapVehicles && haveWorld)
+	// Track per-vehicle motion so far/unmatched vehicles that are actively moving
+	// (or moved in the last 10 s) show their owner's role color & name on the full map.
+	struct VehicleMotion {
+		Vector3 anchorPos{};
+		std::uint64_t lastMovedMs = 0;
+		bool initialized = false;
+	};
+	static std::unordered_map<int, VehicleMotion> s_vehMotion;
+	static std::uint64_t s_vehMotionSession = 0;
+	const std::uint64_t vehNowMs = GetTickCount64();
+	if (snapshot->sessionGeneration != s_vehMotionSession) {
+		s_vehMotionSession = snapshot->sessionGeneration;
+		s_vehMotion.clear();
+	}
+	constexpr std::uint64_t kVehRecentMoveMs = 10'000ULL;
+
+	// 2. Vehicles (cars & helicopters — 80-500 Hz live positions, colored by driver/owner role)
+	if (cfg.InGameMapVehicles && vehCount > 0)
 	{
-		for (std::size_t wi = 0; wi < worldCount; ++wi) {
-			const auto& we = snapshot->world->entities[wi];
-			if (!isWorldVehicle(we.kind))
-				continue;
-			const auto& occ = worldVehOcc[wi];
+		for (std::size_t vi = 0; vi < vehCount; ++vi) {
+			const auto& mv = mapVehicles[vi];
+			const auto& occ = vehOcc[vi];
 			if (occ.localOccupied && !occ.occupied)
 				continue; // Don't clutter under the local player's own arrow
 
+			const Vector3& vehWorldPos = (occ.occupied && occ.hasDriverPos) ? occ.driverPos : mv.position;
+
+			auto& mot = s_vehMotion[mv.id];
+			if (!mot.initialized) {
+				mot.anchorPos = vehWorldPos;
+				mot.lastMovedMs = 0;
+				mot.initialized = true;
+			} else {
+				const float mdx = vehWorldPos.x - mot.anchorPos.x;
+				const float mdz = vehWorldPos.z - mot.anchorPos.z;
+				if (mdx * mdx + mdz * mdz > 0.1225f) { // > 0.35 m movement
+					mot.anchorPos = vehWorldPos;
+					mot.lastMovedMs = vehNowMs;
+				}
+			}
+			const bool recentlyMoved = (mot.lastMovedMs != 0) && (vehNowMs - mot.lastMovedMs <= kVehRecentMoveMs);
+			const bool activeRemoteVeh = !occ.occupied && (mv.hasDriver || recentlyMoved);
+
 			ImVec2 pt{};
-			// Use the driver's high-frequency entity position (80-500 Hz) for
-			// occupied vehicles so driven cars/helis never lag behind their arrow.
-			const Vector3& vehWorldPos = (occ.occupied && occ.hasDriverPos) ? occ.driverPos : we.position;
 			if (!worldToMap(vehWorldPos, pt)) continue;
 
-			const ImU32 vehCol = occ.occupied
-				? occ.color
-				: IM_COL32(210, 216, 224, 210);
-			const float vehScale = occ.occupied ? scale : (scale * 0.85f);
-			if (we.kind == RobRunWorld::Kind::Helicopter) {
+			ImU32 vehCol = IM_COL32(210, 216, 224, 240);
+			if (occ.occupied) {
+				vehCol = occ.color;
+			} else if (activeRemoteVeh && !mv.ownerRoleName.empty()) {
+				vehCol = GetInGameMapRoleColor(0, mv.ownerRoleName, false);
+			}
+
+			const float vehScale = (occ.occupied || activeRemoteVeh) ? scale : (scale * 0.85f);
+			if (mv.kind == RobRunWorld::Kind::Helicopter) {
 				DrawHeliIcon(dl, pt, vehScale, vehCol);
 			} else {
 				DrawCarIcon(dl, pt, vehScale, vehCol);
+			}
+
+			// Show owner name on the fullscreen ('M') map for moving/driven vehicles
+			// whose driver isn't already drawn as a live player arrow.
+			if (isFull && cfg.InGameMapPlayerNames && activeRemoteVeh && font && !mv.ownerNicknameUtf8.empty()) {
+				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, mv.ownerNicknameUtf8.c_str());
+				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * vehScale - sz.y - 2.f);
+				dl->AddRectFilled(
+					ImVec2(textPos.x - 5.f, textPos.y - 2.f),
+					ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
+					IM_COL32(26, 28, 32, 225), 3.5f);
+				Esp::DrawOutlinedText(dl, textPos, vehCol, font, fontSize, mv.ownerNicknameUtf8.c_str());
 			}
 		}
 	}
@@ -1614,7 +1680,7 @@ void DrawInGameMapOverlay()
 			// If player is driving a vehicle that wasn't matched in the world list
 			// yet (e.g. world worker hasn't ticked), still draw a role-colored vehicle
 			// icon underneath their arrow.
-			if (cfg.InGameMapVehicles && ent.inVehicle && playerMatchedWorldVeh[ei] < 0) {
+			if (cfg.InGameMapVehicles && ent.inVehicle && playerMatchedVeh[ei] < 0) {
 				DrawCarIcon(dl, pt, scale, col);
 			}
 
