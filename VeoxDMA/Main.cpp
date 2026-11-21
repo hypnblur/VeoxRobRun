@@ -8,6 +8,7 @@
 #include "PlayerEsp.h"
 #include "WorldEsp.h"
 #include "Esp/Radar.h"
+#include "Esp/WebRadar.h"
 #include "DebugLog.h"
 #include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
@@ -217,6 +218,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		DLOG("Overlay init callback");
 		VeoxMenu::Init();
 		Radar::Init();
+		WebRadar::Init();
 		WeaponSprites::Init();
 		Backdrop::Create(g_hInstance);
 		Aim::StartAimWorker();
@@ -257,6 +259,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		Aim::StopAimWorker();
 		ConfigFile::Save();
 		WeaponSprites::Shutdown();
+		WebRadar::Stop();
 		Radar::Shutdown();
 		Backdrop::Destroy();
 		StopAttachLoop();

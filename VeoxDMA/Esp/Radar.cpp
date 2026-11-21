@@ -798,38 +798,81 @@ void Draw()
 	ImGui::PopStyleVar(2);
 }
 
-static const char* MapFileForLocation(const std::string& id)
+const char* MapFileForLocation(const std::string& id)
 {
-	if (id == "shootercity")   return "city_colliders_map.png";
-	if (id == "settlement")    return "settlement.png";
-	if (id == "settlement2")   return "settlement_2.png";
-	if (id == "prison")        return "prison.png";
-	if (id == "hub")           return "hangar.png";
-	if (id == "sectorcenter")  return "city_colliders_map.png";
-	if (id == "clanbattle")    return "city_colliders_map.png";
+	std::string lower = id;
+	for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+	if (lower == "shootercity")   return "city_colliders_map.png";
+	if (lower == "settlement")    return "settlement.png";
+	if (lower == "settlement2")   return "settlement_2.png";
+	if (lower == "prison")        return "prison.png";
+	if (lower == "hub")           return "hangar.png";
+	if (lower == "sectorcenter")  return "city_colliders_map.png";
+	if (lower == "clanbattle")    return "city_colliders_map.png";
+	if (lower == "lootybay")      return "looty_bay.png";
+	if (lower == "lennysmotel")   return "lennys_motel.png";
 	return nullptr;
+}
+
+void CalibrateBoundsForMap(const std::string& mapName)
+{
+	if (mapName == "city_colliders_map.png" || mapName == "map.png") {
+		ConfigInstance.Radar.WorldMinX = -600.f;
+		ConfigInstance.Radar.WorldMaxX = 600.f;
+		ConfigInstance.Radar.WorldMinZ = -400.f;
+		ConfigInstance.Radar.WorldMaxZ = 400.f;
+	} else if (mapName == "settlement.png" || mapName == "settlement_2.png") {
+		ConfigInstance.Radar.WorldMinX = -450.f;
+		ConfigInstance.Radar.WorldMaxX = 450.f;
+		ConfigInstance.Radar.WorldMinZ = -450.f;
+		ConfigInstance.Radar.WorldMaxZ = 450.f;
+	} else if (mapName == "prison.png") {
+		ConfigInstance.Radar.WorldMinX = -350.f;
+		ConfigInstance.Radar.WorldMaxX = 350.f;
+		ConfigInstance.Radar.WorldMinZ = -350.f;
+		ConfigInstance.Radar.WorldMaxZ = 350.f;
+	} else if (mapName == "hangar.png") {
+		ConfigInstance.Radar.WorldMinX = -200.f;
+		ConfigInstance.Radar.WorldMaxX = 200.f;
+		ConfigInstance.Radar.WorldMinZ = -200.f;
+		ConfigInstance.Radar.WorldMaxZ = 200.f;
+	} else if (mapName == "looty_bay.png") {
+		ConfigInstance.Radar.WorldMinX = -500.f;
+		ConfigInstance.Radar.WorldMaxX = 500.f;
+		ConfigInstance.Radar.WorldMinZ = -500.f;
+		ConfigInstance.Radar.WorldMaxZ = 500.f;
+	} else if (mapName == "lennys_motel.png") {
+		ConfigInstance.Radar.WorldMinX = -300.f;
+		ConfigInstance.Radar.WorldMaxX = 300.f;
+		ConfigInstance.Radar.WorldMinZ = -300.f;
+		ConfigInstance.Radar.WorldMaxZ = 300.f;
+	}
+}
+
+void AutoSelectMap(const std::string& locationId)
+{
+	if (locationId.empty()) return;
+	const char* file = MapFileForLocation(locationId);
+	if (!file) return;
+	for (int i = 0; i < (int)g_mapFiles.size(); i++) {
+		if (g_mapFiles[i] == file) {
+			SetMap(i);
+			break;
+		}
+	}
 }
 
 void DrawFullMap()
 {
 	if (!ConfigInstance.Radar.PopoutWindow) return;
 
+	if (ConfigInstance.Radar.AutoMapSelect)
 	{
 		static std::string lastLocationId;
 		const std::string loc = RobRunReader::GetLocationId();
 		if (!loc.empty() && loc != lastLocationId) {
 			lastLocationId = loc;
-			std::string lower = loc;
-			for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-			const char* file = MapFileForLocation(lower);
-			if (file) {
-				for (int i = 0; i < (int)g_mapFiles.size(); i++) {
-					if (g_mapFiles[i] == file) {
-						SetMap(i);
-						break;
-					}
-				}
-			}
+			AutoSelectMap(loc);
 		}
 	}
 
@@ -1051,7 +1094,23 @@ void SetMap(int index)
 	if (LoadMapByName(g_mapFiles[index])) {
 		g_currentMapIndex = index;
 		ConfigInstance.Radar.SelectedMap = g_mapFiles[index];
+		if (ConfigInstance.Radar.AutoMapSelect) {
+			CalibrateBoundsForMap(g_mapFiles[index]);
+		}
 	}
+}
+
+const std::string& GetCurrentMapName()
+{
+	static const std::string s_empty = "";
+	if (g_currentMapIndex >= 0 && g_currentMapIndex < (int)g_mapFiles.size())
+		return g_mapFiles[g_currentMapIndex];
+	return ConfigInstance.Radar.SelectedMap.empty() ? s_empty : ConfigInstance.Radar.SelectedMap;
+}
+
+std::filesystem::path GetMapsDirectory()
+{
+	return g_mapsDir;
 }
 
 } // namespace Radar
