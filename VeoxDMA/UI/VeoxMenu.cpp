@@ -2236,7 +2236,7 @@ void DrawAim()
 		if (ConfigInstance.Aim.ExpIgnoreTeammates)
 			Note("Uses party membership, not role: same-role players outside your party stay targetable.");
 		{
-			const int tc = (int)ConfigInstance.Aim.TrustedPlayers.size();
+			const int tc = ConfigInstance.Aim.TrustedCount();
 			if (tc > 0) {
 				char buf[64];
 				std::snprintf(buf, sizeof(buf), "Trusted Players: %d", tc);
@@ -2695,7 +2695,7 @@ void DrawServer()
 				curX += tw + 4.f;
 			}
 
-			const bool isTrusted = ent.publicId && ConfigInstance.Aim.TrustedPlayers.count(ent.publicId);
+			const bool isTrusted = ConfigInstance.Aim.IsTrusted(ent.publicId);
 			if (isTrusted)
 			{
 				const char* tag = "TRUSTED";
@@ -2744,10 +2744,7 @@ void DrawServer()
 
 				if (btnHov && ImGui::IsMouseClicked(0))
 				{
-					if (isTrusted)
-						ConfigInstance.Aim.TrustedPlayers.erase(ent.publicId);
-					else
-						ConfigInstance.Aim.TrustedPlayers.insert(ent.publicId);
+					ConfigInstance.Aim.SetTrusted(ent.publicId, !isTrusted);
 				}
 			}
 

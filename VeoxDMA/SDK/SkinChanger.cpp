@@ -184,24 +184,39 @@ static std::string ReadId(std::uintptr_t stringObject)
     return RobRunMemory::WideToUtf8(w);
 }
 
+static std::mutex g_idCacheMutex;
+static std::unordered_map<std::uintptr_t, std::string> g_idCache;
+static std::mutex g_fieldOffsetCacheMutex;
+static std::unordered_map<std::string, std::int32_t> g_fieldOffsetCache;
+
+static void ClearLookupCaches()
+{
+    {
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        g_idCache.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_fieldOffsetCacheMutex);
+        g_fieldOffsetCache.clear();
+    }
+}
+
 // Id of a description / IdentifiedProperty / string key. Cached: these are
 // static catalog objects that live for the whole game process.
 static std::string IdOf(std::uintptr_t object)
 {
-    static std::mutex mutex;
-    static std::unordered_map<std::uintptr_t, std::string> cache;
     if (!Valid(object)) return {};
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto it = cache.find(object);
-        if (it != cache.end()) return it->second;
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        auto it = g_idCache.find(object);
+        if (it != g_idCache.end()) return it->second;
     }
     std::string id = Il2Cpp::ClassNameOf(object) == "String"
         ? ReadId(object) : ReadId(Ptr(object + off::IdentifiedId));
     if (!id.empty()) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (cache.size() > 8192) cache.clear();
-        cache.emplace(object, id);
+        std::lock_guard<std::mutex> lock(g_idCacheMutex);
+        if (g_idCache.size() > 8192) g_idCache.clear();
+        g_idCache.emplace(object, id);
     }
     return id;
 }
@@ -210,16 +225,14 @@ static std::string IdOf(std::uintptr_t object)
 // class; fallback when the field is not found.
 static std::uintptr_t FieldOffset(std::uintptr_t object, const char* name, std::uintptr_t fallback)
 {
-    static std::mutex mutex;
-    static std::unordered_map<std::string, std::int32_t> cache;
     if (!Valid(object) || !name) return fallback;
     const std::uintptr_t klass = Il2Cpp::ClassOf(object);
     if (!klass) return fallback;
     const std::string key = std::to_string(klass) + ':' + name;
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto it = cache.find(key);
-        if (it != cache.end())
+        std::lock_guard<std::mutex> lock(g_fieldOffsetCacheMutex);
+        auto it = g_fieldOffsetCache.find(key);
+        if (it != g_fieldOffsetCache.end())
             return it->second > 0 ? static_cast<std::uintptr_t>(it->second) : fallback;
     }
     Il2Cpp::Field field{};
@@ -227,8 +240,8 @@ static std::uintptr_t FieldOffset(std::uintptr_t object, const char* name, std::
         field.offset > 0 && field.offset < 0x1000;
     const std::int32_t offVal = found ? field.offset : -1;
     {
-        std::lock_guard<std::mutex> lock(mutex);
-        cache[key] = offVal;
+        std::lock_guard<std::mutex> lock(g_fieldOffsetCacheMutex);
+        g_fieldOffsetCache[key] = offVal;
     }
     return offVal > 0 ? static_cast<std::uintptr_t>(offVal) : fallback;
 }
@@ -873,9 +886,14 @@ static void Tick()
     Publish(state);
 }
 
+static std::mutex g_workerMutex;
+
 void Start()
 {
-    Stop();
+    std::lock_guard<std::mutex> lock(g_workerMutex);
+    g_stop.store(true);
+    if (g_thread.joinable()) g_thread.join();
+    ClearLookupCaches();
     g_stop.store(false);
     g_thread = std::thread([] {
         while (!g_stop.load()) {
@@ -889,8 +907,10 @@ void Start()
 
 void Stop()
 {
+    std::lock_guard<std::mutex> lock(g_workerMutex);
     g_stop.store(true);
     if (g_thread.joinable()) g_thread.join();
+    ClearLookupCaches();
 }
 
 } // namespace SkinChanger

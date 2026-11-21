@@ -8,10 +8,22 @@
 
 namespace CameraFinder {
 
-static uintptr_t unityPlayer = 0;
+static std::atomic<uintptr_t> unityPlayer{ 0 };
+
+namespace {
+struct CameraNodeCache {
+    std::uintptr_t node = 0;
+    std::uintptr_t viewOff = 0;
+    std::uintptr_t projOff = 0;
+};
+std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
+std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
+} // namespace
 
 void Init(uintptr_t unityPlayerBase) {
-    unityPlayer = unityPlayerBase;
+    unityPlayer.store(unityPlayerBase, std::memory_order_release);
+    g_cameraCache.store(CameraNodeCache{}, std::memory_order_release);
+    g_lastResolveTick.store(0, std::memory_order_release);
 }
 
 uintptr_t GetTaggedNodes(uintptr_t s_Instance, int n5) {
@@ -100,10 +112,11 @@ constexpr uintptr_t kTagBase = 0x21150C0;
 // every candidate.
 void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     out.clear();
-    if (!unityPlayer)
+    const uintptr_t up = unityPlayer.load(std::memory_order_acquire);
+    if (!up)
         return;
 
-    const uintptr_t gom = TargetProcess.Read<uintptr_t>(unityPlayer + kGomSlot);
+    const uintptr_t gom = TargetProcess.Read<uintptr_t>(up + kGomSlot);
     if (!gom)
         return;
 
@@ -111,8 +124,8 @@ void CollectTaggedObjects(std::vector<uintptr_t>& out, std::size_t max) {
     if (!taggedNodes)
         return;
 
-    const uint32_t range = TargetProcess.Read<uint32_t>(unityPlayer + kTagRange);
-    const uint32_t base = TargetProcess.Read<uint32_t>(unityPlayer + kTagBase);
+    const uint32_t range = TargetProcess.Read<uint32_t>(up + kTagRange);
+    const uint32_t base = TargetProcess.Read<uint32_t>(up + kTagBase);
 
     uintptr_t node = TargetProcess.Read<uintptr_t>(taggedNodes + 0x08);
     for (int guard = 0; node && node != taggedNodes && guard < 65536; ++guard) {
@@ -215,21 +228,6 @@ struct MatrixLayout {
 constexpr std::size_t kScanBytes = 0x1000;
 constexpr float kMaxPositionError = 5.f;   // metres
 constexpr float kMinForwardDot = 0.5f;     // 60 degrees
-
-// Cached render camera and the structurally discovered matrix offsets. Offsets
-// are stable for a Unity build, so they survive scene changes; the node does
-// not, and is re-resolved when it stops matching the managed camera.
-//
-// Node and offsets are one value: as three separate atomics a reader could
-// pair a freshly resolved node with the previous node's offsets and read
-// matrices from the wrong place.
-struct CameraNodeCache {
-    std::uintptr_t node = 0;
-    std::uintptr_t viewOff = 0;
-    std::uintptr_t projOff = 0;
-};
-std::atomic<CameraNodeCache> g_cameraCache{ CameraNodeCache{} };
-std::atomic<std::uint64_t> g_lastResolveTick{ 0 };
 
 bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
     std::uintptr_t projOff, CameraData& data) {

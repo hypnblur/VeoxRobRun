@@ -140,27 +140,50 @@ inline bool Load(const std::string& path, Scene& scene) {
     uint32_t numNodes = 0, numTris = 0;
     f.read(reinterpret_cast<char*>(&numNodes), 4);
     f.read(reinterpret_cast<char*>(&numTris), 4);
+    if (!f.good() || numNodes == 0 || numNodes > 16000000u || numTris > 32000000u)
+        return false;
 
     scene.nodes.resize(numNodes);
     f.read(reinterpret_cast<char*>(scene.nodes.data()),
-           numNodes * sizeof(BVHNode));
+           static_cast<std::streamsize>(static_cast<std::size_t>(numNodes) * sizeof(BVHNode)));
 
     scene.tris.resize(numTris);
     f.read(reinterpret_cast<char*>(scene.tris.data()),
-           numTris * sizeof(Triangle));
+           static_cast<std::streamsize>(static_cast<std::size_t>(numTris) * sizeof(Triangle)));
 
     if (isBvh2) {
         scene.surfaceTypes.resize(numTris);
         f.read(reinterpret_cast<char*>(scene.surfaceTypes.data()),
-               numTris * sizeof(uint16_t));
+               static_cast<std::streamsize>(static_cast<std::size_t>(numTris) * sizeof(uint16_t)));
     } else {
         scene.surfaceTypes.clear();
     }
 
-    scene.valid = f.good() && numNodes > 0;
-    if (scene.valid)
-        scene.loadedPath = resolved;
-    return scene.valid;
+    if (!f.good()) {
+        scene.valid = false;
+        return false;
+    }
+
+    // Validate all BVH node/triangle indices once at load time so traversal
+    // cannot read out of bounds on a corrupt file.
+    for (const BVHNode& node : scene.nodes) {
+        if (node.isLeaf()) {
+            const uint64_t end = static_cast<uint64_t>(node.triStart()) + node.triCount();
+            if (end > numTris) {
+                scene.valid = false;
+                return false;
+            }
+        } else {
+            if (node.left() >= numNodes || node.right() >= numNodes) {
+                scene.valid = false;
+                return false;
+            }
+        }
+    }
+
+    scene.valid = true;
+    scene.loadedPath = resolved;
+    return true;
 }
 
 inline bool RayTriangle(
@@ -191,7 +214,7 @@ inline bool RayTriangle(
 
 inline bool RayAABB(
     const Float3& orig, const Float3& invDir,
-    const Float3& mn, const Float3& mx, float tMax)
+    const Float3& mn, const Float3& mx, float tMax, float tMin = 0.f)
 {
     float t1 = (mn.x - orig.x) * invDir.x;
     float t2 = (mx.x - orig.x) * invDir.x;
@@ -208,7 +231,7 @@ inline bool RayAABB(
     tmin = std::max(tmin, std::min(t1, t2));
     tmax = std::min(tmax, std::max(t1, t2));
 
-    return tmax >= std::max(tmin, 0.f) && tmin < tMax;
+    return tmax >= std::max(tmin, tMin) && tmin < tMax;
 }
 
 // Ray-Sphere intersection for spherical smoke volume decay checks
@@ -257,7 +280,7 @@ inline bool RayVehicleOBB(
     if (carCabinSolid || v.isHelicopter) {
         const Float3 mn = { -v.halfExtents.x, -v.halfExtents.y, -v.halfExtents.z };
         const Float3 mx = {  v.halfExtents.x,  v.halfExtents.y,  v.halfExtents.z };
-        return RayAABB(localOrig, invDir, mn, mx, tMax);
+        return RayAABB(localOrig, invDir, mn, mx, tMax, tMin);
     }
 
     // Car Cabin Not Solid: split vehicle into solid chassis/engine block and roof plate,
@@ -269,13 +292,13 @@ inline bool RayVehicleOBB(
     // 1. Lower chassis / engine block (solid base)
     const Float3 baseMn = { -hx, -hy, -hz };
     const Float3 baseMx = {  hx, -hy * 0.15f, hz };
-    if (RayAABB(localOrig, invDir, baseMn, baseMx, tMax))
+    if (RayAABB(localOrig, invDir, baseMn, baseMx, tMax, tMin))
         return true;
 
     // 2. Roof plate (top surface)
     const Float3 roofMn = { -hx * 0.85f, hy * 0.75f, -hz * 0.55f };
     const Float3 roofMx = {  hx * 0.85f, hy,          hz * 0.45f };
-    if (RayAABB(localOrig, invDir, roofMn, roofMx, tMax))
+    if (RayAABB(localOrig, invDir, roofMn, roofMx, tMax, tMin))
         return true;
 
     return false;

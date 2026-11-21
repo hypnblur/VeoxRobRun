@@ -170,7 +170,7 @@ bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
     if (cfg.ExpIgnoreTeammates && (ent.isPartyMember || ent.isClanMate)) return true;
-    if (ent.publicId && cfg.TrustedPlayers.count(ent.publicId)) return true;
+    if (cfg.IsTrusted(ent.publicId)) return true;
     return false;
 }
 
@@ -554,6 +554,7 @@ bool IsKeyHeld(int keyIndex)
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
 static std::mutex g_debugMutex;
+static std::mutex g_aimWorkerMutex;
 static std::atomic<bool> g_aimWorkerStop{ false };
 static std::thread g_aimWorkerThread;
 
@@ -737,7 +738,11 @@ static void TickCustomCamera()
 
 void StartAimWorker()
 {
-    StopAimWorker();
+    std::lock_guard<std::mutex> lock(g_aimWorkerMutex);
+    StopRecoilWorker();
+    g_aimWorkerStop.store(true, std::memory_order_relaxed);
+    if (g_aimWorkerThread.joinable())
+        g_aimWorkerThread.join();
     StartRecoilWorker();
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
@@ -772,6 +777,7 @@ void StartAimWorker()
 
 void StopAimWorker()
 {
+    std::lock_guard<std::mutex> lock(g_aimWorkerMutex);
     StopRecoilWorker();
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
@@ -779,6 +785,7 @@ void StopAimWorker()
     FovChanger::Restore();
 }
 
+#ifdef _DEBUG
 // The reference memory aim also writes the local input model, the player
 // rotation-input model and the local look-direction model. Those offsets are
 // not in the current SDK, so dump the runtime field tables once and let the
@@ -899,6 +906,7 @@ static void DumpAimFieldsOnce()
     out << "PlayerRotationInput (BM+0x40) = 0x" << std::hex
         << (snapshot ? snapshot->playerRotationInput : 0) << std::dec << "\n";
 }
+#endif
 
 void Tick()
 {
@@ -988,10 +996,11 @@ void Tick()
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
 
-    // One-off, cheap enough to do on the first attached tick: write the runtime
-    // field tables that the reference memory aim writes through, so the missing
-    // input/rotation offsets can be taken from real metadata.
+    // One-off debug metadata dump (Debug builds only so Release never stalls
+    // the first active tick or writes diagnostic files to C:\).
+#ifdef _DEBUG
     DumpAimFieldsOnce();
+#endif
 
     const float dispX = g_displayWidth.load(std::memory_order_relaxed);
     const float dispY = g_displayHeight.load(std::memory_order_relaxed);
@@ -1043,7 +1052,9 @@ void Tick()
     // real local position.
     const bool haveLocalPosition = !snapshot->localPosition.IsZero();
     const std::uint64_t nowMs = GetTickCount64();
-    const float responseMs = ResponseForSmoothness(cfg.Smoothness);
+    const float responseMs = cfg.ResponseMs > 0
+        ? std::clamp(static_cast<float>(cfg.ResponseMs), 1.f, 250.f)
+        : ResponseForSmoothness(cfg.Smoothness);
 
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
@@ -1351,7 +1362,7 @@ void Tick()
         return;
     }
 
-    settings.responseMs = ResponseForSmoothness(cfg.Smoothness);
+    settings.responseMs = responseMs;
     settings.countsPerPixelX = settings.countsPerPixelY =
         std::clamp(cfg.HardwareGain, 0.25f, 5.f);
     settings.maxCountsPerSecond = 24000.f;
@@ -1376,6 +1387,7 @@ static std::uintptr_t g_cachedPlayerClient = 0;
 static std::uint64_t g_lastRecoilGen = 0;
 
 // ---- No Recoil: per-shot kick budget (dedicated worker) -------------------
+static std::mutex g_recoilWorkerMutex;
 static std::atomic<bool> g_recoilStop{true};
 static std::thread g_recoilThread;
 
@@ -1560,7 +1572,10 @@ static void TickRecoil()
 
 void StartRecoilWorker()
 {
-    StopRecoilWorker();
+    std::lock_guard<std::mutex> lock(g_recoilWorkerMutex);
+    g_recoilStop.store(true, std::memory_order_relaxed);
+    if (g_recoilThread.joinable())
+        g_recoilThread.join();
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
@@ -1572,6 +1587,7 @@ void StartRecoilWorker()
 
 void StopRecoilWorker()
 {
+    std::lock_guard<std::mutex> lock(g_recoilWorkerMutex);
     g_recoilStop.store(true, std::memory_order_relaxed);
     if (g_recoilThread.joinable())
         g_recoilThread.join();

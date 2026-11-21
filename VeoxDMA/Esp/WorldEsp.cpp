@@ -209,7 +209,7 @@ void DrawWorldEntities()
 
 	// What the snapshot actually contains, once every few seconds. This is how we
 	// tell "cargo is filtered out" from "cargo never reached the entity list".
-	{
+	if (kProbes) {
 		static ULONGLONG s_lastProbe = 0;
 		const ULONGLONG now = GetTickCount64();
 		if (now - s_lastProbe > 5000) {
@@ -233,7 +233,7 @@ void DrawWorldEntities()
 				if (e.kind == RobRunWorld::Kind::StaticLoot && lootLabels.size() < 90)
 					lootLabels += "[" + e.label + "]";
 			}
-			if (kProbes) VeoxDiag("probe: entities=%zu cargo=%d containers=%d static=%d random=%d vehicles=%d other=%d "
+			VeoxDiag("probe: entities=%zu cargo=%d containers=%d static=%d random=%d vehicles=%d other=%d "
 				"cargoLabels=%s staticLabels=%s",
 				snapshot->world->entities.size(), cargo, containers, staticLoot, randomLoot, vehicles, loots,
 				cargoLabels.c_str(), lootLabels.c_str());

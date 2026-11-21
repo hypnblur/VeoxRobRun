@@ -4,9 +4,11 @@
 #include "Overlay.h"
 #include "ImGUI/imgui.h"
 #include <chrono>
+#include <mutex>
 
 namespace {
 
+std::mutex g_notifyMutex;
 std::string g_notifyText;
 unsigned int g_notifyColor = 0xFFFFFFFFu;
 std::chrono::steady_clock::time_point g_notifyExpiry{};
@@ -30,6 +32,7 @@ struct StatusEntry {
 
 void OverlayNotify::Show(const char* msg, unsigned int col, float seconds)
 {
+	std::lock_guard<std::mutex> lock(g_notifyMutex);
 	g_notifyText = msg ? msg : "";
 	g_notifyColor = col;
 	g_notifyExpiry = std::chrono::steady_clock::now()
@@ -45,8 +48,8 @@ void OverlayNotify::Draw()
 	{
 		const PlayerConfig& cfg = ConfigInstance.Player;
 		StatusEntry entries[] = {
-			{ "Player ESP", true },
-			{ "Skeleton", true },
+			{ "Player ESP", cfg.BoxEsp || cfg.Skeleton || cfg.Chams || cfg.Name },
+			{ "Skeleton", cfg.Skeleton },
 			{ "Health", cfg.Health },
 			{ "Distance", cfg.Distance },
 		};
@@ -101,16 +104,23 @@ void OverlayNotify::Draw()
 	}
 
 	// ---- timed corner toast ------------------------------------------------
-	if (g_notifyText.empty()) return;
-	if (std::chrono::steady_clock::now() > g_notifyExpiry)
+	std::string text;
+	unsigned int color = 0xFFFFFFFFu;
 	{
-		g_notifyText.clear();
-		return;
+		std::lock_guard<std::mutex> lock(g_notifyMutex);
+		if (g_notifyText.empty()) return;
+		if (std::chrono::steady_clock::now() > g_notifyExpiry)
+		{
+			g_notifyText.clear();
+			return;
+		}
+		text = g_notifyText;
+		color = g_notifyColor;
 	}
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	const ImVec2 sz = ImGui::GetIO().DisplaySize;
-	const ImVec2 ts = ImGui::CalcTextSize(g_notifyText.c_str());
+	const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
 	const float x = sz.x - ts.x - 20.f;
-	dl->AddText(ImVec2(x + 1.f, 21.f), IM_COL32(0, 0, 0, 200), g_notifyText.c_str());
-	dl->AddText(ImVec2(x, 20.f), g_notifyColor, g_notifyText.c_str());
+	dl->AddText(ImVec2(x + 1.f, 21.f), IM_COL32(0, 0, 0, 200), text.c_str());
+	dl->AddText(ImVec2(x, 20.f), color, text.c_str());
 }

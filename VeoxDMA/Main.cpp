@@ -226,6 +226,7 @@ static void TickOverlay()
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
+	Radar::ProcessPendingMap();
 	if (g_attached.load(std::memory_order_acquire)) {
 		RobRunReader::RefreshCamera();
 	}
@@ -378,6 +379,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		}
 	};
 	callbacks.shutdown = [] {
+		g_attached.store(false, std::memory_order_release);
+		// Join the attach thread before stopping workers so a late attach
+		// completion cannot restart the aim worker during teardown.
+		StopAttachLoop();
 		Aim::StopAimWorker();
 		ConfigFile::Save();
 		IconSprites::Shutdown();
@@ -385,7 +390,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		WebRadar::Stop();
 		Radar::Shutdown();
 		Backdrop::Destroy();
-		StopAttachLoop();
 		{
 			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
 			SkinChanger::Stop();
