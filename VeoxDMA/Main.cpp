@@ -11,6 +11,7 @@
 #include "DebugLog.h"
 #include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
+#include "SDK/SkinChanger.h"
 #include "Input/InputManager.h"
 #include "Input/DeviceSession.h"
 #include "UI/VeoxMenu.h"
@@ -67,6 +68,7 @@ static bool AttachGame()
 		std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
 		CameraFinder::Init(unityBase);
 		RobRunReader::Init(gaBase, unityBase);
+		SkinChanger::Init(gaBase);
 	}
 	printf("GameAssembly @ 0x%llX | UnityPlayer @ 0x%llX\n", gaBase, unityBase);
 	// Resolve the game PC's gafAsyncKeyState once the DMA process context is
@@ -124,6 +126,7 @@ static void TickOverlay()
 		Aim::StopAimWorker();
 		{
 			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+			SkinChanger::Shutdown();
 			RobRunReader::Shutdown();
 			TargetProcess.ResetProcess();
 		}
@@ -133,8 +136,10 @@ static void TickOverlay()
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
-	if (g_attached.load(std::memory_order_acquire))
+	if (g_attached.load(std::memory_order_acquire)) {
 		RobRunReader::RefreshCamera();
+		SkinChanger::Tick();
+	}
 
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
@@ -258,6 +263,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		StopAttachLoop();
 		{
 			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
+			SkinChanger::Shutdown();
 			RobRunReader::Shutdown();
 		}
 	};

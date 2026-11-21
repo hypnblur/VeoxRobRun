@@ -159,7 +159,7 @@ bool g_placementApplied = false;
 char g_search[96] = "";
 bool g_readCatalog = false;
 
-const char* kPageNames[] = { "Visuals", "Radar", "Loot Filter", "Aim", "Server", "Misc", "Settings" };
+const char* kPageNames[] = { "Visuals", "Radar", "Loot Filter", "Aim", "Server", "Misc", "Skins", "Settings" };
 constexpr int kPageCount = IM_ARRAYSIZE(kPageNames);
 
 ID3D11ShaderResourceView* g_icon[kPageCount] = {};
@@ -2268,6 +2268,123 @@ void DrawMisc()
 	}
 }
 
+void DrawSkins()
+{
+	auto& skin = ConfigInstance.Skin;
+	const bool isFemale = (skin.Gender == 2);
+
+	if (!g_singleColumn)
+	{
+		const float r1 = ImMax(CardNaturalHeight("SKIN CHANGER"), CardNaturalHeight("OUTFIT"));
+		const float r2 = ImMax(CardNaturalHeight("COSMETICS"), CardNaturalHeight("WEAPON SKINS"));
+		ForceCardHeight("SKIN CHANGER", r1);
+		ForceCardHeight("OUTFIT", r1);
+		ForceCardHeight("COSMETICS", r2);
+		ForceCardHeight("WEAPON SKINS", r2);
+	}
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("SKIN CHANGER", kCardW);
+		ToggleRow("Enable Skin Changer", &skin.Enabled, true);
+
+		static const char* genderNames[] = { "Male", "Female" };
+		int genderIdx = ImClamp(skin.Gender - 1, 0, 1);
+		if (ComboRow("Character Gender", &genderIdx, genderNames, 2))
+			skin.Gender = genderIdx + 1;
+
+		const char* statusLabel = "Idle";
+		if (skin.Status == 1) statusLabel = "Applying...";
+		else if (skin.Status == 2) statusLabel = "Applied";
+		else if (skin.Status == -1) statusLabel = "Error";
+		Note("Status: %s", statusLabel);
+
+		if (ButtonRow("", "Apply Skins", 130.f, true))
+		{
+			skin.ApplyNow = true;
+			skin.Status = 1;
+		}
+
+		Note("Applies the selected outfit to your character while in a match. "
+			"The watchdog re-applies every 800 ms if the game reverts your skin.");
+		EndCard();
+
+		BeginCard("COSMETICS", kCardW);
+		{
+			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Mask];
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow("Mask", &skin.MaskSkin, names, cat.count + 1, 150.f);
+		}
+		{
+			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Bag];
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow("Bag", &skin.BagSkin, names, cat.count + 1, 150.f);
+		}
+		{
+			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Keychain];
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow("Keychain", &skin.KeychainSkin, names, cat.count + 1, 150.f);
+		}
+		Note("Cosmetic apply paths for masks, bags and keychains are not yet wired "
+			"into the battle path.");
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn)
+		ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("OUTFIT", kCardW);
+		if (isFemale)
+		{
+			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::OutfitFemale];
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow("Female Outfit", &skin.OutfitFemale, names, cat.count + 1, 150.f, true);
+		}
+		else
+		{
+			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::OutfitMale];
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow("Male Outfit", &skin.OutfitMale, names, cat.count + 1, 150.f, true);
+		}
+		Note("Select an outfit and press Apply Skins to change your character's body in battle.");
+		EndCard();
+
+		BeginCard("WEAPON SKINS", kCardW);
+		for (int w = 0; w < SkinChanger::kWeaponCount; ++w)
+		{
+			const auto& cat = SkinChanger::kWeaponCatalogs[w];
+			if (cat.count <= 0) continue;
+			const char* names[64];
+			names[0] = "None";
+			for (int i = 0; i < cat.count && i < 63; ++i)
+				names[i + 1] = cat.skins[i].name;
+			ComboRow(SkinChanger::WeaponNames[w], &skin.WeaponSkin[w], names, cat.count + 1, 150.f);
+		}
+		Note("Weapon skin application in battle is not yet implemented. "
+			"Selections are saved for a future update.");
+		EndCard();
+	}
+	ImGui::EndGroup();
+}
+
 void DrawSettings(bool attached, const std::string& statusText)
 {
 	// Three rows of two cards: overlay/display settings on the left, backdrop,
@@ -2797,7 +2914,8 @@ void Init()
 	g_icon[3] = LoadTextureFromMemory(ragebot, sizeof(ragebot));
 	g_icon[4] = LoadTextureFromMemory(world, sizeof(world));
 	g_icon[5] = LoadTextureFromMemory(misc, sizeof(misc));
-	g_icon[6] = LoadTextureFromMemory(settings, sizeof(settings));
+	g_icon[6] = nullptr;
+	g_icon[7] = LoadTextureFromMemory(settings, sizeof(settings));
 }
 
 void Draw(bool attached, const std::string& statusText)
@@ -2986,7 +3104,8 @@ void Draw(bool attached, const std::string& statusText)
 		case 3: DrawAim(); break;
 		case 4: DrawServer(); break;
 		case 5: DrawMisc(); break;
-		case 6: DrawSettings(attached, statusText); break;
+		case 6: DrawSkins(); break;
+		case 7: DrawSettings(attached, statusText); break;
 		default: break;
 		}
 
