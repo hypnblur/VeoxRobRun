@@ -80,6 +80,9 @@
     <ClCompile Include="Esp\WebRadar.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Esp\IconSprites.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Misc\Colour.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -149,6 +152,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Esp\WorldEsp.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Esp\IconSprites.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Esp\EspDraw.h">

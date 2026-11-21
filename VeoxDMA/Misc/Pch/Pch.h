@@ -72,6 +72,7 @@ using json = nlohmann::json;
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "Dwrite")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "ole32.lib")
 #include "Vector.h"
 #include "Input.h"
 #include "Colour.h"
