@@ -424,8 +424,11 @@ inline constexpr std::uint32_t BattlePlayerCapacity = 320;
 // Active view updater (live verified)
 // ------------------------------------------------------------------
 namespace BattleEntitiesUpdater {
-inline constexpr std::uintptr_t _battleModel          = 0x70;
-inline constexpr std::uintptr_t _characterEntityViews = 0x110; // Dictionary<int, view>
+inline constexpr std::uintptr_t _battleModel                = 0x70;
+inline constexpr std::uintptr_t _entitiesModelsUpdaters     = 0x30;  // Dictionary<int, IUpdater>
+inline constexpr std::uintptr_t _entitiesViewsUpdaters      = 0x38;  // Dictionary<int, IUpdater>
+inline constexpr std::uintptr_t _mixingCameraBlendUpdater   = 0x100; // MixingCameraBlendUpdater
+inline constexpr std::uintptr_t _characterEntityViews       = 0x110; // Dictionary<int, view>
 }
 
 // Updater list chain:
@@ -527,10 +530,22 @@ inline constexpr float DefaultFovDeg        = 60.0f;
 
 namespace Cinemachine {
 // CinemachineCore class -> static_fields(+0xB8) -> core instance at +0x08
-inline constexpr std::uintptr_t CoreInstance = 0x08;
-inline constexpr std::uintptr_t BrainList    = 0x10; // List<CinemachineBrain>
-inline constexpr std::uintptr_t BrainFov      = 0xB0; // vertical FOV degrees
-inline constexpr std::uintptr_t BrainStateLensFov = 0xB0; // new offset set alias
+inline constexpr std::uintptr_t CoreInstance          = 0x08;
+inline constexpr std::uintptr_t BrainList             = 0x10; // List<CinemachineBrain>
+inline constexpr std::uintptr_t BrainActiveCameraPrev = 0xA0; // Brain.mActiveCameraPreviousFrame
+inline constexpr std::uintptr_t BrainFov              = 0xB0; // vertical FOV degrees
+inline constexpr std::uintptr_t BrainStateLensFov     = 0xB0; // new offset set alias
+}
+
+namespace Fov {
+inline constexpr std::uintptr_t BrainActiveCamera = 0xA0;  // Brain.mActiveCameraPreviousFrame
+inline constexpr std::uintptr_t VcamLensFov       = 0xB8;  // VirtualCamera.m_Lens.FieldOfView
+inline constexpr std::uintptr_t MixCameras        = 0xA8;  // MixingCamera._cameras List
+inline constexpr std::uintptr_t MixupMixer        = 0x10;  // MixingCameraBlendUpdater._mixingCamera
+inline constexpr std::uintptr_t BeuMixup          = 0x100; // BattleEntitiesUpdater._mixingCameraBlendUpdater
+inline constexpr std::uintptr_t BeuUpdaters       = 0x30;  // BattleEntitiesUpdater._entitiesModelsUpdaters dict
+inline constexpr std::uintptr_t BeuViewUpdaters   = 0x38;  // BattleEntitiesUpdater._entitiesViewsUpdaters dict
+inline constexpr std::uintptr_t AimBrain          = 0x48;  // BattleAimTargetUpdater._cinemachineBrain
 }
 
 // ------------------------------------------------------------------

@@ -13,6 +13,7 @@
 #include "Esp/WeaponSprites.h"
 #include "Aim/AimController.h"
 #include "SDK/SkinChanger.h"
+#include "SDK/FovChanger.h"
 #include "Input/InputManager.h"
 #include "Input/DeviceSession.h"
 #include "UI/VeoxMenu.h"
@@ -128,6 +129,7 @@ static void TickOverlay()
 		{
 			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
 			SkinChanger::Stop();
+			FovChanger::Reset();
 			RobRunReader::Shutdown();
 			TargetProcess.ResetProcess();
 		}
@@ -266,6 +268,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		{
 			std::lock_guard<std::mutex> lifecycle(g_lifecycleMutex);
 			SkinChanger::Stop();
+			FovChanger::Reset();
 			RobRunReader::Shutdown();
 		}
 	};
@@ -280,6 +283,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	Aim::StopAimWorker();
 	StopAttachLoop();
 	SkinChanger::Stop();
+	FovChanger::Reset();
 	RobRunReader::Shutdown();
 	return result;
 }

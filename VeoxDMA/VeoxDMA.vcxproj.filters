@@ -68,6 +68,9 @@
     <ClCompile Include="SDK\SkinChanger.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SDK\FovChanger.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Esp\WorldEsp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -212,6 +215,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="SDK\SkinChanger.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SDK\FovChanger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Security\XorStr.h">
