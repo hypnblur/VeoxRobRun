@@ -40,4 +40,8 @@ inline void Log(const char* fmt, ...) {
 
 } // namespace DebugLog
 
+#ifdef _DEBUG
 #define DLOG(...) DebugLog::Log(__VA_ARGS__)
+#else
+#define DLOG(...) ((void)0)
+#endif

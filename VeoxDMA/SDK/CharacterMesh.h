@@ -217,7 +217,7 @@ inline void Skin(const Mesh& mesh,
         float wx = 0, wy = 0, wz = 0;
         for (int j = 0; j < 4; ++j) {
             const float w = vt.weights[j];
-            if (w < 1e-6f || !mapped[vt.bones[j]]) continue;
+            if (w <= 1e-6f || !mapped[vt.bones[j]]) continue;
             const auto& M = skin[vt.bones[j]].matrix;
             wx += w * (M[0][0] * vt.x + M[1][0] * vt.y + M[2][0] * vt.z + M[3][0]);
             wy += w * (M[0][1] * vt.x + M[1][1] * vt.y + M[2][1] * vt.z + M[3][1]);

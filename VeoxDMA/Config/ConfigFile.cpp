@@ -215,6 +215,7 @@ bool Load(const std::string& name)
         }
         if (!in) {
             LOG("[Config] %ls not found, initializing default\n", fullPath.c_str());
+            ConfigInstance.LootFilter.InitDefaults();
             Save("default");
             return true;
         }
@@ -231,6 +232,11 @@ bool Load(const std::string& name)
         LOG("[Config] parse failed for %ls: %s\n", fullPath.c_str(), e.what());
         return false;
     }
+
+    if (ConfigInstance.LootFilter.Items.empty())
+        ConfigInstance.LootFilter.InitDefaults();
+    else
+        ConfigInstance.LootFilter.MigrateIconFlags();
 
     LOG("[Config] loaded %ls\n", fullPath.c_str());
     return true;

@@ -13,11 +13,11 @@
 
 namespace Keyboard
 {
-	uint64_t gafAsyncKeyStateExport = 0;
+	std::atomic<uint64_t> gafAsyncKeyStateExport{ 0 };
 	uint8_t state_bitmap[64]{ };
 	uint64_t win32kbase = 0;
-	int win_logon_pid = 0;
-	uint64_t cursorSessionBase = 0; // Win11 user session state, 0 on Win10
+	std::atomic<int> win_logon_pid{ 0 };
+	std::atomic<uint64_t> cursorSessionBase{ 0 }; // Win11 user session state, 0 on Win10
 }
 
 // gafAsyncKeyState discovery, ported from Pure-H1Z1 (InputManager.cpp). Win11
@@ -99,13 +99,14 @@ namespace
 	}
 
 	// A resolved address only counts once the 64-byte bitmap reads back whole.
-	bool PrimeBitmap()
+	bool PrimeBitmap(uint64_t candidateVa)
 	{
+		const int pid = Keyboard::win_logon_pid.load(std::memory_order_acquire);
 		for (int attempt = 0; attempt < 3; ++attempt)
 		{
 			DWORD cb = 0;
-			if (VMMDLL_MemReadEx(TargetProcess.vHandle, Keyboard::win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
-				Keyboard::gafAsyncKeyStateExport, Keyboard::state_bitmap, 64, &cb, VMMDLL_FLAG_NOCACHE) && cb == 64)
+			if (VMMDLL_MemReadEx(TargetProcess.vHandle, pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
+				candidateVa, Keyboard::state_bitmap, 64, &cb, VMMDLL_FLAG_NOCACHE) && cb == 64)
 				return true;
 			Sleep(5);
 		}
@@ -129,26 +130,31 @@ namespace
 
 	bool InitFromEat()
 	{
+		uint64_t candidate = 0;
+		const int pid = Keyboard::win_logon_pid.load(std::memory_order_acquire);
 		PVMMDLL_MAP_EAT eat_map = NULL;
-		if (VMMDLL_Map_GetEATU(TargetProcess.vHandle, Keyboard::win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, (LPSTR)"win32kbase.sys", &eat_map)
+		if (VMMDLL_Map_GetEATU(TargetProcess.vHandle, pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, (LPSTR)"win32kbase.sys", &eat_map)
 			&& eat_map->dwVersion == VMMDLL_MAP_EAT_VERSION)
 		{
 			for (DWORD i = 0; i < eat_map->cMap; i++)
 			{
 				if (strcmp(eat_map->pMap[i].uszFunction, "gafAsyncKeyState") == 0)
 				{
-					Keyboard::gafAsyncKeyStateExport = eat_map->pMap[i].vaFunction;
+					candidate = eat_map->pMap[i].vaFunction;
 					break;
 				}
 			}
 		}
 		if (eat_map)
 			VMMDLL_MemFree(eat_map);
-		if (IsKernelVa(Keyboard::gafAsyncKeyStateExport) && PrimeBitmap())
+		if (IsKernelVa(candidate) && PrimeBitmap(candidate))
+		{
+			Keyboard::gafAsyncKeyStateExport.store(candidate, std::memory_order_release);
 			return true;
+		}
 		INPUT_LOG("[Input] win32kbase.sys EAT: gafAsyncKeyState %s\n",
-			IsKernelVa(Keyboard::gafAsyncKeyStateExport) ? "found but unreadable" : "not found");
-		Keyboard::gafAsyncKeyStateExport = 0;
+			IsKernelVa(candidate) ? "found but unreadable" : "not found");
+		Keyboard::gafAsyncKeyStateExport.store(0, std::memory_order_release);
 		return false;
 	}
 
@@ -160,7 +166,7 @@ namespace
 			info.magic = VMMDLL_PROCESS_INFORMATION_MAGIC;
 			info.wVersion = VMMDLL_PROCESS_INFORMATION_VERSION;
 			SIZE_T cb = sizeof(info);
-			if (VMMDLL_ProcessGetInformation(TargetProcess.vHandle, Keyboard::win_logon_pid, &info, &cb))
+			if (VMMDLL_ProcessGetInformation(TargetProcess.vHandle, Keyboard::win_logon_pid.load(std::memory_order_acquire), &info, &cb))
 				session = info.win.dwSessionId;
 		}
 
@@ -351,16 +357,17 @@ namespace
 
 				for (uint64_t state : states)
 				{
-					Keyboard::gafAsyncKeyStateExport = state + gafOffset;
-					if (PrimeBitmap())
+					const uint64_t candidate = state + gafOffset;
+					if (PrimeBitmap(candidate))
 					{
-						Keyboard::cursorSessionBase = state;
+						Keyboard::cursorSessionBase.store(state, std::memory_order_release);
+						Keyboard::gafAsyncKeyStateExport.store(candidate, std::memory_order_release);
 						INPUT_LOG("[Input] gafAsyncKeyState 0x%llX (session state 0x%llX + 0x%X, %s)\n",
-							Keyboard::gafAsyncKeyStateExport, state, gafOffset, mod);
+							candidate, state, gafOffset, mod);
 						return true;
 					}
 				}
-				Keyboard::gafAsyncKeyStateExport = 0;
+				Keyboard::gafAsyncKeyStateExport.store(0, std::memory_order_release);
 				failure = "bitmap unreadable at every session candidate";
 			}
 		}
@@ -371,8 +378,8 @@ namespace
 
 bool Keyboard::InitKeyboard()
 {
-	gafAsyncKeyStateExport = 0;
-	cursorSessionBase = 0;
+	gafAsyncKeyStateExport.store(0, std::memory_order_release);
+	cursorSessionBase.store(0, std::memory_order_release);
 
 	ULONG64 build = 0;
 	if (!VMMDLL_ConfigGet(TargetProcess.vHandle, VMMDLL_OPT_WIN_VERSION_BUILD, &build))
@@ -395,7 +402,7 @@ bool Keyboard::InitKeyboard()
 		INPUT_LOG("[Input] game process session %lu\n", targetSession);
 	}
 
-	win_logon_pid = 0;
+	int chosenPid = 0;
 	for (int pid : TargetProcess.GetPidListFromName("winlogon.exe"))
 	{
 		VMMDLL_PROCESS_INFORMATION info{};
@@ -407,21 +414,22 @@ bool Keyboard::InitKeyboard()
 			INPUT_LOG("[Input] winlogon pid %d session %lu\n", pid, info.win.dwSessionId);
 			if (info.win.dwSessionId == targetSession && targetSession > 0)
 			{
-				win_logon_pid = pid;
+				chosenPid = pid;
 				break;
 			}
-			if (info.win.dwSessionId > 0 && !win_logon_pid)
-				win_logon_pid = pid;
+			if (info.win.dwSessionId > 0 && !chosenPid)
+				chosenPid = pid;
 		}
 	}
 	// If no interactive winlogon, use the game PID for kernel reads
-	if (!win_logon_pid)
+	if (!chosenPid)
 	{
-		win_logon_pid = TargetProcess.GetPID();
-		INPUT_LOG("[Input] no interactive winlogon, using game pid %d\n", win_logon_pid);
+		chosenPid = TargetProcess.GetPID();
+		INPUT_LOG("[Input] no interactive winlogon, using game pid %d\n", chosenPid);
 	}
-	INPUT_LOG("[Input] game PC Windows build %llu, winlogon pid %d\n", build, win_logon_pid);
-	if (!win_logon_pid)
+	win_logon_pid.store(chosenPid, std::memory_order_release);
+	INPUT_LOG("[Input] game PC Windows build %llu, winlogon pid %d\n", build, chosenPid);
+	if (!chosenPid)
 		return false;
 
 	// 22000 (Win11 21H2) can go either way, so it tries the Win10 export first.
@@ -461,14 +469,17 @@ namespace
 
 void Keyboard::UpdateKeys()
 {
+	const uint64_t exportVa = gafAsyncKeyStateExport.load(std::memory_order_acquire);
+	const int logonPid = win_logon_pid.load(std::memory_order_acquire);
+	if (exportVa <= 0x7FFFFFFFFFFF) return;
 	uint8_t fresh[64] = {};
 	DWORD read = 0;
-	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, kKeyReadFlags) || read != 64)
+	if (!VMMDLL_MemReadEx(TargetProcess.vHandle, logonPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, exportVa, fresh, 64, &read, kKeyReadFlags) || read != 64)
 	{
 		const int altPid = TargetProcess.GetPID();
-		if (altPid && altPid != win_logon_pid)
+		if (altPid && altPid != logonPid)
 		{
-			if (!VMMDLL_MemReadEx(TargetProcess.vHandle, altPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, gafAsyncKeyStateExport, fresh, 64, &read, kKeyReadFlags) || read != 64)
+			if (!VMMDLL_MemReadEx(TargetProcess.vHandle, altPid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY, exportVa, fresh, 64, &read, kKeyReadFlags) || read != 64)
 				return;
 		}
 		else
@@ -486,7 +497,7 @@ void Keyboard::SetAsyncKeyPolling(bool active)
 
 void Keyboard::PollKeysAsync()
 {
-	if (gafAsyncKeyStateExport < 0x7FFFFFFFFFFF)
+	if (gafAsyncKeyStateExport.load(std::memory_order_acquire) <= 0x7FFFFFFFFFFF)
 		return;
 	const int64_t now = KeyNowUs();
 	if (now - g_keyLastUpdateUs.load(std::memory_order_relaxed) < 4000)
@@ -502,7 +513,7 @@ void Keyboard::PollKeysAsync()
 
 bool Keyboard::IsKeyDown(uint32_t virtual_key_code)
 {
-	if (gafAsyncKeyStateExport < 0x7FFFFFFFFFFF || virtual_key_code >= 256)
+	if (gafAsyncKeyStateExport.load(std::memory_order_acquire) <= 0x7FFFFFFFFFFF || virtual_key_code >= 256)
 		return false;
 	if (!g_asyncKeyPolling.load(std::memory_order_acquire))
 	{
@@ -544,7 +555,7 @@ bool Keyboard::IsKeyDown(uint32_t virtual_key_code)
 
 bool Keyboard::IsReady()
 {
-	return gafAsyncKeyStateExport > 0x7FFFFFFFFFFF;
+	return gafAsyncKeyStateExport.load(std::memory_order_acquire) > 0x7FFFFFFFFFFF;
 }
 
 // Game-PC desktop cursor, ported from Pure-H1Z1 (InputManager.cpp, c_keys).
@@ -601,7 +612,7 @@ namespace
 	bool ReadKernel(uint64_t va, void* out, DWORD size)
 	{
 		DWORD cb = 0;
-		return VMMDLL_MemReadEx(TargetProcess.vHandle, Keyboard::win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
+		return VMMDLL_MemReadEx(TargetProcess.vHandle, Keyboard::win_logon_pid.load(std::memory_order_acquire) | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
 			va, (PBYTE)out, size, &cb, VMMDLL_FLAG_NOCACHE) && cb == size;
 	}
 
@@ -609,14 +620,15 @@ namespace
 	{
 		if (cursorScanBase == 0)
 		{
-			if (Keyboard::cursorSessionBase > 0x7FFFFFFFFFFF)
+			const uint64_t sessBase = Keyboard::cursorSessionBase.load(std::memory_order_acquire);
+			if (sessBase > 0x7FFFFFFFFFFF)
 			{
-				cursorScanBase = Keyboard::cursorSessionBase;
+				cursorScanBase = sessBase;
 				cursorScanSize = kCursorSessionScanSize;
 			}
 			else
 			{
-				cursorScanBase = Keyboard::gafAsyncKeyStateExport - kCursorModuleScanBack;
+				cursorScanBase = Keyboard::gafAsyncKeyStateExport.load(std::memory_order_acquire) - kCursorModuleScanBack;
 				cursorScanSize = kCursorModuleScanSize;
 			}
 		}
@@ -624,7 +636,7 @@ namespace
 			cursorScanBuf.assign(cursorScanSize, 0);
 
 		DWORD cb = 0;
-		VMMDLL_MemReadEx(TargetProcess.vHandle, Keyboard::win_logon_pid | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
+		VMMDLL_MemReadEx(TargetProcess.vHandle, Keyboard::win_logon_pid.load(std::memory_order_acquire) | VMMDLL_PID_PROCESS_WITH_KERNELMEMORY,
 			cursorScanBase, cursorScanBuf.data(), cursorScanSize, &cb, VMMDLL_FLAG_NOCACHE | VMMDLL_FLAG_ZEROPAD_ON_FAIL);
 		return cb;
 	}
@@ -784,7 +796,7 @@ bool Keyboard::GetCursorGafDelta(int64_t& delta)
 {
 	if (!cursorLocked || !cursorAddress || !IsReady())
 		return false;
-	delta = (int64_t)cursorAddress - (int64_t)gafAsyncKeyStateExport;
+	delta = (int64_t)cursorAddress - (int64_t)gafAsyncKeyStateExport.load(std::memory_order_acquire);
 	return true;
 }
 
@@ -792,7 +804,7 @@ bool Keyboard::RestoreCursorFromGafDelta(int64_t delta, int32_t screenW, int32_t
 {
 	if (delta == 0 || screenW <= 0 || screenH <= 0 || !IsReady())
 		return false;
-	const uint64_t va = (uint64_t)((int64_t)gafAsyncKeyStateExport + delta);
+	const uint64_t va = (uint64_t)((int64_t)gafAsyncKeyStateExport.load(std::memory_order_acquire) + delta);
 	if (va <= 0x7FFFFFFFFFFF)
 		return false;
 

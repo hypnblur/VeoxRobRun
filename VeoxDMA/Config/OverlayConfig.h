@@ -50,6 +50,7 @@ public:
 
 	int MonitorIndex = 0;            // display the overlay is pinned to
 	bool FPSEnabled = false;         // small FPS readout in the top-left
+	bool StatusPanel = true;         // feature status dots in the top-left
 	int FrameCap = 240;              // default 240 fps, 0 = uncapped
 	std::string FontName = "Maven Pro";
 	bool Transparent = true;         // per-pixel alpha over the game
@@ -71,6 +72,8 @@ public:
 	int ReattachKey = 0;             // 0=Off, 1=F1, 2=F2...
 	bool CustomCameraDistance = false; // extended third-person camera
 	float CameraDistance = 3.5f;     // follow distance in meters (1.0 - 15.0)
+	bool FovChanger = false;         // override Cinemachine virtual camera FOV
+	float CameraFov = 90.0f;         // target FOV in degrees (20.0 - 160.0)
 	D2D1::ColorF BackgroundColour = Colour(0, 0, 0);
 
 	// Saved screen placements. The menu and radar remember size as well as
@@ -102,6 +105,7 @@ public:
 		json j;
 		j[ConfigName][LIT("MonitorIndex")] = MonitorIndex;
 		j[ConfigName][LIT("FPSEnabled")] = FPSEnabled;
+		j[ConfigName][LIT("StatusPanel")] = StatusPanel;
 		j[ConfigName][LIT("FrameCap")] = FrameCap;
 		j[ConfigName][LIT("Transparent")] = Transparent;
 		j[ConfigName][LIT("HighContrastMenu")] = HighContrastMenu;
@@ -120,6 +124,8 @@ public:
 		j[ConfigName][LIT("ReattachKey")] = ReattachKey;
 		j[ConfigName][LIT("CustomCameraDistance")] = CustomCameraDistance;
 		j[ConfigName][LIT("CameraDistance")] = CameraDistance;
+		j[ConfigName][LIT("FovChanger")] = FovChanger;
+		j[ConfigName][LIT("CameraFov")] = CameraFov;
 		j[ConfigName][LIT("FontName")] = FontName;
 		j[ConfigName][LIT("MenuWindow")] = MenuWindow.ToJson();
 		j[ConfigName][LIT("RadarWindow")] = RadarWindow.ToJson();
@@ -134,6 +140,7 @@ public:
 		auto& s = j[ConfigName];
 		MonitorIndex = s.value(LIT("MonitorIndex"), MonitorIndex);
 		FPSEnabled = s.value(LIT("FPSEnabled"), FPSEnabled);
+		StatusPanel = s.value(LIT("StatusPanel"), StatusPanel);
 		FrameCap = s.value(LIT("FrameCap"), FrameCap);
 		Transparent = s.value(LIT("Transparent"), Transparent);
 		HighContrastMenu = s.value(LIT("HighContrastMenu"), HighContrastMenu);
@@ -152,6 +159,10 @@ public:
 		ReattachKey = s.value(LIT("ReattachKey"), ReattachKey);
 		CustomCameraDistance = s.value(LIT("CustomCameraDistance"), CustomCameraDistance);
 		CameraDistance = s.value(LIT("CameraDistance"), CameraDistance);
+		FovChanger = s.value(LIT("FovChanger"), FovChanger);
+		if (s.contains(LIT("fov_on"))) FovChanger = s.value(LIT("fov_on"), FovChanger);
+		CameraFov = s.value(LIT("CameraFov"), CameraFov);
+		if (s.contains(LIT("fov_value"))) CameraFov = s.value(LIT("fov_value"), CameraFov);
 		FontName = s.value(LIT("FontName"), FontName);
 		if (s.contains(LIT("MenuWindow")))
 			MenuWindow.FromJson(s[LIT("MenuWindow")]);

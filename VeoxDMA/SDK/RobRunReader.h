@@ -290,7 +290,7 @@ struct BvhStatus {
 };
 BvhStatus GetBvhStatus();
 void ReloadBvh();
-const CollisionBVH::Scene& GetBvhScene();
+std::shared_ptr<const CollisionBVH::Scene> GetBvhScene();
 
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);
 bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);

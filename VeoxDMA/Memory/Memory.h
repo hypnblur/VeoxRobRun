@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include <atomic>
 #include <mutex>
 
 class Memory
@@ -24,6 +25,7 @@ private:
 	mutable std::mutex modules_mutex;
 	std::unordered_map<std::wstring, ULONG64> Modules;
 	static inline CurrentProcessInformation current_process{ };
+	static inline std::atomic<int> current_pid{ 0 };
 
 	static inline BOOLEAN DMA_INITIALIZED = FALSE;
 	static inline BOOLEAN PROCESS_INITIALIZED = FALSE;

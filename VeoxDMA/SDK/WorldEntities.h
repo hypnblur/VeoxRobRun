@@ -25,6 +25,13 @@ enum class Kind {
     DroppedBag,
     VehicleLoot,
     Cargo,
+    CargoBush,
+    CargoCrystal,
+    CargoDrug,
+    CargoCash,
+    CargoExchange,
+    CargoBox,
+    CargoGoods,
     PlotLoot,
     FurnitureLoot,
     BuildingLoot,
@@ -51,8 +58,13 @@ struct Entity {
     std::string label;
     int cashAmount = 0;
     bool hasCashAmount = false;
+        bool inVehicle = false;     // contents of a vehicle trunk
+        bool inTable = false;       // contents of a container or grow table
     int dirtyCash = 0;
     int cleanCash = 0;
+    int value = 0;              // game-native value (cargo coin reward), 0 if none
+    bool hasValue = false;
+    int rarity = -1;            // RarityItem enum from the description: 0 none, 1..6 tiers
     float yaw = 0.f;
     bool hasYaw = false;
 };

@@ -3,10 +3,14 @@
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "EspDraw.h"
+#include "IconSprites.h"
+#include "Diag.h"
 #include "../SDK/RobRunMemory.h"
 #include "../ImGUI/imgui.h"
 #include <cfloat>
 #include <cmath>
+#include <cstring>
+#include <unordered_set>
 
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
@@ -38,6 +42,20 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.Loot || world.VehicleLoots;
 	case RobRunWorld::Kind::Cargo:
 		return world.Loot || world.Cargos;
+	case RobRunWorld::Kind::CargoBush:
+		return world.Loot || world.Cargos || world.CargoBushes;
+	case RobRunWorld::Kind::CargoCrystal:
+		return world.Loot || world.Cargos || world.CargoCrystals;
+	case RobRunWorld::Kind::CargoDrug:
+		return world.Loot || world.Cargos || world.CargoDrugs;
+	case RobRunWorld::Kind::CargoCash:
+		return world.Loot || world.Cargos || world.CargoCash;
+	case RobRunWorld::Kind::CargoExchange:
+		return world.Loot || world.Cargos || world.CargoExchange;
+	case RobRunWorld::Kind::CargoBox:
+		return world.Loot || world.Cargos || world.CargoBoxes;
+	case RobRunWorld::Kind::CargoGoods:
+		return world.Loot || world.Cargos || world.CargoGoods;
 	case RobRunWorld::Kind::PlotLoot:
 		return world.Loot || world.PlotLoots;
 	case RobRunWorld::Kind::FurnitureLoot:
@@ -104,6 +122,20 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.VehicleLootColour);
 	case RobRunWorld::Kind::Cargo:
 		return Esp::D2DColorToImU32(world.CargoColour);
+	case RobRunWorld::Kind::CargoBush:
+		return Esp::D2DColorToImU32(world.CargoBushColour);
+	case RobRunWorld::Kind::CargoCrystal:
+		return Esp::D2DColorToImU32(world.CargoCrystalColour);
+	case RobRunWorld::Kind::CargoDrug:
+		return Esp::D2DColorToImU32(world.CargoDrugColour);
+	case RobRunWorld::Kind::CargoCash:
+		return Esp::D2DColorToImU32(world.CargoCashColour);
+	case RobRunWorld::Kind::CargoExchange:
+		return Esp::D2DColorToImU32(world.CargoExchangeColour);
+	case RobRunWorld::Kind::CargoBox:
+		return Esp::D2DColorToImU32(world.CargoBoxColour);
+	case RobRunWorld::Kind::CargoGoods:
+		return Esp::D2DColorToImU32(world.CargoGoodsColour);
 	case RobRunWorld::Kind::PlotLoot:
 		return Esp::D2DColorToImU32(world.PlotLootColour);
 	case RobRunWorld::Kind::FurnitureLoot:
@@ -160,37 +192,169 @@ void DrawWorldEntities()
 	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
 		return;
 
-	const Vector3 localPos = snapshot->localPosition;
-	const bool haveLocalPosition = !localPos.IsZero();
-	const float maxDist = (float)ConfigInstance.World.MaxDistance;
-	const float maxDistSq = maxDist * maxDist;
+	Vector3 localPos = snapshot->localPosition;
+	bool haveLocalPosition = RobRunMemory::Finite(localPos) && !localPos.IsZero();
+	const char* rangeOrigin = haveLocalPosition ? "player" : "unavailable";
+	if (!haveLocalPosition) {
+		RobRunCamera::CameraState camera{};
+		if (RobRunReader::GetFreshCamera(camera) && RobRunMemory::Finite(camera.position) &&
+			!camera.position.IsZero()) {
+			localPos = camera.position;
+			haveLocalPosition = true;
+			rangeOrigin = "camera";
+		}
+	}
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	ImFont* font = ImGui::GetFont();
-	const float fontSize = (float)ConfigInstance.World.FontSize;
-	thread_local std::string label;
+
+	// What the snapshot actually contains, once every few seconds. This is how we
+	// tell "cargo is filtered out" from "cargo never reached the entity list".
+	if (kProbes) {
+		static ULONGLONG s_lastProbe = 0;
+		const ULONGLONG now = GetTickCount64();
+		if (now - s_lastProbe > 5000) {
+			s_lastProbe = now;
+			int cargo = 0, containers = 0, staticLoot = 0, randomLoot = 0, vehicles = 0, loots = 0;
+			std::string cargoLabels, lootLabels;
+			for (const auto& e : snapshot->world->entities) {
+				switch (e.kind) {
+				case RobRunWorld::Kind::Cargo:
+					++cargo;
+					if (cargoLabels.size() < 90) cargoLabels += "[" + e.label + "]";
+					break;
+				case RobRunWorld::Kind::Container:  ++containers; break;
+				case RobRunWorld::Kind::StaticLoot: ++staticLoot; break;
+				case RobRunWorld::Kind::RandomLoot: ++randomLoot; break;
+				case RobRunWorld::Kind::Car:
+				case RobRunWorld::Kind::Helicopter:
+				case RobRunWorld::Kind::Vehicle:    ++vehicles; break;
+				default:                            ++loots; break;
+				}
+				if (e.kind == RobRunWorld::Kind::StaticLoot && lootLabels.size() < 90)
+					lootLabels += "[" + e.label + "]";
+			}
+			VeoxDiag("probe: entities=%zu cargo=%d containers=%d static=%d random=%d vehicles=%d other=%d "
+				"cargoLabels=%s staticLabels=%s",
+				snapshot->world->entities.size(), cargo, containers, staticLoot, randomLoot, vehicles, loots,
+				cargoLabels.c_str(), lootLabels.c_str());
+		}
+	}
+
+	if (kProbes) {
+		static std::uint64_t lastCensus = 0;
+		const std::uint64_t nowCensus = GetTickCount64();
+		if (nowCensus - lastCensus > 3000) {
+			lastCensus = nowCensus;
+			const auto& dbg = ConfigInstance.LootFilter;
+			std::string randomLabels, otherLabels;
+			int random = 0, randomMatched = 0, other = 0, otherMatched = 0;
+			for (const auto& e : snapshot->world->entities) {
+				const auto* def = dbg.FindItemForEntity(e.kind, e.label);
+				if (e.kind == RobRunWorld::Kind::RandomLoot) {
+					++random;
+					if (def) ++randomMatched;
+					if (randomLabels.size() < 160) randomLabels += e.label + (def ? "*" : "!") + " ";
+				} else if (e.kind == RobRunWorld::Kind::Loot ||
+				           e.kind == RobRunWorld::Kind::StaticLoot ||
+				           e.kind == RobRunWorld::Kind::DroppedBag) {
+					++other;
+					if (def) ++otherMatched;
+					if (otherLabels.size() < 160) otherLabels += e.label + (def ? "*" : "!") + " ";
+				}
+			}
+			VeoxDiag("esp labels: random %d/%d [%s] | loot %d/%d [%s]",
+				randomMatched, random, randomLabels.c_str(), otherMatched, other, otherLabels.c_str());
+		}
+	}
 
 	for (const auto& entity : snapshot->world->entities)
 	{
-		if (!IsEnabled(entity.kind))
-			continue;
+		const auto& lf = ConfigInstance.LootFilter;
+		const LootFilter::ItemDef* itemDef = nullptr;
+		const ItemSettings* itemCfg = nullptr;
+
+
+		if (lf.Enabled) {
+			itemDef = lf.FindItemForEntity(entity.kind, entity.label);
+			if (itemDef) {
+				itemCfg = &lf.GetItem(itemDef->id);
+				if (!itemCfg->visible) continue;
+			}
+		}
+
+		// Which set of switches decides whether this entity draws:
+		//   filter off  -> the legacy per-kind switches
+		//   filter on   -> the catalog, and when nothing matched, the generic row
+		//                  for that kind. Never the legacy switches: those would
+		//                  silently drop loot the catalog simply could not name.
+		if (!lf.Enabled) {
+			if (!IsEnabled(entity.kind)) continue;
+		} else if (!itemDef) {
+			itemDef = lf.FindItemForEntity(entity.kind, "");
+			if (itemDef) itemCfg = &lf.GetItem(itemDef->id);
+		}
+		if (itemDef && !itemCfg)
+			itemCfg = &lf.GetItem(itemDef->id);
 
 		const float dx = entity.position.x - localPos.x;
 		const float dy = entity.position.y - localPos.y;
 		const float dz = entity.position.z - localPos.z;
 		const float distSq = dx * dx + dy * dy + dz * dz;
-		if (haveLocalPosition && distSq > maxDistSq)
+		const bool hasItemRange = itemCfg && !itemCfg->useGlobalDistance && itemCfg->maxDistance > 0;
+
+		// With the filter on, the filter owns the range: the legacy ESP distance
+		// has no vote, and an unset filter range means a sane default, not zero.
+		int maxDist = lf.Enabled
+			? (lf.GlobalMaxDistance > 0 ? lf.GlobalMaxDistance : 250)
+			: ConfigInstance.World.MaxDistance;
+		if (lf.Enabled) {
+			const int catMax = lf.ResolvedMaxDistance(itemDef ? itemDef->category : LootFilter::Category::Misc);
+			if (catMax > 0) maxDist = catMax;
+			// Per-item range only applies when the row opts out of the global one.
+			if (hasItemRange)
+				maxDist = itemCfg->maxDistance;
+		}
+
+		// Contents of a trunk or table draw only when their row opts in.
+		if (entity.inTable &&
+			(!lf.Enabled || !itemCfg || (itemCfg->flags & LootFilter::RenderInTable) == 0))
+			continue;
+		// A trunk item draws only when its own row opts in.
+		if (entity.inVehicle &&
+			(!lf.Enabled || !itemCfg || (itemCfg->flags & LootFilter::RenderInVehicle) == 0))
 			continue;
 
-		if (ConfigInstance.LootFilter.Enabled && ConfigInstance.LootFilter.FilterByMinPrice && ConfigInstance.LootFilter.MinPrice > 0)
-		{
-			if (entity.hasCashAmount && entity.cashAmount < ConfigInstance.LootFilter.MinPrice)
-				continue;
+		// Keep items with an explicit limit hidden until an origin is available.
+		const float maxDistF = static_cast<float>(maxDist);
+		const bool outsideRange = haveLocalPosition
+			? maxDist > 0 && distSq > maxDistF * maxDistF
+			: hasItemRange;
+		if (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0)) {
+			static std::unordered_set<std::string> logged;
+			const std::string key = std::to_string(entity.id) + ":" + std::to_string(maxDist) +
+				":" + rangeOrigin + ":" + std::to_string(hasItemRange) + ":" + std::to_string(outsideRange);
+			if (logged.size() < 64 && logged.insert(key).second)
+				VeoxDiag("trio range: placement=%d row='%s' origin=%s distance=%.1f limit=%d perItem=%d culled=%d",
+					entity.id, itemDef ? itemDef->id : "", rangeOrigin,
+					haveLocalPosition ? std::sqrt(distSq) : 0.f, maxDist,
+					hasItemRange, outsideRange);
 		}
-		else if (ConfigInstance.World.MinValueFilter > 0)
-		{
+		if (outsideRange)
+			continue;
+
+		if (lf.Enabled && lf.FilterByMinPrice && lf.MinPrice > 0) {
+			if (entity.hasCashAmount && entity.cashAmount < lf.MinPrice)
+				continue;
+		} else if (ConfigInstance.World.MinValueFilter > 0) {
 			if (entity.hasCashAmount && entity.cashAmount < ConfigInstance.World.MinValueFilter)
 				continue;
 		}
+
+		// HideEmpty only applies to rows that opted in: a growing bush reports
+		// empty while it regrows and must stay on screen.
+		if (lf.Enabled && lf.HideEmpty && entity.hasEmptyFlag && entity.empty &&
+			(!itemDef || itemDef->hideWhenEmpty))
+			continue;
 
 		Vector2 screen;
 		if (!RobRunReader::ProjectWorld(
@@ -203,53 +367,192 @@ void DrawWorldEntities()
 			screen.y < -60.f || screen.y > (float)screenH + 60.f)
 			continue;
 
-		label = entity.label;
+		const bool filterOn = lf.Enabled;
+		// A missing catalog row must not drop back to the legacy fixed sizes:
+		// dot, font and icon scale stay under the loot filter's controls.
+		std::uint8_t flags = itemCfg
+			? itemCfg->flags
+			: (std::uint8_t)(LootFilter::RenderDot | LootFilter::RenderName);
+		// A row with every flag cleared draws absolutely nothing, which is
+		// indistinguishable from a broken ESP. Treat "no flags" as "show the
+		// basics" so a zeroed config can never make an entity invisible.
+		if (filterOn && flags == 0)
+			flags = (std::uint8_t)(LootFilter::RenderDot | LootFilter::RenderName);
+		const LootFilter::Category sizingCat = itemDef ? itemDef->category : LootFilter::Category::Misc;
+		const float labelSize = filterOn
+			? (float)lf.ResolvedFontSize(sizingCat)
+			: (float)ConfigInstance.World.FontSize;
 
-		// Rename "Bush" → "Weed" in display labels + optional hide
-		{
-			bool isBush = false;
-			for (std::size_t p = 0; (p = label.find("Bush", p)) != std::string::npos; p += 4) {
-				label.replace(p, 4, "Weed");
-				isBush = true;
+		// Marker colour: the row's own colour; the value tiers still tint it so
+		// a high-value find reads at a glance.
+		ImU32 markerCol = itemCfg
+			? Esp::D2DColorToImU32(itemCfg->color)
+			: ColourFor(entity.kind);
+		if (lf.Enabled && entity.hasCashAmount) {
+			if (entity.cashAmount >= lf.HighValueThreshold)
+				markerCol = Esp::D2DColorToImU32(lf.HighValueColour);
+			else if (entity.cashAmount >= lf.MidValueThreshold)
+				markerCol = Esp::D2DColorToImU32(lf.MidValueColour);
+		}
+
+		const bool wantIcon  = filterOn && (flags & LootFilter::RenderIcon);
+		const bool wantDot   = !filterOn || (flags & LootFilter::RenderDot);
+		const bool wantName  = !filterOn || (flags & LootFilter::RenderName);
+		const bool wantPrice = !filterOn || (flags & LootFilter::RenderPrice);
+		const bool wantDist  = filterOn
+			? (flags & LootFilter::RenderDistance) != 0
+			: (ConfigInstance.World.ShowDistance != false);   // legacy world ESP
+
+		// Icon pass: any catalogue sprite, served from OrbitResources.dll.
+		// Vehicles label themselves with their exact model+paint id, so try
+		// that sprite first and fall back to the family row's sprite.
+		float iconPx = 0.f;
+		if (wantIcon) {
+			const char* spriteName = nullptr;
+			const bool isVehicle = entity.kind == RobRunWorld::Kind::Car ||
+				entity.kind == RobRunWorld::Kind::Helicopter ||
+				entity.kind == RobRunWorld::Kind::Vehicle;
+			if (isVehicle && !entity.label.empty() &&
+				IconSprites::Get(entity.label.c_str()).srv) {
+				spriteName = entity.label.c_str();
+			} else if (itemDef && itemDef->iconSprite[0]) {
+				spriteName = itemDef->iconSprite;
 			}
-			if (isBush && !ConfigInstance.World.Weed)
-				continue;
-		}
-
-		ImU32 colour = ColourFor(entity.kind);
-		if (ConfigInstance.LootFilter.Enabled && entity.hasCashAmount)
-		{
-			if (entity.cashAmount >= ConfigInstance.LootFilter.HighValueThreshold)
-				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.HighValueColour);
-			else if (entity.cashAmount >= ConfigInstance.LootFilter.MidValueThreshold)
-				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.MidValueColour);
-		}
-		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
-
-		if (entity.hasCashAmount) {
-			label += " | $" + FormatCash(entity.cashAmount);
-			if (entity.kind == RobRunWorld::Kind::MoneyWorkbench && entity.cleanCash > 0 && entity.dirtyCash > 0) {
-				label += " (C:$" + FormatCash(entity.cleanCash) + " D:$" + FormatCash(entity.dirtyCash) + ")";
+			if (spriteName) {
+				const auto icon = IconSprites::Get(spriteName);
+				if (icon.srv) {
+					iconPx = (float)lf.ResolvedIconSize(sizingCat);
+					// Keep the sprite's aspect: a 512x256 art is drawn 2:1, not
+					// stretched into a square.
+					float drawW = iconPx;
+					float drawH = iconPx;
+					if (icon.width > 0 && icon.height > 0) {
+						if (icon.width >= icon.height)
+							drawH = iconPx * (float)icon.height / (float)icon.width;
+						else
+							drawW = iconPx * (float)icon.width / (float)icon.height;
+					}
+					// Sits above the dot so the dot still marks the world point.
+					const float bottom = screen.y - (wantDot ? lf.ResolvedDotSize(sizingCat) : 0.f) - 1.f;
+					dl->AddImage(reinterpret_cast<ImTextureID>(icon.srv),
+						ImVec2(screen.x - drawW * 0.5f, bottom - drawH),
+						ImVec2(screen.x + drawW * 0.5f, bottom));
+					iconPx = drawH;
+				}
 			}
-		} else if (entity.kind == RobRunWorld::Kind::Container &&
-			ConfigInstance.World.ShowEmpty && entity.hasEmptyFlag) {
-			label += entity.empty ? " [empty]" : " [loot]";
-		} else if (entity.kind == RobRunWorld::Kind::DefenseBlock && entity.hasEmptyFlag) {
-			label += entity.empty ? " [empty]" : " [armed]";
-		}
-		if (ConfigInstance.World.ShowDistance) {
-			const int distance = (int)std::sqrt(distSq);
-			label += " [" + std::to_string(distance) + "m]";
 		}
 
+		if (wantDot) {
+			const float dotSize = filterOn ? lf.ResolvedDotSize(sizingCat) : 2.5f;
+			dl->AddCircleFilled(ImVec2(screen.x, screen.y), dotSize, markerCol);
+		}
+
+		// Text stack under the marker: distance, name (rarity colour), price.
+		// Matches the reference layout: icon above the dot, then the lines.
+		float lineY = screen.y + (wantDot ? (filterOn ? lf.ResolvedDotSize(sizingCat) : 2.5f) : 0.f) + 2.f;
 		ImFont* useFont = font;
-		ImVec2 textSize = useFont
-			? useFont->CalcTextSizeA(fontSize, FLT_MAX, 0.f, label.c_str())
-			: ImGui::CalcTextSize(label.c_str());
+		auto drawLine = [&](const std::string& text, ImU32 col) {
+			if (text.empty()) return;
+			ImVec2 size = useFont
+				? useFont->CalcTextSizeA(labelSize, FLT_MAX, 0.f, text.c_str())
+				: ImGui::CalcTextSize(text.c_str());
+			Esp::DrawOutlinedText(dl,
+				ImVec2(screen.x - size.x * 0.5f, lineY),
+				col, useFont, labelSize, text.c_str());
+			lineY += size.y + 1.f;
+		};
 
-		Esp::DrawOutlinedText(dl,
-			ImVec2(screen.x - textSize.x * 0.5f, screen.y - textSize.y - 4.f),
-			colour, useFont, fontSize, label.c_str());
+		if (wantDist && haveLocalPosition)
+			drawLine(std::to_string(static_cast<int>(std::sqrt(distSq))) + "m", IM_COL32(205, 205, 205, 235));
+
+		if (wantName) {
+			// The row owns the display name: the entity label is often the raw
+			// item id ("phones_3"), which is not what belongs on screen.
+			const bool unresolvedRandom = entity.kind == RobRunWorld::Kind::RandomLoot &&
+				entity.label.empty();
+			std::string label = (filterOn && itemDef && itemDef->displayName[0])
+				? itemDef->displayName
+				: entity.label;
+			if (unresolvedRandom)
+				label = "Loot - placement " + std::to_string(entity.id);
+			else if (filterOn && itemCfg && !itemCfg->customName.empty())
+				label = itemCfg->customName;
+
+			if (entity.label.starts_with("alcohol_")) {
+				static std::unordered_set<std::string> logged;
+				const std::string key = std::to_string(static_cast<int>(entity.kind)) + ":" +
+					std::to_string(entity.id) + ":" + entity.label + ":" + label;
+				if (logged.size() < 64 && logged.insert(key).second) {
+					VeoxDiag("bottle identity: kind=%d placement=%d pos=(%.1f,%.1f,%.1f) id='%s' row='%s' name='%s'",
+						static_cast<int>(entity.kind), entity.id, entity.position.x,
+						entity.position.y, entity.position.z, entity.label.c_str(),
+						itemDef ? itemDef->id : "", label.c_str());
+				}
+			}
+
+			// Rename "Bush" → "Weed" in display labels + optional hide
+			{
+				bool isBush = false;
+				for (std::size_t p = 0; (p = label.find("Bush", p)) != std::string::npos; p += 4) {
+					label.replace(p, 4, "Weed");
+					isBush = true;
+				}
+				if (isBush && !lf.Enabled && !ConfigInstance.World.Weed)
+					continue;
+			}
+
+			if (entity.kind == RobRunWorld::Kind::Container &&
+				ConfigInstance.World.ShowEmpty && entity.hasEmptyFlag) {
+				label += entity.empty ? " [empty]" : " [loot]";
+			} else if (entity.kind == RobRunWorld::Kind::DefenseBlock && entity.hasEmptyFlag) {
+				label += entity.empty ? " [empty]" : " [armed]";
+			}
+
+			// Game rarity (RarityItem: 1 Common .. 5 Legendary, 6 Exotic) wins;
+			// the catalog rarity is the fallback when the description is unread.
+			LootFilter::Rarity nameRarity = filterOn && itemDef
+				? itemDef->rarity
+				: LootFilter::Rarity::Common;
+			if (entity.rarity > 0) {
+				switch (entity.rarity) {
+				case 1: nameRarity = LootFilter::Rarity::Common; break;
+				case 2: nameRarity = LootFilter::Rarity::Uncommon; break;
+				case 3: nameRarity = LootFilter::Rarity::Rare; break;
+				case 4: nameRarity = LootFilter::Rarity::Epic; break;
+				default: nameRarity = LootFilter::Rarity::Legendary; break;  // 5 Legendary, 6 Exotic
+				}
+			}
+			const ImU32 nameCol = filterOn ? RarityColorU32(nameRarity) : markerCol;
+			drawLine(label, nameCol);
+		}
+
+		if (wantPrice) {
+			std::string price;
+			if (entity.hasCashAmount) {
+				price = "$" + FormatCash(entity.cashAmount);
+				if (entity.kind == RobRunWorld::Kind::MoneyWorkbench &&
+					entity.cleanCash > 0 && entity.dirtyCash > 0) {
+					price += " (C:$" + FormatCash(entity.cleanCash) + " D:$" + FormatCash(entity.dirtyCash) + ")";
+				}
+			} else {
+				// Which number to show: the live sell price the game pays, the
+				// catalog (buy) price, or the unlock price when we have it.
+				const int mode = std::clamp(lf.PriceMode, 0, 2);
+				int amount = 0;
+				if (mode == 2)
+					amount = 0;                       // unlock price not known yet
+				else if (mode == 0 && entity.hasValue && entity.value > 0)
+					amount = entity.value;
+				else if (mode == 1 && filterOn && itemDef && itemDef->price > 0)
+					amount = (int)itemDef->price;
+				else if (mode == 0 && filterOn && itemDef && itemDef->price > 0)
+					amount = (int)itemDef->price;   // no live price yet: catalog fallback
+				price = amount > 0 ? ("$" + FormatCash(amount)) : std::string();
+			}
+			// No price known: draw nothing rather than a placeholder line.
+			if (!price.empty())
+				drawLine(price, IM_COL32(235, 235, 235, 240));
+		}
 	}
 }
 
