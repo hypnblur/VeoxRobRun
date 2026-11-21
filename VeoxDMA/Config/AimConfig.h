@@ -48,7 +48,7 @@ public:
 
 	// --- Memory Aim write path -----------------------------------------
 	// Write the camera angles through DMA instead of moving the local cursor.
-	bool MemoryWrite = true;
+	bool MemoryWrite = false;
 	// If the write is unavailable, fall back to SendInput cursor movement so
 	// aim still does something on a single-PC setup.
 	bool CursorFallback = true;
@@ -66,7 +66,7 @@ public:
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
 	bool NoSpread = false;
-	bool DynamicRecoilCompensation = true;
+	bool DynamicRecoilCompensation = false;
 	float RecoilStrength = 1.0f;
 
 	// Role filters - all set to false to always allow all targets
