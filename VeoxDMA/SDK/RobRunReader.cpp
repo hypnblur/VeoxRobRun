@@ -7,16 +7,23 @@
 #include "CollisionBVH.h"
 #include "ConfigInstance.h"
 #include "DebugLog.h"
+#include "Overlay.h"
 #include <atomic>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <intrin.h>
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 namespace RobRunReader {
 
@@ -98,9 +105,13 @@ struct WeaponDescCache {
 };
 static std::unordered_map<std::uintptr_t, WeaponDescCache> g_weaponDescCache;
 
+static std::atomic<bool> g_cameraInvalidated{ false };
+
 static void MarkSessionChanged()
 {
     ++sessionGeneration;
+    g_cameraInvalidated.store(true, std::memory_order_release);
+    TargetProcess.RefreshAllCaches();
     DLOG("SessionChange: gen=%llu bm=0x%llx be=0x%llx lc=0x%llx game=0x%llx",
          (unsigned long long)sessionGeneration,
          (unsigned long long)cachedBattleModel,
@@ -309,31 +320,72 @@ static std::thread g_workerThread;
 static std::atomic<bool> g_worldWorkerStop{ false };
 static std::thread g_worldWorkerThread;
 
-// Render-thread camera refresh. The worker publishes cachedCameraModel via
-// this atomic; RefreshCamera() re-reads the camera block with uncached DMA
-// and stores it here so GetViewProjection() can use it instead of the
-// worker's ~30 Hz snapshot.
+// Dedicated camera polling thread. Reads the native Unity camera at ~0.5 ms
+// intervals and publishes into a lock-free seqlock so the render thread never
+// blocks on DMA or mutexes while panning.
+static std::atomic<bool> g_cameraStop{ false };
+static std::atomic<bool> g_cameraRunning{ false };
+static std::thread g_cameraThread;
+static std::atomic<std::uint64_t> g_perfWorkerPasses{ 0 };
+static std::atomic<std::uint64_t> g_perfWorkerUs{ 0 };
+static void StartCameraWorker();
+static void StopCameraWorker();
+
+// Worker publishes cachedCameraModel via this atomic; the camera thread reads
+// either the native Unity Camera (fast path) or BattleCameraModel (fallback).
 static std::atomic<std::uintptr_t> g_renderCameraModel{ 0 };
 static std::mutex g_freshCameraMutex;
 static RobRunCamera::CameraState g_freshCamera;
 
-// Native Unity main-camera view-projection, re-read on the render thread.
-// Memory aim rewrites the managed BattleCameraModel block, so building the ESP
-// matrix from that block makes the overlay project with a camera the game never
-// rendered (skeletons drift/lag behind the character). The native Camera
-// component is the camera the GPU actually used, so it is preferred whenever it
-// is readable; the managed block stays as the fallback.
-static std::mutex g_nativeCameraMutex;
-static Matrix4x4 g_nativeView{};
-static Matrix4x4 g_nativeProjection{};
-static bool g_nativeViewProjectionValid = false;
-static float g_nativePositionError = -1.f;
-static float g_nativeForwardDot = -1.f;
-// World pose parsed from the native view matrix. Aim uses it as its angle and
-// occlusion origin so the origin and the projection come from one camera read.
-static Vector3 g_nativeCameraPosition{};
-static Vector3 g_nativeCameraForward{};
-static bool g_nativeCameraPoseValid = false;
+// Native Unity main-camera view-projection, published via a single-writer
+// lock-free seqlock. Memory aim rewrites the managed BattleCameraModel block,
+// so the native Camera component is the camera the GPU actually used and is
+// preferred whenever readable; the managed block stays as the fallback.
+struct NativeCameraSnapshot {
+    Matrix4x4 view{};
+    Matrix4x4 projection{};
+    Vector3 position{};
+    Vector3 forward{};
+    float positionError = -1.f;
+    float forwardDot = -1.f;
+    std::uint64_t stampUs = 0;
+    bool valid = false;
+    bool poseValid = false;
+};
+
+static std::atomic<std::uint64_t> g_nativeCamSeq{ 0 };
+static NativeCameraSnapshot g_nativeCamBuf{};
+static std::mutex g_nativeCamWriteMutex;
+
+static void PublishNativeCamera(const NativeCameraSnapshot& next)
+{
+    std::lock_guard<std::mutex> lock(g_nativeCamWriteMutex);
+    const std::uint64_t seq = g_nativeCamSeq.load(std::memory_order_relaxed);
+    g_nativeCamSeq.store(seq + 1, std::memory_order_release);
+    std::atomic_thread_fence(std::memory_order_release);
+    g_nativeCamBuf = next;
+    std::atomic_thread_fence(std::memory_order_release);
+    g_nativeCamSeq.store(seq + 2, std::memory_order_release);
+}
+
+static NativeCameraSnapshot LoadNativeCamera()
+{
+    NativeCameraSnapshot out{};
+    for (int tries = 0; tries < 64; ++tries) {
+        const std::uint64_t s1 = g_nativeCamSeq.load(std::memory_order_acquire);
+        if (s1 & 1u) {
+            _mm_pause();
+            continue;
+        }
+        out = g_nativeCamBuf;
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const std::uint64_t s2 = g_nativeCamSeq.load(std::memory_order_acquire);
+        if (s1 == s2)
+            return out;
+    }
+    std::lock_guard<std::mutex> lock(g_nativeCamWriteMutex);
+    return g_nativeCamBuf;
+}
 
 static CollisionBVH::Scene g_bvhScene;
 static std::string g_bvhLoadedPath;
@@ -698,6 +750,7 @@ static void PublishSnapshot()
 void Shutdown()
 {
     RestoreDefaultCrosshair();
+    StopCameraWorker();
     g_workerStop.store(true, std::memory_order_relaxed);
     g_worldWorkerStop.store(true, std::memory_order_relaxed);
     if (g_workerThread.joinable())
@@ -716,17 +769,13 @@ void Shutdown()
         g_inventoryState = std::make_shared<RobRunInventory::State>();
     }
     g_renderCameraModel.store(0, std::memory_order_relaxed);
+    g_cameraInvalidated.store(false, std::memory_order_relaxed);
+    CameraFinder::InvalidateCache();
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         g_freshCamera = RobRunCamera::CameraState{};
     }
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        g_nativeViewProjectionValid = false;
-        g_nativeCameraPoseValid = false;
-        g_nativeCameraPosition = Vector3{};
-        g_nativeCameraForward = Vector3{};
-    }
+    PublishNativeCamera(NativeCameraSnapshot{});
     gaBase = 0;
     upBase = 0;
 }
@@ -816,10 +865,15 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerThread = std::thread([] {
         DLOG("Worker thread started");
         while (!g_workerStop.load(std::memory_order_relaxed)) {
+            const std::uint64_t t0 = SteadyMicros();
             Update();
-            // Adaptive sleep: 1 ms when entities are active to keep snapshots fresh (50-60 Hz),
-            // or 10 ms during empty lobbies / scene transitions.
-            const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 1 : 10;
+            const std::uint64_t dt = SteadyMicros() - t0;
+            g_perfWorkerPasses.fetch_add(1, std::memory_order_relaxed);
+            g_perfWorkerUs.fetch_add(dt, std::memory_order_relaxed);
+            // Adaptive sleep: 2 ms when entities are active so the FPGA bus has
+            // clean breathing room for sub-ms camera reads while keeping entity
+            // snapshots fast (~50-70 Hz), or 10 ms during empty lobbies.
+            const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
             for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(1);
         }
@@ -833,6 +887,12 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
         while (!g_worldWorkerStop.load(std::memory_order_relaxed)) {
             try {
                 ++wwCount;
+                // Controlled partial MemProcFS cache expiry (paired with
+                // -norefresh): purely in-RAM invalidation with zero background
+                // FPGA stalls. 33% data cache every ~500 ms, 33% TLB every ~10 s.
+                TargetProcess.RefreshMemCachePartial();
+                if ((wwCount % 20) == 0)
+                    TargetProcess.RefreshTlbCachePartial();
                 const std::uint64_t gen = sessionGeneration;
                 const std::uintptr_t bm = cachedBattleModel;
                 const std::uintptr_t be = cachedBattleEntities;
@@ -877,12 +937,13 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             } catch (...) {
                 DLOG("WorldWorker UNKNOWN EXCEPTION #%d", wwCount);
             }
-            for (int i = 0; i < 25 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
+            for (int i = 0; i < 50 && !g_worldWorkerStop.load(std::memory_order_relaxed); ++i)
                 Sleep(10);
         }
     });
 
-    DLOG("RobRunReader::Init: complete, both workers launched");
+    StartCameraWorker();
+    DLOG("RobRunReader::Init: complete, workers and camera thread launched");
 }
 
 static std::uintptr_t ReadPtr(std::uintptr_t address)
@@ -2161,7 +2222,23 @@ static void UpdateInternal()
         }
     }
     g_renderCameraModel.store(cachedCameraModel, std::memory_order_release);
-    cameraState = RobRunCamera::Read(cachedCameraModel);
+    {
+        // When the dedicated camera thread is streaming a fresh native camera,
+        // avoid issuing two extra uncached DMA reads (BattleCameraModel +
+        // CinemachineBrain FOV) on every entity worker pass.
+        const NativeCameraSnapshot nativeSnap = LoadNativeCamera();
+        const std::uint64_t nowUs = SteadyMicros();
+        const bool nativeFresh = ConfigInstance.Player.NativeEspCamera &&
+            nativeSnap.valid && nativeSnap.poseValid &&
+            nowUs >= nativeSnap.stampUs &&
+            (nowUs - nativeSnap.stampUs) < 500000ULL;
+        if (nativeFresh && cameraState.valid) {
+            cameraState.position = nativeSnap.position;
+            cameraState.forward = nativeSnap.forward;
+        } else {
+            cameraState = RobRunCamera::Read(cachedCameraModel);
+        }
+    }
 
     // Resolve the native Unity camera fallback here, on the worker, so the
     // render thread never walks the GameObjectManager when the managed camera
@@ -2566,7 +2643,16 @@ static void UpdateInternal()
         std::vector<unsigned char> poseBuf;
         std::size_t poseTotal = 0;
 
+        const bool haveLocalPos = !localPosition.IsZero();
+        const float poseCullDist = static_cast<float>(ConfigInstance.Player.MaxDistance) + 25.0f;
+
         for (auto& w : work) {
+            // Skip expensive multi-KB skeleton reads for the local player,
+            // already-dead entities, and players far past ESP MaxDistance.
+            if (w.entityId == localEntityId) continue;
+            const auto dIt = detailCache.find(w.entityId);
+            if (dIt != detailCache.end() && dIt->second.isDead) continue;
+
             const auto viewIt = views.find(w.entityId);
             const std::uintptr_t viewPtr =
                 (viewIt != views.end()) ? viewIt->second : 0;
@@ -2574,6 +2660,9 @@ static void UpdateInternal()
             if (rigIt != rigCache.end() && rigIt->second.layoutValid &&
                 rigIt->second.view == viewPtr)
             {
+                if (haveLocalPos && !rigIt->second.lastSampledPos.IsZero() &&
+                    Distance(rigIt->second.lastSampledPos, localPosition) > poseCullDist)
+                    continue;
                 const std::size_t sz = Skeleton::PoseDataSize(rigIt->second.layout);
                 w.needsPose = true;
                 w.poseOffset = poseTotal;
@@ -2584,13 +2673,21 @@ static void UpdateInternal()
         poseBuf.resize(poseTotal, 0);
 
         // ---------------------------------------------------------------
-        // Phase 2: Scatter-read positions AND poses in one DMA call
-        // so skeletons are sampled at the same instant as positions.
+        // Phase 2: Chunked scatter-read of positions AND poses.
+        // Splitting into small batches (max 4 pose-bearing entities per
+        // transaction) prevents a full lobby from locking the FPGA bus for
+        // 15-25 ms at once, letting the high-priority camera thread interleave
+        // sub-millisecond physical camera reads between chunks.
         // ---------------------------------------------------------------
         if (!work.empty()) {
             Memory::ScopedScatter scatter(TargetProcess);
             if (scatter.handle) {
-                for (auto& w : work) {
+                constexpr int kMaxPosesPerChunk = 4;
+                constexpr int kMaxEntsPerChunk = 12;
+                int chunkPoses = 0;
+                int chunkEnts = 0;
+                for (std::size_t wi = 0; wi < work.size(); ++wi) {
+                    auto& w = work[wi];
                     TargetProcess.AddScatterReadRequest(scatter,
                         w.blockAddress, &w.block, sizeof(TransformBlock));
                     if (w.needsPose) {
@@ -2598,9 +2695,20 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(scatter,
                             rig.layout.matrices,
                             poseBuf.data() + w.poseOffset, w.poseSize);
+                        ++chunkPoses;
+                    }
+                    ++chunkEnts;
+                    const bool flush = (wi + 1 == work.size()) ||
+                        chunkPoses >= kMaxPosesPerChunk ||
+                        chunkEnts >= kMaxEntsPerChunk;
+                    if (flush) {
+                        TargetProcess.ExecuteReadScatter(scatter);
+                        chunkPoses = 0;
+                        chunkEnts = 0;
+                        if (wi + 1 < work.size())
+                            SwitchToThread();
                     }
                 }
-                TargetProcess.ExecuteReadScatter(scatter);
             }
         }
 
@@ -3701,53 +3809,55 @@ std::string GetLocationId()
 
 void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
 
-void RefreshCamera()
-{
-    // Both the render thread and the aim worker call this. Each call is a DMA
-    // device transaction, and the two consumers only need the newest camera, so
-    // collapse calls that land within 3 ms of each other. The loser simply uses
-    // the camera the winner just published.
-    static std::atomic<std::int64_t> lastRefreshUs{ 0 };
-    const std::int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    std::int64_t previous = lastRefreshUs.load(std::memory_order_relaxed);
-    if (nowUs - previous < 3000) return;
-    if (!lastRefreshUs.compare_exchange_strong(previous, nowUs, std::memory_order_relaxed))
-        return;
+struct CameraStepResult {
+    bool active = false;
+    bool usedPhysical = false;
+    bool changed = false;
+};
 
-    // Fast path: when the native camera was valid last frame, skip the
-    // managed read entirely and scatter-read just view+projection in one
-    // device transaction (~2ms instead of ~8ms).
+static bool MatrixChanged(const Matrix4x4& a, const Matrix4x4& b)
+{
+    return std::memcmp(&a.matrix[0][0], &b.matrix[0][0], sizeof(a.matrix)) != 0;
+}
+
+static CameraStepResult RefreshCameraStep()
+{
+    CameraStepResult res{};
+    if (g_cameraInvalidated.exchange(false, std::memory_order_acq_rel)) {
+        CameraFinder::InvalidateCache();
+        PublishNativeCamera(NativeCameraSnapshot{});
+    }
+
+    // Fast path: when the native camera is already locked on, skip the managed
+    // read entirely and fetch view+projection via cached PA + direct LcRead
+    // (~150-300 us on a healthy DMA link).
     if (ConfigInstance.Player.NativeEspCamera) {
-        bool nativeWasValid;
-        {
-            std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-            nativeWasValid = g_nativeViewProjectionValid;
-        }
-        if (nativeWasValid) {
+        const NativeCameraSnapshot prev = LoadNativeCamera();
+        if (prev.valid) {
             CameraFinder::CameraData fast = CameraFinder::GetCameraMatricesFast();
             if (fast.valid) {
-                {
-                    std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-                    g_nativeViewProjectionValid = true;
-                    g_nativeView = fast.view;
-                    g_nativeProjection = fast.projection;
-                    g_nativePositionError = -1.f;
-                    g_nativeForwardDot = -1.f;
-                    // Keep the aim/occlusion origin glued to the rendered
-                    // camera too, not just the projection.
-                    g_nativeCameraPoseValid = !fast.position.IsZero();
-                    if (g_nativeCameraPoseValid) {
-                        g_nativeCameraPosition = fast.position;
-                        g_nativeCameraForward = fast.forward;
-                    }
+                NativeCameraSnapshot snap{};
+                snap.view = fast.view;
+                snap.projection = fast.projection;
+                snap.valid = true;
+                snap.positionError = prev.positionError;
+                snap.forwardDot = prev.forwardDot;
+                snap.poseValid = !fast.position.IsZero();
+                if (snap.poseValid) {
+                    snap.position = fast.position;
+                    snap.forward = fast.forward;
                 }
-                return;
+                snap.stampUs = SteadyMicros();
+                PublishNativeCamera(snap);
+                res.active = true;
+                res.usedPhysical = fast.usedPhysical;
+                res.changed = MatrixChanged(prev.view, fast.view);
+                return res;
             }
         }
     }
 
-    // Full path: read managed camera, then validate native against it.
+    // Full path: read managed camera, then validate/re-resolve native against it.
     RobRunCamera::CameraState managed{};
     const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
     if (model) {
@@ -3769,26 +3879,148 @@ void RefreshCamera()
         if (snapshot) managed = snapshot->camera;
     }
 
-    CameraFinder::CameraData native;
+    CameraFinder::CameraData native{};
     if (ConfigInstance.Player.NativeEspCamera)
         native = CameraFinder::GetCameraMatricesValidated(
             managed.position, managed.forward, managed.verticalFov);
 
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        g_nativeViewProjectionValid = native.valid;
-        if (native.valid) {
-            g_nativeView = native.view;
-            g_nativeProjection = native.projection;
-        }
-        g_nativePositionError = native.positionError;
-        g_nativeForwardDot = native.forwardDot;
-        g_nativeCameraPoseValid = native.valid && !native.position.IsZero();
-        if (g_nativeCameraPoseValid) {
-            g_nativeCameraPosition = native.position;
-            g_nativeCameraForward = native.forward;
+    const NativeCameraSnapshot prev = LoadNativeCamera();
+    NativeCameraSnapshot snap{};
+    snap.valid = native.valid;
+    if (native.valid) {
+        snap.view = native.view;
+        snap.projection = native.projection;
+    }
+    snap.positionError = native.positionError;
+    snap.forwardDot = native.forwardDot;
+    snap.poseValid = native.valid && !native.position.IsZero();
+    if (snap.poseValid) {
+        snap.position = native.position;
+        snap.forward = native.forward;
+    }
+    snap.stampUs = SteadyMicros();
+    PublishNativeCamera(snap);
+    res.active = native.valid || managed.valid;
+    res.usedPhysical = native.usedPhysical;
+    res.changed = native.valid && (!prev.valid || MatrixChanged(prev.view, native.view));
+    return res;
+}
+
+static void WaitCameraInterval(HANDLE timer, std::int64_t micros)
+{
+    if (timer) {
+        LARGE_INTEGER due{};
+        due.QuadPart = -micros * 10LL; // 100 ns units, relative
+        if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+            WaitForSingleObject(timer, INFINITE);
+            return;
         }
     }
+    std::this_thread::sleep_for(std::chrono::microseconds(micros));
+}
+
+static void StartCameraWorker()
+{
+    StopCameraWorker();
+    g_cameraStop.store(false, std::memory_order_relaxed);
+    g_cameraRunning.store(true, std::memory_order_release);
+    g_cameraThread = std::thread([] {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        HANDLE timer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
+        std::uint64_t winStartUs = SteadyMicros();
+        std::uint64_t reads = 0;
+        std::uint64_t physHits = 0;
+        std::uint64_t changes = 0;
+        std::uint64_t rttSumUs = 0;
+        std::uint64_t rttMaxUs = 0;
+
+        while (!g_cameraStop.load(std::memory_order_relaxed)) {
+            const std::uint64_t tStart = SteadyMicros();
+            CameraStepResult res{};
+            try {
+                res = RefreshCameraStep();
+            } catch (const std::exception& e) {
+                DLOG("CameraWorker: %s", e.what());
+            } catch (...) {
+                DLOG("CameraWorker: unknown exception");
+            }
+            const std::uint64_t tEnd = SteadyMicros();
+            const std::uint64_t rttUs = (tEnd >= tStart) ? (tEnd - tStart) : 0;
+
+            if (res.active) {
+                ++reads;
+                if (res.usedPhysical) ++physHits;
+                if (res.changed) ++changes;
+                rttSumUs += rttUs;
+                if (rttUs > rttMaxUs) rttMaxUs = rttUs;
+
+                // Periodic live diagnostics every 3 seconds so real-world DMA
+                // camera RTT, physical-read ratio, and DXGI present mode are visible.
+                if (tEnd - winStartUs >= 3'000'000ULL) {
+                    const double sec = static_cast<double>(tEnd - winStartUs) / 1'000'000.0;
+                    const double camHz = sec > 0.0 ? (reads / sec) : 0.0;
+                    const double chgHz = sec > 0.0 ? (changes / sec) : 0.0;
+                    const double physPct = reads ? (100.0 * physHits / reads) : 0.0;
+                    const std::uint64_t avgUs = reads ? (rttSumUs / reads) : 0;
+                    const std::uint64_t wPasses = g_perfWorkerPasses.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wUs = g_perfWorkerUs.exchange(0, std::memory_order_relaxed);
+                    const double wHz = sec > 0.0 ? (wPasses / sec) : 0.0;
+                    const double wMs = wPasses ? (static_cast<double>(wUs) / wPasses / 1000.0) : 0.0;
+                    std::printf("[Perf] cam=%.0fHz (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (%.1fms) | overlay=%.0ffps mode=%s cap=%d\n",
+                        camHz, physPct,
+                        (unsigned long long)avgUs, (unsigned long long)rttMaxUs, chgHz,
+                        wHz, wMs,
+                        Overlay::CurrentFps(), Overlay::PresentModeName(), Overlay::FrameCap());
+                    winStartUs = tEnd;
+                    reads = physHits = changes = rttSumUs = rttMaxUs = 0;
+                }
+
+                // True sub-millisecond start-to-start pacing (~250 us target =
+                // up to 4000 Hz) with zero 1 ms sleep penalty. Always yield
+                // briefly so the entity worker can acquire LeechCore fairly.
+                constexpr std::uint64_t kTargetCycleUs = 250;
+                SwitchToThread();
+                while (!g_cameraStop.load(std::memory_order_relaxed) &&
+                       (SteadyMicros() - tStart) < kTargetCycleUs) {
+                    _mm_pause();
+                }
+            } else {
+                // Back off to 5 ms in menus/lobbies when no camera is active.
+                winStartUs = tEnd;
+                reads = physHits = changes = rttSumUs = rttMaxUs = 0;
+                WaitCameraInterval(timer, 5000);
+            }
+        }
+        if (timer) CloseHandle(timer);
+        g_cameraRunning.store(false, std::memory_order_release);
+    });
+}
+
+static void StopCameraWorker()
+{
+    g_cameraStop.store(true, std::memory_order_relaxed);
+    if (g_cameraThread.joinable())
+        g_cameraThread.join();
+    g_cameraRunning.store(false, std::memory_order_release);
+}
+
+void RefreshCamera()
+{
+    // When the dedicated camera thread is active, callers never block on DMA
+    // here — they read the newest seqlock-published sample directly.
+    if (g_cameraRunning.load(std::memory_order_acquire))
+        return;
+
+    static std::atomic<std::uint64_t> lastRefreshUs{ 0 };
+    const std::uint64_t nowUs = SteadyMicros();
+    std::uint64_t previous = lastRefreshUs.load(std::memory_order_relaxed);
+    if (nowUs - previous < 1000) return;
+    if (!lastRefreshUs.compare_exchange_strong(previous, nowUs, std::memory_order_relaxed))
+        return;
+
+    RefreshCameraStep();
 }
 
 bool GetFreshCamera(RobRunCamera::CameraState& out)
@@ -3802,20 +4034,12 @@ bool GetFreshCamera(RobRunCamera::CameraState& out)
     // The native camera is the one the frame was rendered with. When its pose
     // is known it wins; the managed camera stays as the fallback (and supplies
     // the FOV, which the native fast path does not re-read).
-    Vector3 nativePosition{};
-    Vector3 nativeForward{};
-    bool haveNativePose = false;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        haveNativePose = g_nativeCameraPoseValid;
-        nativePosition = g_nativeCameraPosition;
-        nativeForward = g_nativeCameraForward;
-    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
 
     out = managed;
-    if (haveNativePose) {
-        out.position = nativePosition;
-        out.forward = nativeForward;
+    if (native.poseValid) {
+        out.position = native.position;
+        out.forward = native.forward;
         out.valid = true;
     }
     return out.valid;
@@ -3825,34 +4049,32 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
 
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        if (g_nativeViewProjectionValid) {
-            // Keep the rendered camera's view and vertical FOV, but rebuild the
-            // horizontal scale for the overlay surface. When the overlay and
-            // the game render target share an aspect (borderless fullscreen)
-            // this is bit-for-bit the matrix the game used.
-            Matrix4x4 projection = g_nativeProjection;
-            const float aspect =
-                static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
-            const float yScale = projection.matrix[1][1];
-            if (std::isfinite(yScale) && yScale > 0.01f && aspect > 0.01f)
-                projection.matrix[0][0] = yScale / aspect;
-            Matrix4x4 combined = g_nativeView * projection;
-            bool valid = true;
-            for (int r = 0; r < 4; ++r) {
-                for (int c = 0; c < 4; ++c) {
-                    if (!std::isfinite(combined.matrix[r][c])) {
-                        valid = false;
-                        break;
-                    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
+    if (native.valid) {
+        // Keep the rendered camera's view and vertical FOV, but rebuild the
+        // horizontal scale for the overlay surface. When the overlay and
+        // the game render target share an aspect (borderless fullscreen)
+        // this is bit-for-bit the matrix the game used.
+        Matrix4x4 projection = native.projection;
+        const float aspect =
+            static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
+        const float yScale = projection.matrix[1][1];
+        if (std::isfinite(yScale) && yScale > 0.01f && aspect > 0.01f)
+            projection.matrix[0][0] = yScale / aspect;
+        Matrix4x4 combined = native.view * projection;
+        bool valid = true;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                if (!std::isfinite(combined.matrix[r][c])) {
+                    valid = false;
+                    break;
                 }
-                if (!valid) break;
             }
-            if (valid && (std::abs(combined.matrix[2][3]) > 0.001f || std::abs(combined.matrix[3][2]) > 0.001f)) {
-                out = combined;
-                return true;
-            }
+            if (!valid) break;
+        }
+        if (valid && (std::abs(combined.matrix[2][3]) > 0.001f || std::abs(combined.matrix[3][2]) > 0.001f)) {
+            out = combined;
+            return true;
         }
     }
 
@@ -3885,9 +4107,40 @@ bool GetFallbackViewProjection(Matrix4x4& out)
     return true;
 }
 
+static thread_local bool tl_frameActive = false;
+static thread_local bool tl_frameValid = false;
+static thread_local int tl_frameW = 0;
+static thread_local int tl_frameH = 0;
+static thread_local Matrix4x4 tl_frameVP{};
+
+void BeginRenderFrame(int screenWidth, int screenHeight)
+{
+    tl_frameActive = true;
+    tl_frameW = screenWidth;
+    tl_frameH = screenHeight;
+    tl_frameValid = false;
+    if (screenWidth <= 0 || screenHeight <= 0)
+        return;
+    if (GetViewProjection(tl_frameVP, screenWidth, screenHeight) ||
+        GetFallbackViewProjection(tl_frameVP)) {
+        tl_frameValid = true;
+    }
+}
+
+void EndRenderFrame()
+{
+    tl_frameActive = false;
+    tl_frameValid = false;
+}
+
 bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 {
     if (screenWidth <= 0 || screenHeight <= 0) return false;
+    if (tl_frameActive && tl_frameW == screenWidth && tl_frameH == screenHeight) {
+        if (!tl_frameValid) return false;
+        out = tl_frameVP;
+        return true;
+    }
     if (GetViewProjection(out, screenWidth, screenHeight)) return true;
     return GetFallbackViewProjection(out);
 }
@@ -3903,10 +4156,7 @@ std::string RoleLabel(int role, const std::string& name)
 
 const char* GetViewProjectionSource()
 {
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        if (g_nativeViewProjectionValid) return "native";
-    }
+    if (LoadNativeCamera().valid) return "native";
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         if (g_freshCamera.valid) return "managed";
@@ -3920,12 +4170,10 @@ CameraDebug GetCameraDebug()
 {
     CameraDebug debug;
     debug.nativeEnabled = ConfigInstance.Player.NativeEspCamera;
-    {
-        std::lock_guard<std::mutex> lock(g_nativeCameraMutex);
-        debug.nativeValid = g_nativeViewProjectionValid;
-        debug.positionError = g_nativePositionError;
-        debug.forwardDot = g_nativeForwardDot;
-    }
+    const NativeCameraSnapshot native = LoadNativeCamera();
+    debug.nativeValid = native.valid;
+    debug.positionError = native.positionError;
+    debug.forwardDot = native.forwardDot;
     const auto snapshot = GetSnapshot();
     if (snapshot && snapshot->stampMs != 0)
         debug.snapshotAgeMs =

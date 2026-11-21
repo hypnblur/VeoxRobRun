@@ -64,10 +64,10 @@ void DrawOutlinedText(ImDrawList* dl, const ImVec2& pos, ImU32 col,
 	if (!text || !text[0] || !font) return;
 	const ImVec2 p = Snap(pos);
 	const ImU32 outline = IM_COL32(0, 0, 0, 220);
-	for (int dy = -1; dy <= 1; ++dy)
-		for (int dx = -1; dx <= 1; ++dx)
-			if (dx || dy)
-				dl->AddText(font, size, ImVec2(p.x + dx, p.y + dy), outline, text);
+	dl->AddText(font, size, ImVec2(p.x - 1.f, p.y), outline, text);
+	dl->AddText(font, size, ImVec2(p.x + 1.f, p.y), outline, text);
+	dl->AddText(font, size, ImVec2(p.x, p.y - 1.f), outline, text);
+	dl->AddText(font, size, ImVec2(p.x, p.y + 1.f), outline, text);
 	dl->AddText(font, size, p, col, text);
 }
 

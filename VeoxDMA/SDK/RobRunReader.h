@@ -201,6 +201,12 @@ bool GetFallbackViewProjection(Matrix4x4& out);
 // every consumer projects with the same answer.
 bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight);
 
+// Latches the newest view-projection matrix once at the start of a render
+// pass so every draw callback in that frame (players, world, BVH, aim) shares
+// an identical camera timestamp without re-multiplying matrices.
+void BeginRenderFrame(int screenWidth, int screenHeight);
+void EndRenderFrame();
+
 // Single role-label resolver. Role ids are hashed enums, so names come from the
 // reflection pass and the known-id fallbacks live here; the aim filter and the
 // ESP must both go through it so they cannot disagree about a target.

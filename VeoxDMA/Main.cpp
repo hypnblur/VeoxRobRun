@@ -136,9 +136,8 @@ static void TickOverlay()
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
-	if (g_attached.load(std::memory_order_acquire)) {
-		RobRunReader::RefreshCamera();
-	}
+	// Camera polling runs on RobRunReader's dedicated high-priority thread so
+	// the render thread never stalls waiting on DMA transactions.
 
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
@@ -231,9 +230,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		if (frameCount <= 3 || (frameCount % 500) == 0)
 			DLOG("Draw frame #%d", frameCount);
 		try {
+			struct FrameCameraGuard {
+				FrameCameraGuard(int w, int h) { RobRunReader::BeginRenderFrame(w, h); }
+				~FrameCameraGuard() { RobRunReader::EndRenderFrame(); }
+			};
+			const ImVec2 display = ImGui::GetIO().DisplaySize;
 			// Only draw game state while attached: during a reattach the reader
 			// is being shut down and the last snapshot is stale.
 			if (g_attached.load(std::memory_order_acquire)) {
+				FrameCameraGuard cameraGuard((int)display.x, (int)display.y);
 				DrawPlayers();
 				DrawBvhDebug();
 				if (!ConfigInstance.Overlay.BattleMode) {
@@ -242,9 +247,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 					Radar::Draw();
 					Radar::DrawFullMap();
 				}
+				Aim::Draw();
+				Aim::DrawDebug();
+			} else {
+				Aim::Draw();
+				Aim::DrawDebug();
 			}
-			Aim::Draw();
-			Aim::DrawDebug();
 			if (Overlay::MenuOpen())
 				VeoxMenu::Draw(g_attached.load(std::memory_order_acquire), GetAttachStatus());
 		} catch (const std::exception& e) {

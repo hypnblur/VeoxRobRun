@@ -738,6 +738,7 @@ void StartAimWorker()
 {
     StopAimWorker();
     StartRecoilWorker();
+    Keyboard::SetAsyncKeyPolling(true);
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
         using clock = std::chrono::steady_clock;
@@ -746,11 +747,10 @@ void StartAimWorker()
         while (!g_aimWorkerStop.load(std::memory_order_relaxed)) {
             const auto now = clock::now();
             try {
-                // Camera refresh stays at the loop rate (one scatter read); the
-                // full entity scan and the loot poke do not need 500 Hz. The
-                // write path is throttled to 16 ms and the device to 6 ms, so
-                // running the scan faster than that only burns CPU.
-                RobRunReader::RefreshCamera();
+                // Keep the game-PC key bitmap warm on the worker so the render
+                // thread never blocks on kernel DMA reads. Camera polling runs
+                // on RobRunReader's dedicated high-priority camera thread.
+                Keyboard::PollKeysAsync();
                 if (now - lastTick >= std::chrono::milliseconds(6)) {
                     lastTick = now;
                     Tick();
@@ -774,6 +774,7 @@ void StopAimWorker()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    Keyboard::SetAsyncKeyPolling(false);
 }
 
 // The reference memory aim also writes the local input model, the player
