@@ -120,6 +120,9 @@ VeoxDMA/
 │   ├── RobRunSDK.h          # Verified IL2CPP class offsets & struct definitions
 │   └── WorldEntities.h/cpp  # World loot, table traversal, container parsing
 └── UI/                  # VeoxMenu interactive settings interface
+OrbitResources/         # Resource-only DLL carrying the loot filter icon set
+tools/
+└── loot/               # Loot catalog and icon generators (see tools/loot/README.md)
 ```
 
 ---
@@ -147,6 +150,7 @@ The compiled binary will be placed in:
 Ensure the following files reside in the working directory next to `VeoxDMA.exe`:
 - `vmm.dll` & `leechcore.dll` (PCILeech DMA libraries)
 - `FTD3XX.dll` (FTDI SuperSpeed USB driver)
+- `OrbitResources.dll` (Loot filter icons, committed in `Lib/`; the build copies it next to the exe. To regenerate it see [Updating OrbitResources.dll](tools/loot/README.md#updating-orbitresourcesdll))
 - `city_colliders.bvh` (Map collider geometry for line-of-sight verification)
 - `maps/` (Radar minimap textures: `looty_bay.png`, `hangar.png`, etc.)
 

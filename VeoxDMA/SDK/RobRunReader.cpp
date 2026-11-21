@@ -2081,6 +2081,65 @@ static void UpdateInternal()
     if (!cachedBattleModel)
         cachedBattleModel = ResolveBattleModel(cachedGame);
 
+    // Unity swaps BattleModel and BattleEntitiesModel on every map load. The old
+    // objects are freed but still pass a class check, so a stale pointer looks
+    // healthy and the ESP keeps reading the previous map. Instead of a timer,
+    // follow the stable Game pointer and compare: the moment the game points at a
+    // different model, that IS the state change.
+    // Loading screens sit between maps, so a slow poll is plenty: 8 seconds.
+    static std::uint64_t lastMapCheck = 0;
+    const std::uint64_t nowTick = GetTickCount64();
+    const bool mapCheckDue = (nowTick - lastMapCheck) >= 8000;
+    if (mapCheckDue) lastMapCheck = nowTick;
+    if (cachedGame && mapCheckDue) {
+        const std::uintptr_t gameModel = ReadPtr(cachedGame + rr::Game::GameModel);
+        const std::uintptr_t freshBattle = gameModel > 0x10000
+            ? ReadPtr(gameModel + rr::GameModel::BattleModel) : 0;
+        // Hysteresis: only adopt a new model once the same pointer shows up on two
+        // consecutive updates. Without this a transient read or a fallback-resolved
+        // pointer would be treated as a map change and clear the world every frame.
+        static std::uintptr_t pendingBattle = 0;
+        static int pendingBattleHits = 0;
+        if (freshBattle > 0x10000 && freshBattle != cachedBattleModel) {
+            if (freshBattle == pendingBattle) ++pendingBattleHits;
+            else { pendingBattle = freshBattle; pendingBattleHits = 1; }
+        } else {
+            pendingBattle = 0;
+            pendingBattleHits = 0;
+        }
+        if (freshBattle > 0x10000 && freshBattle != cachedBattleModel && pendingBattleHits >= 2 &&
+            IsClass(freshBattle, "BattleModel")) {
+            DLOG("ReaderRoot: BattleModel changed 0x%llx -> 0x%llx (state change)",
+                 (unsigned long long)cachedBattleModel, (unsigned long long)freshBattle);
+            cachedBattleModel = freshBattle;
+            cachedBattleEntities = 0;
+            cachedUpdater = 0;
+            cachedLocalCharacter = 0;
+            cachedCameraModel = 0;
+            cachedLookDirectionModel = 0;
+            cachedLookDirDirect = 0;
+            cachedPlayerRotationInput = 0;
+            worldRefreshStamp = 0;
+            inventoryRefreshStamp = 0;
+            std::lock_guard<std::mutex> lock(g_worldMutex);
+            g_worldState = std::make_shared<RobRunWorld::State>();
+            g_plotState = std::make_shared<RobRunWorld::PlotState>();
+        } else if (cachedBattleModel > 0x10000 && cachedBattleEntities > 0x10000) {
+            // Same BattleModel, but the entities model under it may have been
+            // rebuilt (entering or leaving a raid without a sector change).
+            const std::uintptr_t freshEntities = ReadPtr(
+                cachedBattleModel + rr::BattleModel::BattleEntitiesModel);
+            if (freshEntities > 0x10000 && freshEntities != cachedBattleEntities &&
+                IsClass(freshEntities, "BattleEntitiesModel")) {
+                DLOG("ReaderRoot: BattleEntitiesModel changed 0x%llx -> 0x%llx",
+                     (unsigned long long)cachedBattleEntities, (unsigned long long)freshEntities);
+                cachedBattleEntities = freshEntities;
+                cachedLocalCharacter = 0;
+                worldRefreshStamp = 0;
+            }
+        }
+    }
+
     if (!cachedBattleModel) {
         {
             std::lock_guard<std::mutex> lock(g_worldMutex);
