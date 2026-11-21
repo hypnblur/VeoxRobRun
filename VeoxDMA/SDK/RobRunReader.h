@@ -106,6 +106,8 @@ struct Snapshot {
     std::uintptr_t lookDirectionModel = 0;
     std::uintptr_t lookDirDirect = 0;
     std::uintptr_t playerRotationInput = 0;
+    std::uintptr_t battleEntities = 0;
+    std::uintptr_t battleEntitiesUpdater = 0;
     std::uint32_t failureCount = 0;
     // Coverage diagnostics: how many players actually produced drawable bones
     // or a usable named aim pose this pass. These make "some skeletons do not
