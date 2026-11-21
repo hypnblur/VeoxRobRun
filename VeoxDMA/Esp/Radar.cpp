@@ -1507,6 +1507,7 @@ void DrawInGameMapOverlay()
 		ImU32 color = IM_COL32(215, 220, 228, 220);
 		Vector3 driverPos{};
 		bool hasDriverPos = false;
+		std::vector<std::string> occupantNames;
 	};
 	std::vector<VehicleOccupantInfo> vehOcc(vehCount);
 	std::vector<int> playerMatchedVeh(snapshot->entities.size(), -1);
@@ -1572,6 +1573,8 @@ void DrawInGameMapOverlay()
 					occ.localOccupied = true;
 					s_lastVehDriver.erase(mapVehicles[static_cast<std::size_t>(matchedIdx)].id);
 				} else {
+					if (!ent.nicknameUtf8.empty())
+						occ.occupantNames.push_back(ent.nicknameUtf8);
 					const int prio = RolePriority(ent.role, ent.roleName, isTeammate);
 					if (!occ.occupied || prio > occ.priority) {
 						occ.occupied = true;
@@ -1679,16 +1682,26 @@ void DrawInGameMapOverlay()
 				DrawCarIcon(dl, pt, vehScale, vehCol);
 			}
 
-			// Show driver/owner name on the fullscreen ('M') map for moving/driven vehicles
-			// whose driver isn't already drawn as a live player arrow.
-			if (isFull && cfg.InGameMapPlayerNames && activeRemoteVeh && font && !remoteLabel.empty()) {
-				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, remoteLabel.c_str());
-				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * vehScale - sz.y - 2.f);
-				dl->AddRectFilled(
-					ImVec2(textPos.x - 5.f, textPos.y - 2.f),
-					ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
-					IM_COL32(26, 28, 32, 225), 3.5f);
-				Esp::DrawOutlinedText(dl, textPos, vehCol, font, fontSize, remoteLabel.c_str());
+			// Show occupant name(s) on the fullscreen ('M') map above the car/heli icon.
+			if (isFull && cfg.InGameMapPlayerNames && font) {
+				std::string label;
+				if (occ.occupied && !occ.occupantNames.empty()) {
+					for (std::size_t ni = 0; ni < occ.occupantNames.size(); ++ni) {
+						if (ni > 0) label += ", ";
+						label += occ.occupantNames[ni];
+					}
+				} else if (activeRemoteVeh && !remoteLabel.empty()) {
+					label = remoteLabel;
+				}
+				if (!label.empty()) {
+					const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, label.c_str());
+					const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * vehScale - sz.y - 2.f);
+					dl->AddRectFilled(
+						ImVec2(textPos.x - 5.f, textPos.y - 2.f),
+						ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
+						IM_COL32(26, 28, 32, 225), 3.5f);
+					Esp::DrawOutlinedText(dl, textPos, vehCol, font, fontSize, label.c_str());
+				}
 			}
 		}
 	}
@@ -1716,11 +1729,24 @@ void DrawInGameMapOverlay()
 
 			const ImU32 col = GetInGameMapRoleColor(ent.role, ent.roleName, isTeammate);
 
-			// If player is driving a vehicle that wasn't matched in the world list
-			// yet (e.g. world worker hasn't ticked), still draw a role-colored vehicle
-			// icon underneath their arrow.
-			if (cfg.InGameMapVehicles && ent.inVehicle && playerMatchedVeh[ei] < 0) {
-				DrawCarIcon(dl, pt, scale, col);
+			// When vehicle icons are enabled, players inside a vehicle are represented
+			// cleanly by their role-colored car/heli icon (with occupant name(s) above)
+			// instead of drawing an arrow on top of the vehicle.
+			const bool inVeh = ent.inVehicle || (playerMatchedVeh[ei] >= 0);
+			if (cfg.InGameMapVehicles && inVeh) {
+				if (playerMatchedVeh[ei] < 0) {
+					DrawCarIcon(dl, pt, scale, col);
+					if (isFull && cfg.InGameMapPlayerNames && font && !ent.nicknameUtf8.empty()) {
+						const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, ent.nicknameUtf8.c_str());
+						const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * scale - sz.y - 2.f);
+						dl->AddRectFilled(
+							ImVec2(textPos.x - 5.f, textPos.y - 2.f),
+							ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
+							IM_COL32(26, 28, 32, 225), 3.5f);
+						Esp::DrawOutlinedText(dl, textPos, col, font, fontSize, ent.nicknameUtf8.c_str());
+					}
+				}
+				continue;
 			}
 
 			const float arrowR = (isFull ? 9.5f : 8.2f) * scale;
