@@ -668,6 +668,7 @@ static void TickInstantLoot()
 void StartAimWorker()
 {
     StopAimWorker();
+    StartRecoilWorker();
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
         using clock = std::chrono::steady_clock;
@@ -698,6 +699,7 @@ void StartAimWorker()
 
 void StopAimWorker()
 {
+    StopRecoilWorker();
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
@@ -1298,19 +1300,214 @@ void Tick()
 
 static std::uintptr_t g_cachedPlayerClient = 0;
 static std::uint64_t g_lastRecoilGen = 0;
-static float    g_lastPitch = 0.f;
-static bool     g_pitchValid = false;
-static int      g_lastShotIndex = -1;
-static float    g_kickBudget = 0.f;
-static constexpr float kKickBudgetPerShot = 0.0175f; // ~1 degree
+
+// ---- No Recoil: per-shot kick budget (dedicated worker) -------------------
+static std::atomic<bool> g_recoilStop{true};
+static std::thread g_recoilThread;
+
+struct ShotBudget {
+    float budget;
+    float initialBudget;
+    std::chrono::steady_clock::time_point shotTime;
+};
+
+static constexpr int kMaxBudgets = 8;
+static constexpr auto kShotWindow = std::chrono::microseconds(70000);
+static constexpr float kKickNoise = 1e-5f;
+static constexpr float kInitKick = 0.01745f;  // 1 deg
+static constexpr float kMinKick  = 0.00524f;  // 0.3 deg
+static constexpr float kMaxKick  = 0.03491f;  // 2.0 deg
+
+static std::uint64_t g_rcSessionGen = 0;
+static std::uintptr_t g_rcClient = 0;
+static std::uint64_t g_rcLastClientCheck = 0;
+static int g_rcLastShotIndex = -1;
+static bool g_rcWasFiring = false;
+static float g_rcLastPitch = 0.f;
+static bool g_rcPitchValid = false;
+static ShotBudget g_rcBudgets[kMaxBudgets];
+static int g_rcBudgetCount = 0;
+static float g_rcKickEstimate = kInitKick;
+static float g_rcBurstCancelled = 0.f;
+static int g_rcBurstShots = 0;
+static int g_rcBurstWrites = 0;
+
+static void ExpireBudgets()
+{
+    const auto now = std::chrono::steady_clock::now();
+    while (g_rcBudgetCount > 0) {
+        auto& oldest = g_rcBudgets[0];
+        if (now - oldest.shotTime < kShotWindow) break;
+        const float used = oldest.initialBudget - oldest.budget;
+        if (oldest.budget <= 0.f)
+            g_rcKickEstimate *= 1.10f;
+        else
+            g_rcKickEstimate += 0.25f * (used - g_rcKickEstimate);
+        g_rcKickEstimate = std::clamp(g_rcKickEstimate, kMinKick, kMaxKick);
+        for (int i = 1; i < g_rcBudgetCount; i++)
+            g_rcBudgets[i - 1] = g_rcBudgets[i];
+        g_rcBudgetCount--;
+    }
+}
+
+static void PushBudget()
+{
+    if (g_rcBudgetCount >= kMaxBudgets) {
+        for (int i = 1; i < g_rcBudgetCount; i++)
+            g_rcBudgets[i - 1] = g_rcBudgets[i];
+        g_rcBudgetCount--;
+    }
+    const float b = g_rcKickEstimate * 1.15f;
+    g_rcBudgets[g_rcBudgetCount++] = {b, b, std::chrono::steady_clock::now()};
+}
+
+static void TickRecoil()
+{
+    if (!ConfigInstance.Aim.NoRecoil) {
+        g_rcPitchValid = false;
+        return;
+    }
+
+    const auto snapshot = RobRunReader::GetSnapshot();
+    if (!snapshot || snapshot->battleModel <= 0x10000) return;
+
+    if (snapshot->sessionGeneration != g_rcSessionGen) {
+        g_rcClient = 0;
+        g_rcSessionGen = snapshot->sessionGeneration;
+        g_rcPitchValid = false;
+        g_rcLastShotIndex = -1;
+        g_rcBudgetCount = 0;
+        g_rcKickEstimate = kInitKick;
+        g_rcWasFiring = false;
+        g_rcBurstCancelled = 0.f;
+        g_rcBurstShots = 0;
+        g_rcBurstWrites = 0;
+    }
+
+    const std::uint64_t now = GetTickCount64();
+    if (g_rcClient <= 0x10000 || now - g_rcLastClientCheck > 500) {
+        g_rcLastClientCheck = now;
+        const auto battleEnts = RobRunMemory::ReadPtr(
+            snapshot->battleModel + rr::BattleModel::BattleEntitiesModel);
+        if (battleEnts <= 0x10000) return;
+        const auto localPlayer = RobRunMemory::ReadPtr(
+            battleEnts + rr::BattleEntitiesModel::LocalPlayerEntityModel);
+        if (localPlayer <= 0x10000) return;
+        g_rcClient = RobRunMemory::ReadPtr(
+            localPlayer + rr::PlayerEntityModel::Client);
+        if (g_rcClient <= 0x10000) return;
+    }
+
+    const std::uintptr_t rotInput = snapshot->playerRotationInput;
+    if (rotInput <= 0x10000 || g_rcClient <= 0x10000) return;
+
+    const std::uintptr_t fireModel = RobRunMemory::ReadPtr(
+        g_rcClient + rr::CharacterClientModel::FireModel);
+    if (fireModel <= 0x10000) return;
+
+    // Uncached reads — do not use ReadBytes (cached, up to 600ms stale)
+    struct { std::uint8_t isFiring; std::uint8_t hasShot; std::uint8_t pad[2]; std::int32_t shotIndex; } fire{};
+    float pitch = 0.f;
+    if (!RobRunMemory::ReadBytesFresh(
+            fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire)))
+        return;
+    if (!RobRunMemory::ReadBytesFresh(
+            rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch)))
+        return;
+
+    if (!std::isfinite(pitch) || std::fabs(pitch) > 1.75f) {
+        g_rcPitchValid = false;
+        return;
+    }
+
+    if (!g_rcPitchValid) {
+        g_rcLastPitch = pitch;
+        g_rcLastShotIndex = fire.shotIndex;
+        g_rcPitchValid = true;
+        g_rcWasFiring = fire.isFiring != 0;
+        return;
+    }
+
+    ExpireBudgets();
+
+    // Detect new shot: ShotIndex changed and either increased, or weapon is
+    // firing/has-shot (a reset to -1 after firing is not a shot).
+    if (fire.shotIndex != g_rcLastShotIndex) {
+        const bool isNewShot =
+            fire.shotIndex > g_rcLastShotIndex ||
+            (fire.shotIndex >= 0 && (fire.isFiring || fire.hasShot));
+        if (isNewShot) {
+            PushBudget();
+            g_rcBurstShots++;
+        }
+        g_rcLastShotIndex = fire.shotIndex;
+    }
+
+    // Cancel kick: negative pitch delta (view goes up) during active budget
+    const float delta = pitch - g_rcLastPitch;
+    if (delta < -kKickNoise && g_rcBudgetCount > 0) {
+        float toCancel = -delta;
+        float corrected = 0.f;
+        for (int i = 0; i < g_rcBudgetCount && toCancel > 0.f; i++) {
+            const float take = (std::min)(toCancel, g_rcBudgets[i].budget);
+            g_rcBudgets[i].budget -= take;
+            toCancel -= take;
+            corrected += take;
+        }
+        if (corrected > 0.f) {
+            const float newPitch = pitch + corrected;
+            TargetProcess.Write(
+                rotInput + rr::PlayerRotationInputModel::Pitch, newPitch);
+            g_rcLastPitch = newPitch;
+            g_rcBurstCancelled += corrected;
+            g_rcBurstWrites++;
+        } else {
+            g_rcLastPitch = pitch;
+        }
+    } else {
+        g_rcLastPitch = pitch;
+    }
+
+    // Burst diagnostics (once firing stops and all windows expire)
+    const bool firing = fire.isFiring != 0;
+    if (!firing && g_rcWasFiring && g_rcBudgetCount == 0 && g_rcBurstShots > 0) {
+        std::printf("[NoRecoil] burst: %d shots, kick cancelled %.3f deg, "
+                    "%d writes, kick/shot %.3f deg\n",
+            g_rcBurstShots,
+            g_rcBurstCancelled * 57.2957795f,
+            g_rcBurstWrites,
+            g_rcKickEstimate * 57.2957795f);
+        g_rcBurstCancelled = 0.f;
+        g_rcBurstShots = 0;
+        g_rcBurstWrites = 0;
+    }
+    g_rcWasFiring = firing;
+}
+
+void StartRecoilWorker()
+{
+    StopRecoilWorker();
+    g_recoilStop.store(false, std::memory_order_relaxed);
+    g_recoilThread = std::thread([] {
+        while (!g_recoilStop.load(std::memory_order_relaxed)) {
+            try { TickRecoil(); } catch (...) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+}
+
+void StopRecoilWorker()
+{
+    g_recoilStop.store(true, std::memory_order_relaxed);
+    if (g_recoilThread.joinable())
+        g_recoilThread.join();
+}
 
 void TickRecoilSpread()
 {
     const auto& cfg = ConfigInstance.Aim;
-    if (!cfg.NoRecoil && !cfg.NoSpread && !cfg.DynamicRecoilCompensation) {
-        g_pitchValid = false;
+    if (!cfg.NoSpread && !cfg.DynamicRecoilCompensation)
         return;
-    }
 
     const auto snapshot = RobRunReader::GetSnapshot();
     if (!snapshot || snapshot->battleModel <= 0x10000) return;
@@ -1318,9 +1515,6 @@ void TickRecoilSpread()
     if (snapshot->sessionGeneration != g_lastRecoilGen) {
         g_cachedPlayerClient = 0;
         g_lastRecoilGen = snapshot->sessionGeneration;
-        g_pitchValid = false;
-        g_lastShotIndex = -1;
-        g_kickBudget = 0.f;
     }
 
     // Revalidate client pointer every 500ms (respawn can free old one)
@@ -1339,55 +1533,8 @@ void TickRecoilSpread()
         if (g_cachedPlayerClient <= 0x10000) return;
     }
 
-    // --- No Recoil: cancel pitch kick via PlayerRotationInput ---
-    if (cfg.NoRecoil) {
-        const std::uintptr_t rotInput = snapshot->playerRotationInput;
-        if (rotInput > 0x10000) {
-            const std::uintptr_t fireModel = RobRunMemory::ReadPtr(
-                g_cachedPlayerClient + rr::CharacterClientModel::FireModel);
-            if (fireModel > 0x10000) {
-                struct { std::uint8_t isFiring; std::uint8_t hasShot; std::uint8_t pad[2]; std::int32_t shotIndex; } fire{};
-                RobRunMemory::ReadBytes(fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire));
-
-                float pitch = 0.f;
-                RobRunMemory::ReadBytes(rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
-
-                if (std::isfinite(pitch) && std::fabs(pitch) < 1.75f) {
-                    if (!g_pitchValid) {
-                        g_lastPitch = pitch;
-                        g_lastShotIndex = fire.shotIndex;
-                        g_pitchValid = true;
-                    } else {
-                        if (fire.shotIndex != g_lastShotIndex) {
-                            g_kickBudget += kKickBudgetPerShot;
-                            g_lastShotIndex = fire.shotIndex;
-                        }
-                        if (fire.isFiring) {
-                            const float delta = pitch - g_lastPitch;
-                            if (delta < -1e-5f && g_kickBudget > 0.f) {
-                                float correction = -delta;
-                                if (correction > g_kickBudget) correction = g_kickBudget;
-                                g_kickBudget -= correction;
-                                const float newPitch = pitch + correction;
-                                TargetProcess.Write(rotInput + rr::PlayerRotationInputModel::Pitch,
-                                    newPitch);
-                                g_lastPitch = newPitch;
-                            } else {
-                                g_lastPitch = pitch;
-                            }
-                        } else {
-                            g_lastPitch = pitch;
-                            g_kickBudget = 0.f;
-                        }
-                    }
-                } else {
-                    g_pitchValid = false;
-                }
-            }
-        }
-    }
     // --- Dynamic Recoil: scale RecoilOffset (Vector2, 8 bytes) ---
-    else if (cfg.DynamicRecoilCompensation) {
+    if (cfg.DynamicRecoilCompensation) {
         const std::uintptr_t recoilModel = RobRunMemory::ReadPtr(
             g_cachedPlayerClient + rr::PlayerClient::Recoil);
         if (recoilModel > 0x10000) {
