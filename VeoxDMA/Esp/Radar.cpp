@@ -1693,40 +1693,13 @@ void DrawInGameMapOverlay()
 		}
 	}
 
-	// 3. Players (sleek directional chevron arrows; names + last-known ghosts on fullscreen map)
+	// 3. Players (sleek directional chevron arrows; names on fullscreen map only)
 	if (cfg.InGameMapPlayers)
 	{
-		struct LastKnownPlayer {
-			Vector3 position{};
-			float yaw = 0.f;
-			bool hasYaw = false;
-			int role = 0;
-			std::string roleName;
-			std::string nicknameUtf8;
-			bool isTeammate = false;
-			std::uint64_t lastSeenMs = 0;
-		};
-		static std::unordered_map<std::int32_t, LastKnownPlayer> s_lastKnown;
-		static std::uint64_t s_lastSessionGen = 0;
-
-		const std::uint64_t nowMs = GetTickCount64();
-		if (snapshot->sessionGeneration != s_lastSessionGen) {
-			s_lastSessionGen = snapshot->sessionGeneration;
-			s_lastKnown.clear();
-		}
-
-		std::unordered_set<std::int32_t> liveIds;
-		liveIds.reserve(snapshot->entities.size());
-
 		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
 			const auto& ent = snapshot->entities[ei];
-			if (ent.entityId == localId)
+			if (ent.entityId == localId || ent.isDead)
 				continue;
-			if (ent.isDead) {
-				s_lastKnown.erase(ent.entityId);
-				continue;
-			}
-			liveIds.insert(ent.entityId);
 
 			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
 			if (pcfg.HideTeammates && isTeammate)
@@ -1736,21 +1709,6 @@ void DrawInGameMapOverlay()
 			const float lookHorizSq = ent.lookDirection.x * ent.lookDirection.x + ent.lookDirection.z * ent.lookDirection.z;
 			if (std::isfinite(lookHorizSq) && lookHorizSq > 0.01f)
 				entYaw = std::atan2(ent.lookDirection.x, ent.lookDirection.z);
-
-			if (std::isfinite(ent.position.x) && std::isfinite(ent.position.z) &&
-				(ent.position.x != 0.f || ent.position.z != 0.f))
-			{
-				auto& lk = s_lastKnown[ent.entityId];
-				lk.position = ent.position;
-				lk.yaw = entYaw;
-				lk.hasYaw = std::isfinite(entYaw);
-				lk.role = ent.role;
-				lk.roleName = ent.roleName;
-				if (!ent.nicknameUtf8.empty())
-					lk.nicknameUtf8 = ent.nicknameUtf8;
-				lk.isTeammate = isTeammate;
-				lk.lastSeenMs = nowMs;
-			}
 
 			ImVec2 pt{};
 			if (!worldToMap(ent.position, pt))
@@ -1786,62 +1744,6 @@ void DrawInGameMapOverlay()
 					IM_COL32(26, 28, 32, 225), 3.5f);
 				Esp::DrawOutlinedText(dl, textPos, col, font, fontSize, ent.nicknameUtf8.c_str());
 			}
-		}
-
-		// On the fullscreen ('M') map, render last-known positions of players who
-		// left the server's replication range (faded over 90 s) so you keep
-		// long-range map awareness beyond the client network bubble.
-		constexpr std::uint64_t kLastKnownMaxAgeMs = 90'000ULL;
-		for (auto it = s_lastKnown.begin(); it != s_lastKnown.end(); ) {
-			const std::uint64_t ageMs = (nowMs >= it->second.lastSeenMs) ? (nowMs - it->second.lastSeenMs) : 0;
-			if (ageMs > kLastKnownMaxAgeMs) {
-				it = s_lastKnown.erase(it);
-				continue;
-			}
-			if (isFull && !liveIds.count(it->first) && !trackedByVehicleEntityIds.count(it->first)) {
-				const auto& lk = it->second;
-				if (!(pcfg.HideTeammates && lk.isTeammate)) {
-					ImVec2 pt{};
-					if (worldToMap(lk.position, pt)) {
-						// On a DMA fuser, low alpha blends with the black overlay background
-						// (making colors muddy/dark and exposing internal triangle AA seams).
-						// Keep alpha=255 and desaturate toward a soft grey instead.
-						const float t = std::clamp(static_cast<float>(ageMs) / static_cast<float>(kLastKnownMaxAgeMs), 0.f, 1.f);
-						const float mix = 0.35f + 0.35f * t; // 35% -> 70% muted grey as age grows
-						const ImU32 baseCol = GetInGameMapRoleColor(lk.role, lk.roleName, lk.isTeammate);
-						const int br = static_cast<int>((baseCol >> IM_COL32_R_SHIFT) & 0xFF);
-						const int bg = static_cast<int>((baseCol >> IM_COL32_G_SHIFT) & 0xFF);
-						const int bb = static_cast<int>((baseCol >> IM_COL32_B_SHIFT) & 0xFF);
-						const int mr = static_cast<int>(br * (1.f - mix) + 155.f * mix);
-						const int mg = static_cast<int>(bg * (1.f - mix) + 160.f * mix);
-						const int mb = static_cast<int>(bb * (1.f - mix) + 168.f * mix);
-						const ImU32 mutedCol = IM_COL32(mr, mg, mb, 255);
-						const float arrowR = 8.5f * scale;
-						if (lk.hasYaw) {
-							DrawPlayerArrow(dl, pt, lk.yaw - rotRad, arrowR, mutedCol);
-						} else {
-							dl->AddCircleFilled(pt, 5.2f * scale, mutedCol, 12);
-							dl->AddCircle(pt, 5.2f * scale, IM_COL32(26, 28, 32, 255), 12, 1.4f);
-						}
-						if (cfg.InGameMapPlayerNames && font) {
-							char label[96];
-							const int ageSec = static_cast<int>(ageMs / 1000ULL);
-							if (!lk.nicknameUtf8.empty())
-								std::snprintf(label, sizeof(label), "%s (%ds)", lk.nicknameUtf8.c_str(), ageSec);
-							else
-								std::snprintf(label, sizeof(label), "(%ds)", ageSec);
-							const ImVec2 sz = font->CalcTextSizeA(fontSize * 0.92f, FLT_MAX, 0.f, label);
-							const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - arrowR - sz.y - 3.f);
-							dl->AddRectFilled(
-								ImVec2(textPos.x - 4.f, textPos.y - 1.5f),
-								ImVec2(textPos.x + sz.x + 4.f, textPos.y + sz.y + 1.5f),
-								IM_COL32(26, 28, 32, 235), 3.5f);
-							Esp::DrawOutlinedText(dl, textPos, mutedCol, font, fontSize * 0.92f, label);
-						}
-					}
-				}
-			}
-			++it;
 		}
 	}
 
