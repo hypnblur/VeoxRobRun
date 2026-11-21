@@ -1438,29 +1438,62 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
 {
     if (roleWrapper <= 0x10000) return;
 
-    const auto it = g_roleCache.find(roleWrapper);
-    if (it != g_roleCache.end() && it->second.resolved) {
-        if (!it->second.roleName.empty()) entity.roleName = it->second.roleName;
-        if (it->second.roleId != 0) entity.role = it->second.roleId;
-        return;
+    // Never cache by roleWrapper itself: the wrapper object stays at the same
+    // address while its inner RoleDescription* (+0x18) mutates live when a
+    // Civilian becomes a Criminal. Read the inner value fresh and cache only
+    // by the immutable RoleDescription* singleton pointer.
+    std::uintptr_t innerPtr = 0;
+    if (!TargetProcess.ReadFresh(roleWrapper + rr::ReferenceData::Value, &innerPtr, sizeof(innerPtr)))
+        innerPtr = ReadPtr(roleWrapper + rr::ReferenceData::Value);
+
+    if (innerPtr > 0x10000 && innerPtr < 0x7FFFFFFFFFFFull) {
+        const auto it = g_roleCache.find(innerPtr);
+        if (it != g_roleCache.end() && it->second.resolved) {
+            if (!it->second.roleName.empty()) entity.roleName = it->second.roleName;
+            if (it->second.roleId != 0) entity.role = it->second.roleId;
+            return;
+        }
+
+        int roleId = 0;
+        std::string roleName;
+        if (ResolveRoleFromObject(innerPtr, roleId, roleName)) {
+            if (!roleName.empty()) entity.roleName = roleName;
+            if (roleId != 0) entity.role = roleId;
+            if (!entity.roleName.empty()) {
+                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true };
+                return;
+            }
+        }
+
+        // Direct fallback: RoleDescription + 0x10 -> Name string
+        const std::uintptr_t nameStr = ReadPtr(innerPtr + rr::Description::Name);
+        if (nameStr > 0x10000) {
+            std::wstring w;
+            if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
+                const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                if (!norm.empty()) {
+                    entity.roleName = norm;
+                    g_roleCache[innerPtr] = RoleCacheEntry{ roleId, norm, true };
+                    return;
+                }
+            }
+        }
+
+        if (Il2Cpp::ClassOf(innerPtr) != 0) {
+            if (roleId != 0 || !roleName.empty())
+                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true };
+            return;
+        }
     }
 
+    // Fallback for wrappers that store a primitive int32 role (never cached by wrapper).
     int roleId = 0;
     std::string roleName;
     if (ResolveRoleFromObject(roleWrapper, roleId, roleName)) {
         if (!roleName.empty()) entity.roleName = roleName;
         if (roleId != 0) entity.role = roleId;
-        if (!entity.roleName.empty()) {
-            g_roleCache[roleWrapper] = RoleCacheEntry{ roleId, roleName, true };
+        if (!entity.roleName.empty())
             return;
-        }
-    }
-
-    const std::uintptr_t innerPtr = ReadPtr(roleWrapper + rr::ReferenceData::Value);
-    if (innerPtr > 0x10000 && Il2Cpp::ClassOf(innerPtr) != 0) {
-        if (roleId != 0 || !roleName.empty())
-            g_roleCache[roleWrapper] = RoleCacheEntry{ roleId, roleName, true };
-        return;
     }
 
     std::int32_t role = 0;
@@ -1471,10 +1504,6 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
         } else if (role > 0 && role < 100000) {
             entity.role = role;
         }
-    }
-
-    if (entity.role != 0 || !entity.roleName.empty()) {
-        g_roleCache[roleWrapper] = RoleCacheEntry{ entity.role, entity.roleName, true };
     }
 }
 
