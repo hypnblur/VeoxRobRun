@@ -20,6 +20,7 @@ struct EntityData {
     // True when the reader matched this entity against the local party's
     // member ids. Unresolved party data leaves every entity false.
     bool isPartyMember = false;
+    bool isClanMate = false;
     Vector3 position{};
     Vector3 lookDirection{};
     float pitch = 0.f;

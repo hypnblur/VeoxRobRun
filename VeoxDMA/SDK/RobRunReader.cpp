@@ -3513,6 +3513,21 @@ static void UpdateInternal()
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=G (entity done)", uiCount);
         }
         if (uiCount <= 3) DLOG("UpdateInternal #%d: entity loop done, %zu entities", uiCount, entities.size());
+
+        // Mark clan mates: match each entity's clan tag against the local player's.
+        std::wstring localClan;
+        for (const auto& e : entities) {
+            if (e.entityId == localEntityId && !e.clanTag.empty()) {
+                localClan = e.clanTag;
+                break;
+            }
+        }
+        if (!localClan.empty()) {
+            for (auto& e : entities) {
+                if (e.entityId != localEntityId && e.clanTag == localClan)
+                    e.isClanMate = true;
+            }
+        }
     } else {
         if (++entityDictFailures >= 50) {
             cachedBattleEntities = 0;

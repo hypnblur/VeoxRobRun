@@ -538,7 +538,7 @@ void DrawPlayers()
 			continue;
 		if (ent.isDead)
 			continue;
-		if (pcfg.HideTeammates && ent.isPartyMember)
+		if (pcfg.HideTeammates && (ent.isPartyMember || ent.isClanMate))
 			continue;
 
 		const Vector3 entPos = ent.position;
