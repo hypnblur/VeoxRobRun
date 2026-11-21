@@ -276,6 +276,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 	// the static destructor to terminate on.
 	Aim::StopAimWorker();
 	StopAttachLoop();
+	SkinChanger::Stop();
 	RobRunReader::Shutdown();
 	return result;
 }

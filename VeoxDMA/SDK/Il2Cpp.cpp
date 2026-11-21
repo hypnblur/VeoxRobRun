@@ -460,7 +460,7 @@ std::vector<Field> Fields(std::uintptr_t klass, bool includeParents)
         klass = ReadPtr(klass + rr::Klass::parent);
     }
 
-    if (!out.empty() && traversalComplete) {
+    if (traversalComplete) {
         std::lock_guard<std::mutex> lock(g_fieldsCacheMutex);
         g_fieldsCache[cacheKey] = out;
     }
@@ -469,7 +469,21 @@ std::vector<Field> Fields(std::uintptr_t klass, bool includeParents)
 
 bool FindField(std::uintptr_t klass, const char* name, Field& out, bool includeParents)
 {
-    if (!name) return false;
+    if (!name || !ValidPtr(klass)) return false;
+    const std::uint64_t cacheKey = static_cast<std::uint64_t>(klass) ^ (includeParents ? 1ull : 0ull);
+    {
+        std::lock_guard<std::mutex> lock(g_fieldsCacheMutex);
+        auto it = g_fieldsCache.find(cacheKey);
+        if (it != g_fieldsCache.end()) {
+            for (const auto& field : it->second) {
+                if (field.name == name) {
+                    out = field;
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
     const auto fields = Fields(klass, includeParents);
     for (const auto& field : fields) {
         if (field.name == name) {

@@ -24,10 +24,10 @@ static std::uintptr_t gaBase = 0;
 static std::uintptr_t upBase = 0;
 
 static std::uintptr_t cachedGame = 0;
-static std::uintptr_t cachedBattleModel = 0;
-static std::uintptr_t cachedBattleEntities = 0;
+static std::atomic<std::uintptr_t> cachedBattleModel{ 0 };
+static std::atomic<std::uintptr_t> cachedBattleEntities{ 0 };
 static std::uintptr_t cachedCameraModel = 0;
-static std::uintptr_t cachedLocalCharacter = 0;
+static std::atomic<std::uintptr_t> cachedLocalCharacter{ 0 };
 static std::uintptr_t cachedLookDirectionModel = 0;
 static std::uintptr_t cachedLookDirDirect = 0;
 static std::uintptr_t cachedPlayerRotationInput = 0;
@@ -37,7 +37,7 @@ static std::uintptr_t cachedUpdater = 0;
 // bumps the generation so memory aim can stop writing until the new objects
 // have been re-resolved.
 static int32_t localEntityId = -1;
-static std::uint64_t sessionGeneration = 0;
+static std::atomic<std::uint64_t> sessionGeneration{ 0 };
 static std::uint64_t sessionChangedMs = 0;
 static std::uintptr_t lastBattleModel = 0;
 static std::uintptr_t lastBattleEntities = 0;
@@ -2449,8 +2449,8 @@ static void UpdateInternal()
         }
 
         if (!needResolve.empty()) {
-            auto sc = TargetProcess.CreateScatterHandleCached();
-            if (sc) {
+            Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+            if (sc.handle) {
                 for (auto idx : needResolve) {
                     TargetProcess.AddScatterReadRequest(sc,
                         pre[idx].entityModel + rr::BattleCharacterEntityModel::Slots,
@@ -2466,7 +2466,6 @@ static void UpdateInternal()
                         &pre[idx].simulatedModel, sizeof(std::uintptr_t));
                 }
                 TargetProcess.ExecuteScatterReadCached(sc);
-                TargetProcess.CloseScatterHandle(sc);
             }
         }
 
@@ -2530,15 +2529,14 @@ static void UpdateInternal()
         }
 
         if (!needTransform.empty()) {
-            auto sc = TargetProcess.CreateScatterHandleCached();
-            if (sc) {
+            Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+            if (sc.handle) {
                 for (auto idx : needTransform)
                     TargetProcess.AddScatterReadRequest(sc,
                         work[idx].characterModel +
                             rr::BattleCharacterModel::CharacterTransformModel,
                         &work[idx].transform, sizeof(std::uintptr_t));
                 TargetProcess.ExecuteScatterReadCached(sc);
-                TargetProcess.CloseScatterHandle(sc);
             }
             for (auto idx : needTransform) {
                 if (work[idx].transform > 0x10000) {
@@ -2590,8 +2588,8 @@ static void UpdateInternal()
         // so skeletons are sampled at the same instant as positions.
         // ---------------------------------------------------------------
         if (!work.empty()) {
-            auto scatter = TargetProcess.CreateScatterHandle();
-            if (scatter) {
+            Memory::ScopedScatter scatter(TargetProcess);
+            if (scatter.handle) {
                 for (auto& w : work) {
                     TargetProcess.AddScatterReadRequest(scatter,
                         w.blockAddress, &w.block, sizeof(TransformBlock));
@@ -2603,7 +2601,6 @@ static void UpdateInternal()
                     }
                 }
                 TargetProcess.ExecuteReadScatter(scatter);
-                TargetProcess.CloseScatterHandle(scatter);
             }
         }
 
@@ -2843,8 +2840,8 @@ static void UpdateInternal()
         }
 
         if (seCount > 0) {
-            auto sc = TargetProcess.CreateScatterHandleCached();
-            if (sc) {
+            Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+            if (sc.handle) {
                 // Phase 1: characterModel-level pointers
                 for (int i = 0; i < seCount; ++i) {
                     auto& s = se[i];
@@ -2974,7 +2971,6 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 4 (seCount=%d)", seCount);
-                TargetProcess.CloseScatterHandle(sc);
             }
 
             // Distribute scatter results into detail cache

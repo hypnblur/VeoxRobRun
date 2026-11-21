@@ -586,14 +586,10 @@ static void TickInstantLoot()
         const float progress = RobRunMemory::ReadFloat(
             dialog + rr::ProlongedInteractionDialogModel::Progress);
         if (progress > 0.01f && progress < 0.99f) {
-            float done = 1.0f;
-            Memory::ScopedScatter sc(TargetProcess);
-            if (sc.handle) {
-                TargetProcess.AddScatterWriteRequest(sc,
-                    dialog + rr::ProlongedInteractionDialogModel::Progress,
-                    &done, sizeof(done));
-                TargetProcess.ExecuteWriteScatter(sc);
-            }
+            const float done = 1.0f;
+            TargetProcess.Write(
+                dialog + rr::ProlongedInteractionDialogModel::Progress,
+                done);
         }
     }
 
@@ -606,13 +602,9 @@ static void TickInstantLoot()
         const float endTs = RobRunMemory::ReadFloat(
             delayed + rr::DelayedUseActionModel::EndTs);
         if (endTs > startTs && startTs > 0.f) {
-            Memory::ScopedScatter sc(TargetProcess);
-            if (sc.handle) {
-                TargetProcess.AddScatterWriteRequest(sc,
-                    delayed + rr::DelayedUseActionModel::EndTs,
-                    &startTs, sizeof(startTs));
-                TargetProcess.ExecuteWriteScatter(sc);
-            }
+            TargetProcess.Write(
+                delayed + rr::DelayedUseActionModel::EndTs,
+                startTs);
         }
     }
 
