@@ -41,7 +41,7 @@ void OverlayNotify::Draw()
 	// ---- feature status window --------------------------------------------
 	// The menu draws its own info bar in the same corner, so hide this one
 	// while the menu is open.
-	if (!Overlay::MenuOpen())
+	if (!Overlay::MenuOpen() && ConfigInstance.Overlay.StatusPanel)
 	{
 		const PlayerConfig& cfg = ConfigInstance.Player;
 		StatusEntry entries[] = {
