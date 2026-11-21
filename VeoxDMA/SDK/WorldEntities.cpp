@@ -44,6 +44,8 @@ const char* KindName(Kind kind)
     case Kind::MoneyWorkbench:         return "Money Workbench";
     case Kind::SecurityAlarm:          return "Security Alarm";
     case Kind::LocationSecurityAlarm:  return "Security Alarm";
+    case Kind::SecurityPanel:          return "Alarm Panel";
+    case Kind::MetalDetector:          return "Metal Detector";
     case Kind::FirstAidCabinet:        return "First Aid";
     case Kind::CryptoWorkbench:        return "Crypto Bench";
     case Kind::VehicleTrunk:           return "Vehicle Trunk";
@@ -827,14 +829,32 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     // --- Security, First Aid, Crypto & Trunks -------------------------
     AddDictionary(world, rr::WorldEntitiesModel::SecurityAlarms, Kind::SecurityAlarm,
         [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, 0x10, position) ||
-                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+            return ReadDescriptionPosition(model, 0x28, 0x30, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position) ||
+                   ReadInlineField(model, 0x10, position);
         }, out, out.alarms);
 
     AddDictionary(world, rr::WorldEntitiesModel::LocationSecurityAlarms, Kind::LocationSecurityAlarm,
         [](std::uintptr_t model, Vector3& position) {
-            return ReadInlineField(model, 0x10, position) ||
-                   ReadDescriptionPosition(model, 0x18, 0x10, position);
+            return ReadDescriptionPosition(model, 0x28, 0x30, position) ||
+                   ReadDescriptionPosition(model, 0x18, 0x10, position) ||
+                   ReadInlineField(model, 0x10, position);
+        }, out, out.alarms);
+
+    AddDictionary(world, rr::WorldEntitiesModel::SecurityPanels, Kind::SecurityPanel,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t desc = RobRunMemory::ReadPtr(model + 0x18);
+            if (desc > 0x10000)
+                return RobRunMemory::ReadBytes(desc + 0x30, &position, sizeof(Vector3));
+            return false;
+        }, out, out.alarms);
+
+    AddDictionary(world, rr::WorldEntitiesModel::MetalDetectors, Kind::MetalDetector,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t desc = RobRunMemory::ReadPtr(model + 0x20);
+            if (desc > 0x10000)
+                return RobRunMemory::ReadBytes(desc + 0x30, &position, sizeof(Vector3));
+            return false;
         }, out, out.alarms);
 
     AddDictionary(world, rr::WorldEntitiesModel::FirstAidCabinetModels, Kind::FirstAidCabinet,

@@ -24,6 +24,7 @@ public:
 	int MinValueFilter = 0;
 
 	bool InstantLoot = false;
+	bool InstantUnlock = false;
 
 	// Per-collection toggles for the new metadata dump. The group flags above
 	// stay as master switches: turning "Containers" off hides every container
@@ -125,6 +126,7 @@ public:
 		j[ConfigName][LIT("FontSize")] = FontSize;
 		j[ConfigName][LIT("MinValueFilter")] = MinValueFilter;
 		j[ConfigName][LIT("InstantLoot")] = InstantLoot;
+		j[ConfigName][LIT("InstantUnlock")] = InstantUnlock;
 
 		ToJsonBool(&j, LIT("LootNodes"), LootNodes);
 		ToJsonBool(&j, LIT("SafeDoors"), SafeDoors);
@@ -196,6 +198,7 @@ public:
 		FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
 		MinValueFilter = j[ConfigName].value(LIT("MinValueFilter"), MinValueFilter);
 		InstantLoot = j[ConfigName].value(LIT("InstantLoot"), InstantLoot);
+		InstantUnlock = j[ConfigName].value(LIT("InstantUnlock"), InstantUnlock);
 
 		FromJsonBool(j, LIT("LootNodes"), &LootNodes);
 		FromJsonBool(j, LIT("SafeDoors"), &SafeDoors);

@@ -657,6 +657,83 @@ static void TickInstantLoot()
     }
 }
 
+static void TickInstantUnlock()
+{
+    if (!ConfigInstance.World.InstantUnlock) return;
+    const auto snap = RobRunReader::GetSnapshot();
+    if (!snap || snap->battleModel <= 0x10000 || snap->battleEntities <= 0x10000) return;
+
+    const std::uintptr_t worldEnts = snap->battleEntities;
+
+    // 1. Safe doors within range
+    std::vector<RobRunMemory::DictEntry> safeDoors;
+    const std::uintptr_t safeDict = RobRunMemory::ReadPtr(worldEnts + rr::WorldEntitiesModel::SafeDoors);
+    if (RobRunMemory::ReadDictInt(safeDict, safeDoors, false)) {
+        for (const auto& entry : safeDoors) {
+            const std::uintptr_t safeModel = entry.value;
+            if (safeModel <= 0x10000) continue;
+
+            const std::uintptr_t desc = RobRunMemory::ReadPtr(safeModel + rr::SafeDoorModel::Description);
+            if (desc > 0x10000 && !snap->localPosition.IsZero()) {
+                Vector3 pos{};
+                if (RobRunMemory::ReadBytes(desc + rr::SafeDoorModel::DescriptionPosition, &pos, sizeof(pos))) {
+                    if (Distance(pos, snap->localPosition) > 12.0f)
+                        continue;
+                }
+            }
+
+            const std::uintptr_t isUnlockedData = RobRunMemory::ReadPtr(safeModel + rr::SafeDoorModel::_isUnlocked);
+            if (isUnlockedData > 0x10000) {
+                const std::uint8_t one = 1;
+                TargetProcess.Write(isUnlockedData + rr::ReferenceData::Value, one);
+            }
+
+            const std::uintptr_t endTsData = RobRunMemory::ReadPtr(safeModel + rr::SafeDoorModel::_unlockEndTs);
+            if (endTsData > 0x10000) {
+                const std::int64_t zero = 0;
+                TargetProcess.Write(endTsData + rr::ReferenceData::Value, zero);
+            }
+
+            const std::uint8_t switchState = 1;
+            TargetProcess.Write(safeModel + rr::SafeDoorModel::ShouldSwitchState, switchState);
+        }
+    }
+
+    // 2. Location doors within range
+    std::vector<RobRunMemory::DictEntry> doors;
+    const std::uintptr_t doorDict = RobRunMemory::ReadPtr(worldEnts + rr::WorldEntitiesModel::Doors);
+    if (RobRunMemory::ReadDictInt(doorDict, doors, false)) {
+        for (const auto& entry : doors) {
+            const std::uintptr_t doorModel = entry.value;
+            if (doorModel <= 0x10000) continue;
+
+            const std::uintptr_t openCloseReq = RobRunMemory::ReadPtr(doorModel + 0x48);
+            if (openCloseReq > 0x10000) {
+                const std::uintptr_t posModel = RobRunMemory::ReadPtr(doorModel + 0x38);
+                if (posModel > 0x10000 && !snap->localPosition.IsZero()) {
+                    Vector3 pos{};
+                    if (RobRunMemory::ReadBytes(posModel + 0x10, &pos, sizeof(pos))) {
+                        if (Distance(pos, snap->localPosition) > 4.5f)
+                            continue;
+                    }
+                }
+                const std::uint8_t req = 1;
+                TargetProcess.Write(openCloseReq + 0x10, req);
+            }
+        }
+    }
+}
+
+static void TickCustomCamera()
+{
+    if (!ConfigInstance.Overlay.CustomCameraDistance) return;
+    const auto snap = RobRunReader::GetSnapshot();
+    if (!snap || snap->cameraModel <= 0x10000) return;
+
+    const float targetDistance = std::clamp(ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f);
+    TargetProcess.Write(snap->cameraModel + rr::BattleCameraModelOffsets::Distance, targetDistance);
+}
+
 void StartAimWorker()
 {
     StopAimWorker();
@@ -682,6 +759,8 @@ void StartAimWorker()
                 if (now - lastLoot >= std::chrono::milliseconds(50)) {
                     lastLoot = now;
                     TickInstantLoot();
+                    TickInstantUnlock();
+                    TickCustomCamera();
                 }
             } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(2));

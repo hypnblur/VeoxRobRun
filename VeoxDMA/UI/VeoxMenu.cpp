@@ -1183,6 +1183,7 @@ void DrawVisuals()
 			SliderIntRow("Min Cash / Value", &ConfigInstance.World.MinValueFilter, 0, 50000, " $");
 			SliderIntRow("Font Size", &ConfigInstance.World.FontSize, 1, 24, "px");
 			ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot, true);
+			ToggleRow("Instant Safe & Door Unlock", &ConfigInstance.World.InstantUnlock, true);
 			EndCard();
 		}
 	}
@@ -2419,6 +2420,13 @@ void DrawSettings(bool attached, const std::string& statusText)
 
 		ToggleRow("High Contrast Menu", &ConfigInstance.Overlay.HighContrastMenu);
 		Note("Solid card fills and brighter text, for bright game scenes.");
+
+		ToggleRow("Camera Zoom", &ConfigInstance.Overlay.CustomCameraDistance, true);
+		if (ConfigInstance.Overlay.CustomCameraDistance)
+		{
+			SliderFloatRow("Distance", &ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f, " m");
+			Note("Pulls the third-person camera back for wide tactical overview.");
+		}
 		EndCard();
 
 		BeginCard("DISPLAY", kCardW);
