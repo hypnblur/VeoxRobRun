@@ -553,6 +553,7 @@ bool IsKeyHeld(int keyIndex)
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
 static std::mutex g_debugMutex;
+static std::mutex g_workerLifecycleMutex;
 static std::atomic<bool> g_aimWorkerStop{ false };
 static std::thread g_aimWorkerThread;
 
@@ -734,10 +735,23 @@ static void TickCustomCamera()
     TargetProcess.Write(snap->cameraModel + rr::BattleCameraModelOffsets::Distance, targetDistance);
 }
 
+static void StartRecoilWorkerLocked();
+static void StopRecoilWorkerLocked();
+
+static void StopAimWorkerLocked()
+{
+    StopRecoilWorkerLocked();
+    g_aimWorkerStop.store(true, std::memory_order_relaxed);
+    if (g_aimWorkerThread.joinable())
+        g_aimWorkerThread.join();
+    Keyboard::SetAsyncKeyPolling(false);
+}
+
 void StartAimWorker()
 {
-    StopAimWorker();
-    StartRecoilWorker();
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopAimWorkerLocked();
+    StartRecoilWorkerLocked();
     Keyboard::SetAsyncKeyPolling(true);
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
@@ -770,11 +784,8 @@ void StartAimWorker()
 
 void StopAimWorker()
 {
-    StopRecoilWorker();
-    g_aimWorkerStop.store(true, std::memory_order_relaxed);
-    if (g_aimWorkerThread.joinable())
-        g_aimWorkerThread.join();
-    Keyboard::SetAsyncKeyPolling(false);
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopAimWorkerLocked();
 }
 
 // The reference memory aim also writes the local input model, the player
@@ -1556,9 +1567,16 @@ static void TickRecoil()
     g_rcWasFiring = firing;
 }
 
-void StartRecoilWorker()
+static void StopRecoilWorkerLocked()
 {
-    StopRecoilWorker();
+    g_recoilStop.store(true, std::memory_order_relaxed);
+    if (g_recoilThread.joinable())
+        g_recoilThread.join();
+}
+
+static void StartRecoilWorkerLocked()
+{
+    StopRecoilWorkerLocked();
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
@@ -1568,11 +1586,16 @@ void StartRecoilWorker()
     });
 }
 
+void StartRecoilWorker()
+{
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StartRecoilWorkerLocked();
+}
+
 void StopRecoilWorker()
 {
-    g_recoilStop.store(true, std::memory_order_relaxed);
-    if (g_recoilThread.joinable())
-        g_recoilThread.join();
+    std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
+    StopRecoilWorkerLocked();
 }
 
 void TickRecoilSpread()

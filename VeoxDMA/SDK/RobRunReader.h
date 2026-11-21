@@ -89,11 +89,12 @@ struct InGameMapVariance {
     float rotation = 0.f;  // Live map camera rotation
     float cameraSize = 0.f; // Orthographic half-height in world metres
     bool rectValid = false;
-    // Screen-space bounding box in Unity UI pixels (Y=0 at bottom) and
-    // transform center/scale so the overlay converts with current display height.
+    // Screen-space bounding box in Unity UI Canvas pixels (Y=0 at bottom) and
+    // Canvas reference resolution so the overlay scales to any display size.
     float uiMinX = 0.f, uiMinY = 0.f, uiMaxX = 0.f, uiMaxY = 0.f;
     float uiCenterX = 0.f, uiCenterY = 0.f;
     float uiScaleX = 1.f, uiScaleY = 1.f;
+    float uiScreenW = 0.f, uiScreenH = 0.f;
 };
 
 struct InGameMapState {
@@ -283,5 +284,8 @@ const CollisionBVH::Scene& GetBvhScene();
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);
 bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);
 CollisionBVH::DynamicOccluders GetDynamicOccluders();
+
+// High-frequency live fullscreen map pan/zoom camera state (polled on the camera thread).
+bool GetFreshFullMapVariance(Vector2& pos, float& rot, float& cameraSize);
 
 } // namespace RobRunReader
