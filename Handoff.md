@@ -51,13 +51,22 @@
 - **Forward kinematics (`BuildPoseOutput`):** Uses parent's cumulative `worldScale[p]` (`world[b] = world[p] + Rotate(worldRot[p], worldScale[p] * local[b].p)`), matching Unity's transform evaluation.
 - **Torn-pose rejection & 3-sample temporal median:** `BuildPoseOutput` rejects partial/torn poses (`result.size() < layout.segments.size()`). Accepted poses enter a 3-sample ring buffer in **pelvis-relative coordinates**, taking the per-component median and re-anchoring to the live pelvis position from the same read (erases 1-frame flickers with 0 ms positional lag).
 
-### 6. ESP & Visibility (`VeoxDMA/Esp/PlayerEsp.cpp`)
+### 6. ESP, Visibility & In-Game Map Overlay (`VeoxDMA/Esp/PlayerEsp.cpp`, `Radar.cpp`, `RobRunReader.cpp`)
 - `HiddenAlpha` dimming is only applied when `pcfg.VisCheck || pcfg.WallCheck` is enabled (prevents idle/LOD-throttled characters from strobing grey via the animator-motion fallback).
 - `IsValidBone` checks finite non-origin coordinates within `3.0 m` of `ent.position` (no minimum distance floor so feet planted on the root origin are never dropped).
+- **In-Game Map Overlay (`Radar::DrawInGameMapOverlay`, `ReadInGameMapState`):**
+  - Reads `BattleModel + 0x1D8` (`MapDialogModel.ScreenState` `+0x10`: `0=Closed`, `1=Opened`) and `BattleModel + 0x1E8` (`MapConfigModel`: `FullScreen` `+0x18`, `Minimap` `+0x20`).
+  - Each `MapConfigVariance` provides live `Position` (`+0x10`), `Rotation` (`+0x18`), `CameraSize` (`+0x1C`), and `ResizeContainer` (`+0x20`, `UnityEngine.RectTransform`).
+  - `ReadRectTransformUiBounds` evaluates `ResizeContainer` via `TransformHierarchy` FK + auto-probed native `m_Rect` (`s_rectTransformRectOffset`) and caches bounds for `500 ms` (refreshed immediately on `M` open/close).
+  - Projects players (role dots + optional heading/names), cars & helicopters (vector icons), and optional dropped bags/valuables using the exact orthographic camera params, clipped via `PushClipRect`. Suppresses 3D ESP while the fullscreen `M` map is open when `Hide3DEspOnFullMap` is enabled.
 
 ---
 
 ## Recent Fixes Log
+
+- **2026-11-21 — In-game minimap & fullscreen (`M`) map overlay added** (`RobRunSDK.h`, `RobRunReader.h/.cpp`, `RadarConfig.h`, `Radar.h/.cpp`, `Main.cpp`, `VeoxMenu.cpp`)
+  - Live `BattleModel.MapDialogModel` + `MapConfigModel` reader with `RectTransform` `m_Rect` auto-probe (`[MapProbe]` console log for first-run 2nd-PC verification).
+  - Exact orthographic world-to-map projection supporting top-left rotating minimap + fullscreen `M` pan & scroll-wheel zoom, with default player dots + vector car/heli icons, optional heading/names/bags/valuables toggles, and automatic 3D ESP suppression while the fullscreen map is open.
 
 - **2026-11-21 — 1-second bone rendering stalls & lag fixed + console telemetry added** (`SkeletonExtractor.h/.cpp`, `RobRunReader.cpp`)
   - Replaced ~600 sequential DMA reads in `ReadNamedBones` (and probing in `EnsureNameOffsetsProbed`) with **3 `Memory::ScopedScatter` calls** (~1 ms vs 250–500 ms per rig) and skipped name reads when all limbs resolved and `Chams` is off.
