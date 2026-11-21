@@ -40,6 +40,8 @@ void SetAlwaysOnTop(bool on);
 
 int FrameCap();
 void SetFrameCap(int fps);
+const char* PresentModeName();
+float CurrentFps();
 
 int MonitorCount();
 int MonitorIndex();

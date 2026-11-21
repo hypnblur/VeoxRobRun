@@ -1,7 +1,10 @@
 #include "pch.h"
 #include "SkeletonExtractor.h"
+#include "Memory.h"
+#include "ConfigInstance.h"
 #include "DebugLog.h"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <cmath>
 #include <initializer_list>
@@ -279,66 +282,37 @@ static const char* const kMeshBoneNames[94] = {
 };
 
 // Auto-discovered offsets for native Transform -> GameObject -> name chain.
-// Probed once; +0x28 on Transform is the hierarchy ptr, so GameObject is elsewhere.
+// Probed until confirmed; +0x28 on Transform is the hierarchy ptr, and Unity's
+// native GameObject* is normally at +0x30.
 static bool s_nameOffsetsProbed = false;
 static U s_goOffset = 0;
 static U s_nameOffset = 0;
 
-static void EnsureNameOffsetsProbed(int count, int root,
-    const std::vector<std::int32_t>& parent,
-    const std::vector<unsigned char>& reachable,
-    const std::vector<U>& transforms,
-    const Read& read)
+struct NamedBone { int index; std::string name; };
+
+static bool LooksLikeBoneName(const char* s)
 {
-    if (s_nameOffsetsProbed) return;
-    s_nameOffsetsProbed = true;
-    auto isAnc = [&](int a, int b) -> bool {
-        for (int s = 0; b >= 0 && b < count && s < count; b = parent[b], ++s)
-            if (a == b) return true;
-        return false;
+    if (!s || !s[0]) return false;
+    std::string lower;
+    for (const char* p = s; *p; ++p)
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*p))));
+    static const char* const kHints[] = {
+        "_jnt", "spine", "head", "neck", "pelvis", "hips",
+        "leg", "foot", "thigh", "calf", "arm", "hand", "shoulder",
+        "mixamorig", "bip0", "root"
     };
-    for (int b = 0; b < count; ++b) {
-        if (!reachable[b] || !isAnc(root, b)) continue;
-        bool found = false;
-        const U goOffsets[] = {0x08, 0x10, 0x18, 0x20, 0x30, 0x38, 0x40};
-        for (U tOff : goOffsets) {
-            if (found) break;
-            U go = 0;
-            if (!read(transforms[b] + tOff, &go, sizeof(go)) || go <= 0x10000) continue;
-            const U nameOffsets[] = {0x48, 0x50, 0x60};
-            for (U nOff : nameOffsets) {
-                U np = 0;
-                if (!read(go + nOff, &np, sizeof(np)) || np <= 0x10000) continue;
-                char buf[32]{};
-                if (!read(np, buf, 31)) continue;
-                buf[31] = '\0';
-                bool ok = true;
-                int len = 0;
-                for (; len < 31 && buf[len]; ++len)
-                    if ((unsigned char)buf[len] < 0x20 || (unsigned char)buf[len] > 0x7E)
-                        { ok = false; break; }
-                if (ok && len >= 2) {
-                    s_goOffset = tOff;
-                    s_nameOffset = nOff;
-                    DLOG("NameOffsetProbe: Transform+0x%llx -> +0x%llx -> '%s'",
-                        (unsigned long long)tOff, (unsigned long long)nOff, buf);
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if (!found) DLOG("NameOffsetProbe: FAILED to find name chain");
-        break;
-    }
+    for (const char* h : kHints)
+        if (lower.find(h) != std::string::npos) return true;
+    return false;
 }
 
-static bool ReadBoneName(const Read& read, U transform, char* buf, int bufSize)
+static bool ReadBoneNameWithOffsets(const Read& read, U transform, U goOff, U nameOff, char* buf, int bufSize)
 {
-    if (s_goOffset == 0) return false;
+    if (goOff == 0 || transform <= 0x10000) return false;
     U go = 0;
-    if (!read(transform + s_goOffset, &go, sizeof(go)) || go <= 0x10000) return false;
+    if (!read(transform + goOff, &go, sizeof(go)) || go <= 0x10000) return false;
     U np = 0;
-    if (!read(go + s_nameOffset, &np, sizeof(np)) || np <= 0x10000) return false;
+    if (!read(go + nameOff, &np, sizeof(np)) || np <= 0x10000) return false;
     std::memset(buf, 0, bufSize);
     if (!read(np, buf, bufSize - 1)) return false;
     buf[bufSize - 1] = '\0';
@@ -349,30 +323,235 @@ static bool ReadBoneName(const Read& read, U transform, char* buf, int bufSize)
     return len >= 2;
 }
 
-// Reads bone names via DMA and corrects boneMap entries by exact name match.
-// Returns the number of mesh bone names matched.
-static int RefineBonemapByName(int count, int root,
+static void EnsureNameOffsetsProbed(int count, int root,
     const std::vector<std::int32_t>& parent,
     const std::vector<unsigned char>& reachable,
     const std::vector<U>& transforms,
-    const Read& read, std::vector<int>& boneMap)
+    const Read& read)
 {
-    EnsureNameOffsetsProbed(count, root, parent, reachable, transforms, read);
-    if (s_goOffset == 0) return 0;
+    if (s_nameOffsetsProbed) return;
     auto isAnc = [&](int a, int b) -> bool {
         for (int s = 0; b >= 0 && b < count && s < count; b = parent[b], ++s)
             if (a == b) return true;
         return false;
     };
-    struct NB { int index; std::string name; };
-    std::vector<NB> named;
-    for (int b = 0; b < count; ++b) {
-        if (!reachable[b] || !isAnc(root, b)) continue;
-        char buf[64]{};
-        if (!ReadBoneName(read, transforms[b], buf, sizeof(buf)))
-            continue;
-        named.push_back({b, std::string(buf)});
+
+    // Sample up to 12 reachable bones spread across the hierarchy so probing
+    // stays sub-millisecond while preventing a single bogus pointer from
+    // locking in the wrong offset.
+    std::vector<int> sample;
+    sample.reserve(12);
+    const int step = std::max(1, count / 12);
+    for (int b = 0; b < count && sample.size() < 12; b += step) {
+        if (reachable[b] && isAnc(root, b) && transforms[b] > 0x10000)
+            sample.push_back(b);
     }
+    if (sample.empty()) return;
+
+    // Try Unity's standard GameObject offset (0x30) and name offsets (0x60, 0x48) first.
+    const U goOffsets[] = {0x30, 0x38, 0x40, 0x20, 0x18, 0x10, 0x08};
+    const U nameOffsets[] = {0x60, 0x48, 0x50};
+
+    U bestGo = 0, bestName = 0;
+    int bestScore = 0;
+    std::string bestExample;
+
+    Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+    for (U tOff : goOffsets) {
+        std::vector<U> gos(sample.size(), 0);
+        if (sc.handle) {
+            for (std::size_t i = 0; i < sample.size(); ++i)
+                TargetProcess.AddScatterReadRequest(sc, transforms[sample[i]] + tOff, &gos[i], sizeof(U));
+            TargetProcess.ExecuteScatterReadCached(sc);
+        } else {
+            for (std::size_t i = 0; i < sample.size(); ++i)
+                read(transforms[sample[i]] + tOff, &gos[i], sizeof(U));
+        }
+
+        int validGos = 0;
+        for (U g : gos) if (g > 0x10000 && g < 0x7FFFFFFFFFFFull) ++validGos;
+        if (validGos < 3) continue;
+
+        for (U nOff : nameOffsets) {
+            std::vector<U> nps(sample.size(), 0);
+            if (sc.handle) {
+                for (std::size_t i = 0; i < sample.size(); ++i)
+                    if (gos[i] > 0x10000 && gos[i] < 0x7FFFFFFFFFFFull)
+                        TargetProcess.AddScatterReadRequest(sc, gos[i] + nOff, &nps[i], sizeof(U));
+                TargetProcess.ExecuteScatterReadCached(sc);
+            } else {
+                for (std::size_t i = 0; i < sample.size(); ++i)
+                    if (gos[i] > 0x10000 && gos[i] < 0x7FFFFFFFFFFFull)
+                        read(gos[i] + nOff, &nps[i], sizeof(U));
+            }
+
+            struct NameBuf { char s[48]{}; };
+            std::vector<NameBuf> bufs(sample.size());
+            int validNps = 0;
+            if (sc.handle) {
+                for (std::size_t i = 0; i < sample.size(); ++i) {
+                    if (nps[i] > 0x10000 && nps[i] < 0x7FFFFFFFFFFFull) {
+                        TargetProcess.AddScatterReadRequest(sc, nps[i], bufs[i].s, 47);
+                        ++validNps;
+                    }
+                }
+                if (validNps < 3) continue;
+                TargetProcess.ExecuteScatterReadCached(sc);
+            } else {
+                for (std::size_t i = 0; i < sample.size(); ++i) {
+                    if (nps[i] > 0x10000 && nps[i] < 0x7FFFFFFFFFFFull) {
+                        read(nps[i], bufs[i].s, 47);
+                        ++validNps;
+                    }
+                }
+                if (validNps < 3) continue;
+            }
+
+            int readable = 0;
+            int boneHints = 0;
+            std::string example;
+            for (std::size_t i = 0; i < sample.size(); ++i) {
+                if (nps[i] <= 0x10000 || nps[i] >= 0x7FFFFFFFFFFFull) continue;
+                bufs[i].s[47] = '\0';
+                bool ok = true;
+                int len = 0;
+                for (; len < 47 && bufs[i].s[len]; ++len) {
+                    const unsigned char ch = static_cast<unsigned char>(bufs[i].s[len]);
+                    if (ch < 0x20 || ch > 0x7E) { ok = false; break; }
+                }
+                if (!ok || len < 2) continue;
+                ++readable;
+                if (LooksLikeBoneName(bufs[i].s)) {
+                    ++boneHints;
+                    if (example.empty()) example = bufs[i].s;
+                } else if (example.empty()) {
+                    example = bufs[i].s;
+                }
+            }
+            const int score = boneHints * 10 + readable;
+            if (boneHints >= 2 && readable >= 3) {
+                s_goOffset = tOff;
+                s_nameOffset = nOff;
+                s_nameOffsetsProbed = true;
+                DLOG("NameOffsetProbe: Transform+0x%llx -> +0x%llx -> '%s' (hints=%d readable=%d/%zu)",
+                    (unsigned long long)tOff, (unsigned long long)nOff, example.c_str(),
+                    boneHints, readable, sample.size());
+                return;
+            }
+            if (score > bestScore && readable >= 3) {
+                bestScore = score;
+                bestGo = tOff;
+                bestName = nOff;
+                bestExample = example;
+            }
+        }
+    }
+
+    if (bestGo != 0) {
+        s_goOffset = bestGo;
+        s_nameOffset = bestName;
+        s_nameOffsetsProbed = true;
+        DLOG("NameOffsetProbe (fallback): Transform+0x%llx -> +0x%llx -> '%s' (score=%d)",
+            (unsigned long long)bestGo, (unsigned long long)bestName, bestExample.c_str(), bestScore);
+    } else {
+        static int failLogs = 0;
+        if (failLogs++ < 5)
+            DLOG("NameOffsetProbe: FAILED to find name chain (will retry)");
+    }
+}
+
+static bool ReadBoneName(const Read& read, U transform, char* buf, int bufSize)
+{
+    return ReadBoneNameWithOffsets(read, transform, s_goOffset, s_nameOffset, buf, bufSize);
+}
+
+static void ReadNamedBones(int count, int root,
+    const std::vector<std::int32_t>& parent,
+    const std::vector<unsigned char>& reachable,
+    const std::vector<U>& transforms,
+    const Read& read, std::vector<NamedBone>& outNamed)
+{
+    outNamed.clear();
+    EnsureNameOffsetsProbed(count, root, parent, reachable, transforms, read);
+    if (s_goOffset == 0) return;
+    auto isAnc = [&](int a, int b) -> bool {
+        for (int s = 0; b >= 0 && b < count && s < count; b = parent[b], ++s)
+            if (a == b) return true;
+        return false;
+    };
+
+    std::vector<int> indices;
+    indices.reserve(static_cast<std::size_t>(count));
+    for (int b = 0; b < count; ++b) {
+        if (reachable[b] && isAnc(root, b) && transforms[b] > 0x10000)
+            indices.push_back(b);
+    }
+    if (indices.empty()) return;
+
+    // Batch all ~200 bone name reads into 3 scatter transactions (~1 ms total)
+    // instead of ~600 sequential DMA reads (~250 ms) that would stall the worker.
+    Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
+    if (!sc.handle) {
+        outNamed.reserve(indices.size());
+        for (int b : indices) {
+            char buf[64]{};
+            if (ReadBoneName(read, transforms[b], buf, sizeof(buf)))
+                outNamed.push_back({b, std::string(buf)});
+        }
+        return;
+    }
+
+    const std::size_t n = indices.size();
+    std::vector<U> gos(n, 0);
+    for (std::size_t i = 0; i < n; ++i)
+        TargetProcess.AddScatterReadRequest(sc, transforms[indices[i]] + s_goOffset, &gos[i], sizeof(U));
+    TargetProcess.ExecuteScatterReadCached(sc);
+    SwitchToThread();
+
+    std::vector<U> nps(n, 0);
+    int npReqs = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (gos[i] > 0x10000 && gos[i] < 0x7FFFFFFFFFFFull) {
+            TargetProcess.AddScatterReadRequest(sc, gos[i] + s_nameOffset, &nps[i], sizeof(U));
+            ++npReqs;
+        }
+    }
+    if (npReqs == 0) return;
+    TargetProcess.ExecuteScatterReadCached(sc);
+    SwitchToThread();
+
+    struct NameBuf { char s[48]{}; };
+    std::vector<NameBuf> bufs(n);
+    int strReqs = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (nps[i] > 0x10000 && nps[i] < 0x7FFFFFFFFFFFull) {
+            TargetProcess.AddScatterReadRequest(sc, nps[i], bufs[i].s, 47);
+            ++strReqs;
+        }
+    }
+    if (strReqs == 0) return;
+    TargetProcess.ExecuteScatterReadCached(sc);
+
+    outNamed.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (nps[i] <= 0x10000 || nps[i] >= 0x7FFFFFFFFFFFull) continue;
+        bufs[i].s[47] = '\0';
+        bool ok = true;
+        int len = 0;
+        for (; len < 47 && bufs[i].s[len]; ++len) {
+            const unsigned char ch = static_cast<unsigned char>(bufs[i].s[len]);
+            if (ch < 0x20 || ch > 0x7E) { ok = false; break; }
+        }
+        if (ok && len >= 2)
+            outNamed.push_back({indices[i], std::string(bufs[i].s, static_cast<std::size_t>(len))});
+    }
+}
+
+// Corrects boneMap entries from already-read bone names by exact name match.
+static int RefineBonemapFromNamed(int count, const std::vector<NamedBone>& named,
+    std::vector<int>& boneMap)
+{
+    if (named.empty()) return 0;
     int matched = 0;
     for (std::size_t i = 0; i < 94 && i < boneMap.size(); ++i)
         for (const auto& nb : named)
@@ -387,6 +566,177 @@ static int RefineBonemapByName(int count, int root,
             DLOG("  bone[%d] = '%s'", named[i].index, named[i].name.c_str());
     }
     return matched;
+}
+
+// Resolves missing skeleton anchors from bone names (exact RobRun *_jnt names
+// first, then standard Unity/Mixamo names). Only fills missing slots and
+// verifies parent-child ancestry so stray props can never attach.
+static void FillMissingAnchorsFromNames(
+    const std::vector<NamedBone>& named,
+    const std::function<bool(int, int)>& ancestor,
+    const std::function<void(int)>& pushAnchor,
+    RigLayout& out,
+    int& centralAnchors)
+{
+    if (named.empty()) return;
+
+    auto findExact = [&](const char* exact) -> int {
+        for (const auto& nb : named)
+            if (nb.name == exact) return nb.index;
+        return -1;
+    };
+    auto findContains = [&](const char* needle) -> int {
+        const std::size_t nlen = std::strlen(needle);
+        for (const auto& nb : named) {
+            const auto pos = nb.name.find(needle);
+            if (pos == std::string::npos) continue;
+            const auto end = pos + nlen;
+            if (end >= nb.name.size() || !std::isalpha(static_cast<unsigned char>(nb.name[end])))
+                return nb.index;
+        }
+        return -1;
+    };
+    auto findFirst = [&](std::initializer_list<const char*> exacts,
+                         std::initializer_list<const char*> fallbacks) -> int {
+        for (const char* e : exacts) {
+            const int idx = findExact(e);
+            if (idx >= 0) return idx;
+        }
+        for (const char* f : fallbacks) {
+            const int idx = findContains(f);
+            if (idx >= 0) return idx;
+        }
+        return -1;
+    };
+
+    // Spine / head anchors if any are missing.
+    if (out.pelvis < 0) {
+        const int idx = findFirst({"M_spine_1_jnt", "M_spine_2_jnt"}, {"Hips", "Pelvis"});
+        if (idx >= 0) { out.pelvis = idx; pushAnchor(idx); ++centralAnchors; }
+    }
+    if (out.chest < 0) {
+        const int idx = findFirst({"M_spine_3_jnt", "M_spine_2_jnt"}, {"Spine2", "Spine1", "Chest"});
+        if (idx >= 0) { out.chest = idx; pushAnchor(idx); ++centralAnchors; }
+    }
+    if (out.neck < 0) {
+        const int idx = findFirst({"M_neck_jnt"}, {"Neck"});
+        if (idx >= 0) { out.neck = idx; pushAnchor(idx); ++centralAnchors; }
+    }
+    if (out.head < 0) {
+        const int idx = findFirst({"M_head_1_jnt"}, {"Head"});
+        if (idx >= 0) { out.head = idx; pushAnchor(idx); ++centralAnchors; }
+    }
+
+    auto fillLimb = [&](std::int32_t& a, std::int32_t& b, std::int32_t& c,
+        int n0, int n1, int n2, int n3)
+    {
+        if (a >= 0 && b >= 0 && c >= 0) return;
+        std::vector<int> chain;
+        auto tryPush = [&](int idx) {
+            if (idx < 0) return;
+            for (int other : chain) if (other == idx) return;
+            if (!chain.empty() && !ancestor(chain.back(), idx)) return;
+            chain.push_back(idx);
+        };
+        tryPush(n0);
+        tryPush(n1);
+        tryPush(n2);
+        tryPush(n3);
+        if (chain.size() < 2) return;
+        for (int idx : chain) pushAnchor(idx);
+        if (a < 0) a = chain[0];
+        if (b < 0) b = chain[1];
+        if (c < 0) c = chain.back();
+    };
+
+    // Legs (RobRun: L/R_leg_1_jnt -> L/R_leg_2_jnt -> L/R_leg_3_jnt -> L/R_foot_1_jnt)
+    if (out.leftHip < 0 || out.leftKnee < 0 || out.leftFoot < 0) {
+        fillLimb(out.leftHip, out.leftKnee, out.leftFoot,
+            findFirst({"L_leg_1_jnt"}, {"LeftUpperLeg", "LeftThigh"}),
+            findFirst({"L_leg_2_jnt"}, {"LeftLowerLeg", "LeftCalf"}),
+            findFirst({"L_leg_3_jnt"}, {}),
+            findFirst({"L_foot_1_jnt"}, {"LeftFoot"}));
+    }
+    if (out.rightHip < 0 || out.rightKnee < 0 || out.rightFoot < 0) {
+        fillLimb(out.rightHip, out.rightKnee, out.rightFoot,
+            findFirst({"R_leg_1_jnt"}, {"RightUpperLeg", "RightThigh"}),
+            findFirst({"R_leg_2_jnt"}, {"RightLowerLeg", "RightCalf"}),
+            findFirst({"R_leg_3_jnt"}, {}),
+            findFirst({"R_foot_1_jnt"}, {"RightFoot"}));
+    }
+
+    // Arms (RobRun: L/R_arm_1_jnt -> L/R_arm_2_jnt -> L/R_arm_3_jnt)
+    if (out.leftShoulder < 0 || out.leftElbow < 0 || out.leftHand < 0) {
+        fillLimb(out.leftShoulder, out.leftElbow, out.leftHand,
+            findFirst({"L_arm_1_jnt"}, {"LeftUpperArm", "LeftShoulder"}),
+            findFirst({"L_arm_2_jnt"}, {"LeftLowerArm", "LeftForeArm"}),
+            findFirst({"L_arm_3_jnt"}, {"LeftHand"}),
+            -1);
+    }
+    if (out.rightShoulder < 0 || out.rightElbow < 0 || out.rightHand < 0) {
+        fillLimb(out.rightShoulder, out.rightElbow, out.rightHand,
+            findFirst({"R_arm_1_jnt"}, {"RightUpperArm", "RightShoulder"}),
+            findFirst({"R_arm_2_jnt"}, {"RightLowerArm", "RightForeArm"}),
+            findFirst({"R_arm_3_jnt"}, {"RightHand"}),
+            -1);
+    }
+}
+
+static void ComputeHierarchyWorldPositions(int count,
+    const std::vector<std::int32_t>& parent,
+    const std::vector<TRS>& local,
+    std::vector<Vec>& world,
+    std::vector<unsigned char>& worldValid)
+{
+    std::vector<Quat> worldRot(static_cast<std::size_t>(count));
+    std::vector<Vec> worldScale(static_cast<std::size_t>(count), {1.f, 1.f, 1.f});
+    std::vector<unsigned char> boneValid(static_cast<std::size_t>(count), 0);
+    std::vector<Quat> normRot(static_cast<std::size_t>(count));
+    for (int b = 0; b < count; ++b) {
+        const auto& t = local[b];
+        const float n = t.q.x*t.q.x + t.q.y*t.q.y + t.q.z*t.q.z + t.q.w*t.q.w;
+        if (!Finite(t.p) || !Finite(t.s) || !std::isfinite(n) || n < 0.5f || n > 1.5f)
+            continue;
+        const float inv = 1.0f / std::sqrt(n);
+        normRot[b] = {t.q.x*inv, t.q.y*inv, t.q.z*inv, t.q.w*inv};
+        boneValid[b] = 1;
+    }
+
+    world.assign(static_cast<std::size_t>(count), Vec{});
+    worldValid.assign(static_cast<std::size_t>(count), 0);
+    for (int b = 0; b < count; ++b) {
+        if (!boneValid[b]) continue;
+        const int p = parent[b];
+        if (p < 0) {
+            world[b] = local[b].p;
+            worldRot[b] = normRot[b];
+            worldScale[b] = local[b].s;
+            worldValid[b] = 1;
+        } else if (p < b && worldValid[p]) {
+            worldRot[b] = MulQuat(worldRot[p], normRot[b]);
+            worldScale[b] = Mul(worldScale[p], local[b].s);
+            world[b] = Add(world[p], Rotate(worldRot[p], Mul(worldScale[p], local[b].p)));
+            worldValid[b] = 1;
+        } else {
+            Vec v = local[b].p;
+            Quat q = normRot[b];
+            Vec s = local[b].s;
+            bool ok = true;
+            for (int curP = p, steps = 0; curP != -1; ++steps) {
+                if (steps >= count || curP < 0 || curP >= count || !boneValid[curP]) { ok = false; break; }
+                v = Add(local[curP].p, Rotate(normRot[curP], Mul(local[curP].s, v)));
+                q = MulQuat(normRot[curP], q);
+                s = Mul(local[curP].s, s);
+                curP = parent[curP];
+            }
+            if (ok && Finite(v)) {
+                world[b] = v;
+                worldRot[b] = q;
+                worldScale[b] = s;
+                worldValid[b] = 1;
+            }
+        }
+    }
 }
 
 bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
@@ -443,25 +793,32 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                 if (duplicate) continue;
                 limbIndices.push_back(index);
             }
-            // The IK view lists the limb top-down, but the array can also carry
-            // prop/weapon bones. Keep only the leading bones that form a real
-            // parent -> child chain: an extra entry used to be pushed as an
-            // anchor, which drew "arms" out to a weapon or a finger.
+            // The IK view lists the limb top-down, but handle bottom-up order
+            // too, and keep only the leading bones that form a real
+            // parent -> child chain so prop/weapon bones are never pushed.
+            if (limbIndices.size() >= 2 &&
+                !ancestor(limbIndices[0], limbIndices[1]) &&
+                ancestor(limbIndices.back(), limbIndices.front()))
             {
+                std::reverse(limbIndices.begin(), limbIndices.end());
+            }
+            {
+                const std::size_t maxLen = (slot >= 2) ? 4 : 3;
                 std::vector<int> chain;
                 for (int index : limbIndices) {
-                    if (chain.size() >= 3) break;
+                    if (chain.size() >= maxLen) break;
                     if (chain.empty()) { chain.push_back(index); continue; }
                     if (!ancestor(chain.back(), index)) break;
                     chain.push_back(index);
                 }
-                if (chain.size() >= 2) limbIndices = std::move(chain);
+                if (chain.size() < 2) continue;
+                limbIndices = std::move(chain);
             }
             for (int index : limbIndices) pushAnchor(index);
             auto assign = [&](std::int32_t& a, std::int32_t& b, std::int32_t& c) {
                 if (limbIndices.size() > 0) a = limbIndices[0];
                 if (limbIndices.size() > 1) b = limbIndices[1];
-                if (limbIndices.size() > 2) c = limbIndices[2];
+                if (limbIndices.size() > 2) c = limbIndices.back();
             };
             switch (slot) {
             case 0: assign(out.leftShoulder, out.leftElbow, out.leftHand); break;
@@ -549,37 +906,79 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         }
     }
 
-    // TorsoView._spine2 is waist-level; prefer the shared thigh parent (true hips)
-    // as out.pelvis whenever both leg roots attach to an ancestor of the chest.
-    if (out.leftHip >= 0 && out.rightHip >= 0) {
-        const int trueHips = parent[out.leftHip];
-        if (trueHips >= 0 && trueHips == parent[out.rightHip] &&
-            out.chest >= 0 && ancestor(trueHips, out.chest)) {
+    // Layer 2 (name-based limb/spine recovery): when WithWeaponView is unbound
+    // (holster, unarmed, reload, vehicle) or individual LimbIK slots are null,
+    // resolve missing leg/arm/spine anchors directly from the bone GameObject
+    // names (L_leg_1_jnt..R_foot_1_jnt, etc.). The same name list is reused
+    // below for out.boneMap, so this adds zero extra DMA reads per layout.
+    std::vector<NamedBone> namedBones;
+    bool namesRead = false;
+    auto needAnyLimb = [&]() {
+        return out.leftHip < 0 || out.leftKnee < 0 || out.leftFoot < 0 ||
+               out.rightHip < 0 || out.rightKnee < 0 || out.rightFoot < 0 ||
+               out.leftShoulder < 0 || out.leftElbow < 0 || out.leftHand < 0 ||
+               out.rightShoulder < 0 || out.rightElbow < 0 || out.rightHand < 0 ||
+               out.pelvis < 0 || out.chest < 0;
+    };
+    if (needAnyLimb()) {
+        ReadNamedBones(count, root, parent, rh.reachable, rh.transforms, read, namedBones);
+        namesRead = true;
+        FillMissingAnchorsFromNames(namedBones, ancestor, pushAnchor, out, centralAnchors);
+    }
+
+    // TorsoView._spine2 is waist-level; prefer the shared thigh ancestor (true hips)
+    // as out.pelvis whenever both leg roots attach below/at an ancestor of the chest.
+    auto refinePelvisFromHips = [&]() {
+        if (out.leftHip < 0 || out.rightHip < 0) return;
+        int trueHips = parent[out.leftHip];
+        for (int steps = 0; trueHips >= 0 && !ancestor(trueHips, out.rightHip) && steps < count; ++steps)
+            trueHips = parent[trueHips];
+        if (trueHips >= 0 && out.chest >= 0 && ancestor(trueHips, out.chest) &&
+            trueHips != root) {
             out.pelvis = trueHips;
             pushAnchor(trueHips);
         }
-    }
+    };
+    refinePelvisFromHips();
 
-    // Parent-tree limb fallback: when the weapon view is unbound (holster,
-    // reload, vehicle) we get no limb anchors from the IK views. Walk the
-    // parent array — already in memory, no extra DMA — to find branches
-    // that diverge from the spine chain.
-    const bool missingLegs = out.leftHip < 0 && out.rightHip < 0;
-    const bool missingArms = out.leftShoulder < 0 && out.rightShoulder < 0;
-    if ((missingLegs || missingArms) && out.pelvis >= 0 && out.chest >= 0) {
+    // Layer 3 (multi-hop parent-tree limb fallback): if any leg or arm is still
+    // missing (e.g. bone name reads unavailable), walk the entire spine chain
+    // from pelvis up to root using world-space FK distances to recover leg and
+    // arm branches without extra DMA.
+    const bool missingLegs = out.leftHip < 0 || out.rightHip < 0 ||
+                             out.leftKnee < 0 || out.rightKnee < 0;
+    const bool missingArms = out.leftShoulder < 0 || out.rightShoulder < 0 ||
+                             out.leftElbow < 0 || out.rightElbow < 0;
+    if ((missingLegs || missingArms) && (out.pelvis >= 0 || out.chest >= 0)) {
+        const int spineAnchorLow = (out.pelvis >= 0) ? out.pelvis : out.chest;
+        const int spineAnchorHigh = (out.chest >= 0) ? out.chest : out.pelvis;
+
         std::vector<bool> onSpine(count, false);
-        int top = out.head >= 0 ? out.head : (out.neck >= 0 ? out.neck : out.chest);
-        for (int b = top; b >= 0; b = parent[b]) {
+        int top = out.head >= 0 ? out.head : (out.neck >= 0 ? out.neck : spineAnchorHigh);
+        for (int b = top, steps = 0; b >= 0 && steps < count; b = parent[b], ++steps) {
             onSpine[b] = true;
             if (b == root) break;
         }
 
+        std::vector<Vec> fkWorld;
+        std::vector<unsigned char> fkValid;
+        ComputeHierarchyWorldPositions(count, parent, local, fkWorld, fkValid);
+
+        auto segLen = [&](int a, int b) -> float {
+            if (a >= 0 && a < count && b >= 0 && b < count && fkValid[a] && fkValid[b]) {
+                const float dx = fkWorld[b].x - fkWorld[a].x;
+                const float dy = fkWorld[b].y - fkWorld[a].y;
+                const float dz = fkWorld[b].z - fkWorld[a].z;
+                return std::sqrt(dx*dx + dy*dy + dz*dz);
+            }
+            const Vec& p = local[b].p;
+            return std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
+        };
+
         auto chainLength = [&](const std::vector<int>& chain) {
             float total = 0.f;
-            for (std::size_t i = 1; i < chain.size(); ++i) {
-                const Vec& p = local[chain[i]].p;
-                total += std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z);
-            }
+            for (std::size_t i = 1; i < chain.size(); ++i)
+                total += segLen(chain[i - 1], chain[i]);
             return total;
         };
 
@@ -591,10 +990,9 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                 int best = -1;
                 float bestLen = -1.f;
                 for (int b = 0; b < count; ++b) {
-                    if (parent[b] != cur) continue;
-                    const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
-                    const float len = dx*dx + dy*dy + dz*dz;
-                    if (len > bestLen) { bestLen = len; best = b; }
+                    if (parent[b] != cur || !rh.reachable[b]) continue;
+                    const float len = segLen(cur, b);
+                    if (len > bestLen && len < 0.85f) { bestLen = len; best = b; }
                 }
                 if (best < 0) break;
                 chain.push_back(best);
@@ -604,70 +1002,104 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
         };
 
         if (missingLegs) {
-            std::vector<std::vector<int>> legs;
-            auto collectLegsFrom = [&](int hipNode) {
+            // Walk every ancestor from spineAnchorLow up toward root so we find
+            // the true hip fork even when multiple spine joints sit between
+            // TorsoView._spine2 and the pelvis/hips node.
+            std::vector<std::vector<int>> bestLegs;
+            const int knownLegRoot = (out.leftHip >= 0) ? out.leftHip : out.rightHip;
+            for (int hipNode = spineAnchorLow, hops = 0;
+                 hipNode >= 0 && hops < count; hipNode = parent[hipNode], ++hops)
+            {
+                std::vector<std::vector<int>> cand;
                 for (int b = 0; b < count; ++b) {
-                    if (parent[b] != hipNode || onSpine[b]) continue;
-                    auto chain = walkChain(b, 3);
-                    if (chain.size() >= 2 && chainLength(chain) > 0.20f)
-                        legs.push_back(std::move(chain));
+                    if (parent[b] != hipNode || onSpine[b] || !rh.reachable[b]) continue;
+                    auto chain = walkChain(b, 4);
+                    const float len = chainLength(chain);
+                    if (chain.size() < 2 || len < 0.25f || len > 1.65f) continue;
+                    // Legs extend downward from the hip node (allow crouching/seated).
+                    if (fkValid[hipNode] && fkValid[chain.back()] &&
+                        fkWorld[chain.back()].y > fkWorld[hipNode].y + 0.15f)
+                        continue;
+                    cand.push_back(std::move(chain));
                 }
-            };
-            const int hipsCandidate = (parent[out.pelvis] >= 0) ? parent[out.pelvis] : out.pelvis;
-            collectLegsFrom(hipsCandidate);
-            if (legs.size() < 2 && hipsCandidate != out.pelvis)
-                collectLegsFrom(out.pelvis);
+                if (cand.size() >= 2) {
+                    std::sort(cand.begin(), cand.end(), [&](const auto& a, const auto& b) {
+                        return chainLength(a) > chainLength(b);
+                    });
+                    bestLegs = std::move(cand);
+                    break;
+                }
+                if (knownLegRoot >= 0 && parent[knownLegRoot] == hipNode && !cand.empty()) {
+                    bestLegs = std::move(cand);
+                    break;
+                }
+                if (hipNode == root) break;
+            }
 
-            std::sort(legs.begin(), legs.end(), [&](const auto& a, const auto& b) {
-                return chainLength(a) > chainLength(b);
-            });
-            if (legs.size() >= 2) {
-                auto& lA = legs[0]; auto& lB = legs[1];
-                bool aIsLeft = local[lA[0]].p.x < local[lB[0]].p.x;
+            if (bestLegs.size() >= 2) {
+                auto& lA = bestLegs[0]; auto& lB = bestLegs[1];
+                const float ax = fkValid[lA[0]] ? fkWorld[lA[0]].x : local[lA[0]].p.x;
+                const float bx = fkValid[lB[0]] ? fkWorld[lB[0]].x : local[lB[0]].p.x;
+                bool aIsLeft = ax < bx;
                 auto& left  = aIsLeft ? lA : lB;
                 auto& right = aIsLeft ? lB : lA;
-                const int hipNode = parent[left[0]];
-                if (hipNode >= 0 && hipNode == parent[right[0]] && ancestor(hipNode, out.chest)) {
-                    out.pelvis = hipNode;
-                    pushAnchor(hipNode);
+                if (out.leftHip < 0 || out.leftKnee < 0) {
+                    for (int idx : left) pushAnchor(idx);
+                    if (left.size() > 0 && out.leftHip < 0)  out.leftHip  = left[0];
+                    if (left.size() > 1 && out.leftKnee < 0) out.leftKnee = left[1];
+                    if (left.size() > 2 && out.leftFoot < 0) out.leftFoot = left.back();
                 }
-                for (int idx : left) pushAnchor(idx);
-                for (int idx : right) pushAnchor(idx);
-                if (left.size() > 0) out.leftHip   = left[0];
-                if (left.size() > 1) out.leftKnee  = left[1];
-                if (left.size() > 2) out.leftFoot  = left[2];
-                if (right.size() > 0) out.rightHip  = right[0];
-                if (right.size() > 1) out.rightKnee = right[1];
-                if (right.size() > 2) out.rightFoot = right[2];
+                if (out.rightHip < 0 || out.rightKnee < 0) {
+                    for (int idx : right) pushAnchor(idx);
+                    if (right.size() > 0 && out.rightHip < 0)  out.rightHip  = right[0];
+                    if (right.size() > 1 && out.rightKnee < 0) out.rightKnee = right[1];
+                    if (right.size() > 2 && out.rightFoot < 0) out.rightFoot = right.back();
+                }
+                refinePelvisFromHips();
             }
         }
 
         if (missingArms) {
             std::vector<std::vector<int>> arms;
-            for (int b = 0; b < count; ++b) {
-                if (parent[b] != out.chest || onSpine[b]) continue;
-                auto chain = walkChain(b, 3);
-                if (chain.size() >= 3 && chainLength(chain) > 0.25f)
-                    arms.push_back(std::move(chain));
+            // Check chest first, then its immediate parent spine bone.
+            int armParents[2] = { spineAnchorHigh, (spineAnchorHigh >= 0) ? parent[spineAnchorHigh] : -1 };
+            for (int armParent : armParents) {
+                if (armParent < 0) continue;
+                arms.clear();
+                for (int b = 0; b < count; ++b) {
+                    if (parent[b] != armParent || onSpine[b] || !rh.reachable[b]) continue;
+                    if (b == out.leftHip || b == out.rightHip) continue;
+                    auto chain = walkChain(b, 3);
+                    const float len = chainLength(chain);
+                    if (chain.size() >= 3 && len > 0.25f && len < 1.35f)
+                        arms.push_back(std::move(chain));
+                }
+                if (arms.size() >= 2) break;
             }
             std::sort(arms.begin(), arms.end(), [&](const auto& a, const auto& b) {
                 return chainLength(a) > chainLength(b);
             });
             if (arms.size() >= 2) {
                 auto& aA = arms[0]; auto& aB = arms[1];
-                bool aIsLeft = local[aA[0]].p.x < local[aB[0]].p.x;
+                const float ax = fkValid[aA[0]] ? fkWorld[aA[0]].x : local[aA[0]].p.x;
+                const float bx = fkValid[aB[0]] ? fkWorld[aB[0]].x : local[aB[0]].p.x;
+                bool aIsLeft = ax < bx;
                 auto& left  = aIsLeft ? aA : aB;
                 auto& right = aIsLeft ? aB : aA;
-                for (int idx : left) pushAnchor(idx);
-                for (int idx : right) pushAnchor(idx);
                 const std::size_t ls = left.size() >= 4 ? 1 : 0;
                 const std::size_t rs = right.size() >= 4 ? 1 : 0;
-                if (left.size() > ls)     out.leftShoulder  = left[ls];
-                if (left.size() > ls + 1) out.leftElbow     = left[ls + 1];
-                if (left.size() > ls + 2) out.leftHand      = left[ls + 2];
-                if (right.size() > rs)     out.rightShoulder = right[rs];
-                if (right.size() > rs + 1) out.rightElbow    = right[rs + 1];
-                if (right.size() > rs + 2) out.rightHand     = right[rs + 2];
+                if (out.leftShoulder < 0 || out.leftElbow < 0) {
+                    for (int idx : left) pushAnchor(idx);
+                    if (left.size() > ls     && out.leftShoulder < 0) out.leftShoulder = left[ls];
+                    if (left.size() > ls + 1 && out.leftElbow < 0)    out.leftElbow    = left[ls + 1];
+                    if (left.size() > ls + 2 && out.leftHand < 0)     out.leftHand     = left[ls + 2];
+                }
+                if (out.rightShoulder < 0 || out.rightElbow < 0) {
+                    for (int idx : right) pushAnchor(idx);
+                    if (right.size() > rs     && out.rightShoulder < 0) out.rightShoulder = right[rs];
+                    if (right.size() > rs + 1 && out.rightElbow < 0)    out.rightElbow    = right[rs + 1];
+                    if (right.size() > rs + 2 && out.rightHand < 0)     out.rightHand     = right[rs + 2];
+                }
             }
         }
     }
@@ -730,8 +1162,9 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                 }
             }
         }
-        // Only extend from leaf bones (no selected children) so we get
-        // fingers/toes but not random chest/spine helper branches.
+        // Only extend foot leaf bones (toes, <= 24 cm). Extending from hand
+        // leaves picks up Weapone1_jnt / Magazine1_jnt / weapon props parented
+        // to the hands, which draw flickering lines out in front of the body.
         std::vector<int> selChildCount(count, 0);
         for (int b = 0; b < count; ++b)
             if (out.selected[b] && out.parent[b] >= 0 && out.selected[out.parent[b]])
@@ -742,9 +1175,10 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
             if (p < 0 || p >= count || facial[p] || !rh.reachable[p]) continue;
             if (out.selected[b] || !out.selected[p]) continue;
             if (selChildCount[p] > 0) continue;
+            if (p != out.leftFoot && p != out.rightFoot) continue;
             const float dx = local[b].p.x, dy = local[b].p.y, dz = local[b].p.z;
             const float distSq = dx*dx + dy*dy + dz*dz;
-            if (distSq > 0.0004f && distSq < 1.44f) {
+            if (distSq > 0.0004f && distSq < 0.06f) {
                 out.segments.push_back({p, b});
                 out.selected[b] = 1;
                 out.selected[p] = 1;
@@ -755,8 +1189,13 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
     const int* defaultMap = isWoman ? kDefaultBoneMapWoman : kDefaultBoneMapMan;
     out.boneMap.assign(defaultMap, defaultMap + 94);
     out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
-    int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
-        read, out.boneMap);
+    // Skip name reads entirely when all limbs already resolved and Chams is off.
+    if (!namesRead && ConfigInstance.Player.Chams)
+        ReadNamedBones(count, root, out.parent, rh.reachable, rh.transforms, read, namedBones);
+    if (!namedBones.empty()) {
+        int nameMatched = RefineBonemapFromNamed(count, namedBones, out.boneMap);
+        (void)nameMatched;
+    }
     for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
     return !out.segments.empty();
 }
@@ -788,6 +1227,7 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
 
     std::vector<Vec> world(static_cast<std::size_t>(count));
     std::vector<Quat> worldRot(static_cast<std::size_t>(count));
+    std::vector<Vec> worldScale(static_cast<std::size_t>(count), {1.f, 1.f, 1.f});
     std::vector<unsigned char> worldValid(static_cast<std::size_t>(count), 0);
     for (int b = 0; b < count; ++b) {
         if (!boneValid[b]) continue;
@@ -796,29 +1236,34 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
             // Root bone
             world[b] = local[b].p;
             worldRot[b] = local[b].q;
+            worldScale[b] = local[b].s;
             worldValid[b] = 1;
         } else if (p < b && worldValid[p]) {
             // Topological parent-first fast-path:
-            // world = parent pos + parent rot * local pos
+            // world = parent pos + parent rot * (parent scale * local pos)
             // rot = parent rot * local rot
             worldRot[b] = MulQuat(worldRot[p], local[b].q);
-            world[b] = Add(world[p], Rotate(worldRot[p], Mul(local[b].s, local[b].p)));
+            worldScale[b] = Mul(worldScale[p], local[b].s);
+            world[b] = Add(world[p], Rotate(worldRot[p], Mul(worldScale[p], local[b].p)));
             worldValid[b] = 1;
         } else {
             // Fallback for non-topological parent index
             Vec v = local[b].p;
             Quat q = local[b].q;
+            Vec s = local[b].s;
             bool ok = true;
             int steps = 0;
             for (int curP = p; curP != -1; ++steps) {
                 if (steps >= count || curP < 0 || curP >= count || !boneValid[curP]) { ok = false; break; }
                 v = Add(local[curP].p, Rotate(local[curP].q, Mul(local[curP].s, v)));
                 q = MulQuat(local[curP].q, q);
+                s = Mul(local[curP].s, s);
                 curP = layout.parent[curP];
             }
             if (ok && Finite(v)) {
                 world[b] = v;
                 worldRot[b] = q;
+                worldScale[b] = s;
                 worldValid[b] = 1;
             }
         }
@@ -854,6 +1299,11 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
         if (!worldValid[seg.first] || !worldValid[seg.second]) continue;
         result.push_back({world[seg.first], world[seg.second]});
     }
+    // Reject partial/torn pose reads where one or more rig segments dropped out
+    // mid-DMA so the reader retries or keeps the previous intact frame instead
+    // of flashing a half-missing skeleton and resetting temporal filtering.
+    if (!layout.segments.empty() && result.size() < layout.segments.size())
+        return false;
     if (result.empty()) {
         // Fallback: line each bone to its parent
         for (int b = 0; b < count; ++b) {
@@ -985,19 +1435,11 @@ std::vector<BoneSegment> BuildFromView(U view, const Read& read)
     return result;
 }
 
-std::vector<BoneSegment> BuildSkeleton(
-    U game, U battleModel, std::int32_t entityId, const Read& read)
+U FindEntityView(U game, U battleModel, std::int32_t entityId, const Read& read)
 {
-    static int lc = 0;
-    const bool log = lc < 10;
-    if (!read || battleModel <= 0x10000) {
-        if (log) { ++lc; DLOG("BuildSkeleton: early exit (read=%d bm=0x%llx)", !!read, (unsigned long long)battleModel); }
-        return {};
-    }
+    if (!read || battleModel <= 0x10000) return 0;
     Snapshot m{read,{}};
 
-    // Verified active-updater path:
-    //   Game+0x20 -> List -> array[i] -> +0x50 -> +0x18 -> +0x90.
     U updater = 0;
     {
         U list = m.ptr(game, 0x20);
@@ -1018,59 +1460,47 @@ std::vector<BoneSegment> BuildSkeleton(
         }
     }
 
-    // Legacy fallback chain retained for sessions where the active list has
-    // not been populated yet.
     if (!updater) {
-        if (log) DLOG("BuildSkeleton: active-updater missed, trying legacy chain");
         const U chainOffsets[] = {0x98,0x20,0x50,0x18,0x90};
         const char* classes[] = {"Game","StartGameProcessor","ScreenManager",
             "BattleScreenUpdater","BattleUpdater","BattleEntitiesUpdater"};
         updater = game;
         for (int i = 0; i < 6; ++i) {
-            if (!m.is(updater,classes[i])) {
-                if (log) { ++lc; DLOG("BuildSkeleton: legacy chain failed at step %d (expected %s, got %s, addr=0x%llx)", i, classes[i], m.className(updater).c_str(), (unsigned long long)updater); }
-                return {};
-            }
-            if (i == 4 && m.ptr(updater,0xE0) != battleModel) {
-                if (log) { ++lc; DLOG("BuildSkeleton: legacy chain battleModel mismatch at step 4"); }
-                return {};
-            }
+            if (!m.is(updater,classes[i])) return 0;
+            if (i == 4 && m.ptr(updater,0xE0) != battleModel) return 0;
             if (i < 5) updater = m.ptr(updater,chainOffsets[i]);
         }
     }
-
-    if (log) DLOG("BuildSkeleton: updater=0x%llx, reading dict", (unsigned long long)updater);
 
     U dict = m.ptr(updater,0x110), entries = m.ptr(dict,0x18);
     std::int32_t used = 0;
     U capacity = 0;
     if (!dict || !entries || !m.get(dict+0x20,used) ||
         !m.get(entries+0x18,capacity) || used < 1 || used > 512 ||
-        capacity < static_cast<U>(used)) {
-        if (log) { ++lc; DLOG("BuildSkeleton: dict read failed (dict=0x%llx entries=0x%llx used=%d cap=%llu)", (unsigned long long)dict, (unsigned long long)entries, used, (unsigned long long)capacity); }
-        return {};
-    }
+        capacity < static_cast<U>(used)) return 0;
+
     struct Entry { std::int32_t hash,next,key,pad; U value; };
     static_assert(sizeof(Entry) == 24 && offsetof(Entry,value) == 0x10);
     std::vector<Entry> slots(used);
-    if (!m.array(entries+0x20,slots,true)) {
-        if (log) { ++lc; DLOG("BuildSkeleton: array read failed (used=%d)", used); }
-        return {};
-    }
+    if (!m.array(entries+0x20,slots,true)) return 0;
+
     U view = 0;
     for (const auto& e : slots) if (e.hash >= 0 && e.key == entityId) {
-        if (view || e.value <= 0x10000) {
-            if (log) { ++lc; DLOG("BuildSkeleton: view lookup failed (dup=%d val=0x%llx)", !!view, (unsigned long long)e.value); }
-            return {};
-        }
+        if (view || e.value <= 0x10000) return 0;
         view = e.value;
     }
+    if (!view || !m.is(view,"BattleCharacterEntityView")) return 0;
+    return view;
+}
+
+std::vector<BoneSegment> BuildSkeleton(
+    U game, U battleModel, std::int32_t entityId, const Read& read)
+{
+    static int lc = 0;
+    const bool log = lc < 10;
+    U view = FindEntityView(game, battleModel, entityId, read);
     if (!view) {
-        if (log) { ++lc; DLOG("BuildSkeleton: entityId %d not found in dict (used=%d)", entityId, used); }
-        return {};
-    }
-    if (!m.is(view,"BattleCharacterEntityView")) {
-        if (log) { ++lc; DLOG("BuildSkeleton: view class check failed (view=0x%llx class=%s)", (unsigned long long)view, m.className(view).c_str()); }
+        if (log) { ++lc; DLOG("BuildSkeleton: view not found (entityId=%d)", entityId); }
         return {};
     }
     if (log) DLOG("BuildSkeleton: calling BuildFromView (view=0x%llx entityId=%d)", (unsigned long long)view, entityId);
@@ -1129,63 +1559,8 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     const std::vector<unsigned char>& reachable = rh.reachable;
     auto ancestor = [&](int a, int b) { return rh.isAncestor(a, b); };
 
-    EnsureNameOffsetsProbed(count, root, parent, reachable, transforms, read);
-    struct NamedBone { int index; std::string name; };
     std::vector<NamedBone> namedBones;
-    for (int b = 0; b < count; ++b) {
-        if (!reachable[b] || !ancestor(root, b)) continue;
-        char buf[64]{};
-        if (!ReadBoneName(read, transforms[b], buf, sizeof(buf)))
-            continue;
-        namedBones.push_back({b, std::string(buf)});
-    }
-
-    struct BoneMapping { const char* name; std::int32_t* target; };
-    BoneMapping mappings[] = {
-        {"Hips", &out.pelvis},
-        {"Pelvis", &out.pelvis},
-        {"Spine1", &out.chest},
-        {"Spine2", &out.chest},
-        {"Chest", &out.chest},
-        {"Neck", &out.neck},
-        {"Head", &out.head},
-        {"LeftShoulder", &out.leftShoulder},
-        {"LeftUpperArm", &out.leftShoulder},
-        {"LeftLowerArm", &out.leftElbow},
-        {"LeftForeArm", &out.leftElbow},
-        {"LeftHand", &out.leftHand},
-        {"RightShoulder", &out.rightShoulder},
-        {"RightUpperArm", &out.rightShoulder},
-        {"RightLowerArm", &out.rightElbow},
-        {"RightForeArm", &out.rightElbow},
-        {"RightHand", &out.rightHand},
-        {"LeftUpperLeg", &out.leftHip},
-        {"LeftThigh", &out.leftHip},
-        {"LeftLowerLeg", &out.leftKnee},
-        {"LeftCalf", &out.leftKnee},
-        {"LeftFoot", &out.leftFoot},
-        {"RightUpperLeg", &out.rightHip},
-        {"RightThigh", &out.rightHip},
-        {"RightLowerLeg", &out.rightKnee},
-        {"RightCalf", &out.rightKnee},
-        {"RightFoot", &out.rightFoot},
-    };
-
-    auto nameContains = [](const std::string& haystack, const char* needle) {
-        const auto pos = haystack.find(needle);
-        if (pos == std::string::npos) return false;
-        const auto end = pos + std::strlen(needle);
-        return end >= haystack.size() ||
-            !std::isalpha(static_cast<unsigned char>(haystack[end]));
-    };
-
-    for (const auto& bone : namedBones) {
-        for (auto& mp : mappings) {
-            if (*mp.target >= 0) continue;
-            if (nameContains(bone.name, mp.name))
-                *mp.target = bone.index;
-        }
-    }
+    ReadNamedBones(count, root, parent, reachable, transforms, read, namedBones);
 
     std::vector<int> anchors;
     auto pushAnchor = [&](int index) {
@@ -1195,14 +1570,18 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
     };
 
     int centralAnchors = 0;
-    if (out.head >= 0) { pushAnchor(out.head); ++centralAnchors; }
-    if (out.neck >= 0) { pushAnchor(out.neck); ++centralAnchors; }
-    if (out.chest >= 0) { pushAnchor(out.chest); ++centralAnchors; }
-    if (out.pelvis >= 0) { pushAnchor(out.pelvis); ++centralAnchors; }
-    pushAnchor(out.leftShoulder); pushAnchor(out.leftElbow); pushAnchor(out.leftHand);
-    pushAnchor(out.rightShoulder); pushAnchor(out.rightElbow); pushAnchor(out.rightHand);
-    pushAnchor(out.leftHip); pushAnchor(out.leftKnee); pushAnchor(out.leftFoot);
-    pushAnchor(out.rightHip); pushAnchor(out.rightKnee); pushAnchor(out.rightFoot);
+    FillMissingAnchorsFromNames(namedBones, ancestor, pushAnchor, out, centralAnchors);
+
+    // Prefer shared thigh ancestor (true hips) as out.pelvis when available.
+    if (out.leftHip >= 0 && out.rightHip >= 0) {
+        int trueHips = parent[out.leftHip];
+        for (int steps = 0; trueHips >= 0 && !ancestor(trueHips, out.rightHip) && steps < count; ++steps)
+            trueHips = parent[trueHips];
+        if (trueHips >= 0 && out.chest >= 0 && ancestor(trueHips, out.chest) && trueHips != root) {
+            out.pelvis = trueHips;
+            pushAnchor(trueHips);
+        }
+    }
 
     if (anchors.size() < 2 || centralAnchors == 0) return false;
 
@@ -1235,12 +1614,35 @@ bool BuildLayoutByName(U view, const Read& read, RigLayout& out)
             out.segments.push_back({p, b});
     }
 
+    // Extend foot leaf bones (toes, <= 24 cm) identically to BuildLayoutFromView.
+    {
+        std::vector<int> selChildCount(count, 0);
+        for (int b = 0; b < count; ++b)
+            if (out.selected[b] && out.parent[b] >= 0 && out.selected[out.parent[b]])
+                ++selChildCount[out.parent[b]];
+        for (int b = 0; b < count; ++b) {
+            if (!rh.reachable[b]) continue;
+            const int p = out.parent[b];
+            if (p < 0 || p >= count || !rh.reachable[p]) continue;
+            if (out.selected[b] || !out.selected[p]) continue;
+            if (selChildCount[p] > 0) continue;
+            if (p != out.leftFoot && p != out.rightFoot) continue;
+            const float dx = rh.local[b].p.x, dy = rh.local[b].p.y, dz = rh.local[b].p.z;
+            const float distSq = dx*dx + dy*dy + dz*dz;
+            if (distSq > 0.0004f && distSq < 0.06f) {
+                out.segments.push_back({p, b});
+                out.selected[b] = 1;
+                out.selected[p] = 1;
+            }
+        }
+    }
+
     const bool isWoman = (out.head == 15 || out.neck == 14 || count < 200);
     const int* defaultMap = isWoman ? kDefaultBoneMapWoman : kDefaultBoneMapMan;
     out.boneMap.assign(defaultMap, defaultMap + 94);
     out.boneMap[78] = out.boneMap[79] = out.boneMap[81] = out.boneMap[82] = out.boneMap[83] = -1;
-    int nameMatched = RefineBonemapByName(count, root, out.parent, rh.reachable, rh.transforms,
-        read, out.boneMap);
+    int nameMatched = RefineBonemapFromNamed(count, namedBones, out.boneMap);
+    (void)nameMatched;
     for (int i = 6; i <= 38; ++i) out.boneMap[i] = -1;
     return !out.segments.empty();
 }

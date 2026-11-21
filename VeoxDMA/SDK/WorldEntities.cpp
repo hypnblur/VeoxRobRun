@@ -11,6 +11,7 @@
 #include <cmath>
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 
 
 // Trunk/table inventory walks stay off the hot path: the slot layout is still
@@ -725,6 +726,73 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     out.worldPtr = world;
     out.valid = true;
 
+    // Read vehicles FIRST so they are never truncated by the 4096-entity cap
+    // on dense maps with thousands of loot/container objects.
+    AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::CarModel::Transform);
+            return ReadVehiclePosition(transform, position);
+        }, out, out.vehicles);
+
+    AddDictionary(world, rr::WorldEntitiesModel::Helicopters, Kind::Helicopter,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::HelicopterModel::Transform);
+            return ReadVehiclePosition(transform, position);
+        }, out, out.vehicles);
+
+    // Vehicles describe themselves by model id ("fukurou_spark_9", ...) on the
+    // description object. That id is what the loot filter matches an icon on,
+    // so replace the generic "Car"/"Helicopter" label with it.
+    {
+        std::unordered_map<std::int32_t, std::size_t> idx;
+        for (std::size_t i = 0; i < out.entities.size(); ++i) {
+            const auto k = out.entities[i].kind;
+            if (k == Kind::Car || k == Kind::Helicopter)
+                idx[out.entities[i].id] = i;
+        }
+        auto labelVehicles = [&](std::uintptr_t dictOffset, std::uintptr_t descriptionOffset) {
+            std::vector<RobRunMemory::DictEntry> entries;
+            if (!ReadCollection(world, dictOffset, entries)) return;
+            for (const auto& e : entries) {
+                auto it = idx.find(e.key);
+                if (it == idx.end() || e.value <= 0x10000) continue;
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(e.value + descriptionOffset);
+                std::string id = ReadIdentifiedId(desc);
+                if (!id.empty())
+                    out.entities[it->second].label = std::move(id);
+            }
+        };
+        labelVehicles(rr::WorldEntitiesModel::Cars, rr::CarModel::Description);
+        labelVehicles(rr::WorldEntitiesModel::Helicopters, rr::HelicopterModel::Description);
+    }
+
+    // Also pick up any generic VehicleModel entries not already listed in Cars/Helicopters.
+    {
+        std::unordered_set<int> seenVehIds;
+        seenVehIds.reserve(out.entities.size());
+        for (const auto& e : out.entities) seenVehIds.insert(e.id);
+        std::vector<RobRunMemory::DictEntry> vehEntries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::Vehicles, vehEntries)) {
+            for (const auto& entry : vehEntries) {
+                if (entry.value <= 0x10000 || seenVehIds.count(entry.key)) continue;
+                const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                    entry.value + rr::VehicleModel::Transform);
+                Vector3 position{};
+                if (!ReadVehiclePosition(transform, position)) continue;
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::Vehicle;
+                entity.position = position;
+                entity.label = KindName(Kind::Vehicle);
+                out.entities.push_back(std::move(entity));
+                seenVehIds.insert(entry.key);
+                ++out.vehicles;
+            }
+        }
+    }
+
     const std::size_t containerStart = out.entities.size();
     AddDictionary(world, rr::WorldEntitiesModel::Containers, Kind::Container,
         [](std::uintptr_t model, Vector3& position) {
@@ -901,46 +969,6 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 }
             }
         }
-    }
-
-    AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::CarModel::Transform);
-            return ReadVehiclePosition(transform, position);
-        }, out, out.vehicles);
-
-    AddDictionary(world, rr::WorldEntitiesModel::Helicopters, Kind::Helicopter,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::HelicopterModel::Transform);
-            return ReadVehiclePosition(transform, position);
-        }, out, out.vehicles);
-
-    // Vehicles describe themselves by model id ("fukurou_spark_9", ...) on the
-    // description object. That id is what the loot filter matches an icon on,
-    // so replace the generic "Car"/"Helicopter" label with it.
-    {
-        std::unordered_map<std::int32_t, std::size_t> idx;
-        for (std::size_t i = 0; i < out.entities.size(); ++i) {
-            const auto k = out.entities[i].kind;
-            if (k == Kind::Car || k == Kind::Helicopter)
-                idx[out.entities[i].id] = i;
-        }
-        auto labelVehicles = [&](std::uintptr_t dictOffset, std::uintptr_t descriptionOffset) {
-            std::vector<RobRunMemory::DictEntry> entries;
-            if (!ReadCollection(world, dictOffset, entries)) return;
-            for (const auto& e : entries) {
-                auto it = idx.find(e.key);
-                if (it == idx.end() || e.value <= 0x10000) continue;
-                const std::uintptr_t desc = RobRunMemory::ReadPtr(e.value + descriptionOffset);
-                std::string id = ReadIdentifiedId(desc);
-                if (!id.empty())
-                    out.entities[it->second].label = std::move(id);
-            }
-        };
-        labelVehicles(rr::WorldEntitiesModel::Cars, rr::CarModel::Description);
-        labelVehicles(rr::WorldEntitiesModel::Helicopters, rr::HelicopterModel::Description);
     }
 
     AddDictionary(world, rr::WorldEntitiesModel::Grenades, Kind::Grenade,

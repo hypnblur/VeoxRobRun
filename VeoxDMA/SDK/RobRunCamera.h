@@ -16,6 +16,7 @@ struct CameraState {
     float distance = 0.f;
     float verticalFov = 60.f;
     bool fovFromCinemachine = false;
+    bool usedPhysical = false;
 };
 
 void Init(std::uintptr_t gameAssemblyBase);

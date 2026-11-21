@@ -136,6 +136,12 @@ inline std::size_t PoseDataSize(const RigLayout& layout) {
 std::vector<BoneSegment> BuildFromView(
     std::uint64_t view, const ReadFn& read);
 
+// Looks up the BattleCharacterEntityView pointer for an entityId via the
+// active BattleEntitiesUpdater dictionary. Returns 0 if not found.
+std::uint64_t FindEntityView(
+    std::uint64_t game, std::uint64_t battleModel,
+    std::int32_t entityId, const ReadFn& read);
+
 // Fallback used when the view pointer is unknown: walks the active updater to
 // find the entity view, then extracts the rig.
 std::vector<BoneSegment> BuildSkeleton(
