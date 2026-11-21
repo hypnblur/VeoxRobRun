@@ -353,6 +353,7 @@ struct RectTransformCache {
     float uiMinX = 0.f, uiMinY = 0.f, uiMaxX = 0.f, uiMaxY = 0.f;
     float uiCenterX = 0.f, uiCenterY = 0.f;
     float uiScaleX = 1.f, uiScaleY = 1.f;
+    float uiScreenW = 0.f, uiScreenH = 0.f;
 };
 static std::uintptr_t cachedMapDialogModel = 0;
 static std::uintptr_t cachedMapConfigModel = 0;
@@ -362,6 +363,15 @@ static std::uintptr_t cachedMapModelPtr = 0;
 static RectTransformCache g_miniRectCache{};
 static RectTransformCache g_fullRectCache{};
 static std::int32_t s_rectTransformRectOffset = -1;
+static std::atomic<std::uintptr_t> g_liveFullMapVarPtr{ 0 };
+static std::mutex g_liveFullMapMutex;
+static struct {
+    bool valid = false;
+    Vector2 pos{};
+    float rot = 0.f;
+    float camSize = 0.f;
+} g_liveFullMap{};
+static std::atomic<bool> g_fullMapFastMode{ false };
 
 static void ClearEntityCaches()
 {
@@ -375,6 +385,12 @@ static void ClearEntityCaches()
     g_miniRectCache = RectTransformCache{};
     g_fullRectCache = RectTransformCache{};
     inGameMapState = InGameMapState{};
+    g_liveFullMapVarPtr.store(0, std::memory_order_release);
+    g_fullMapFastMode.store(false, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+        g_liveFullMap.valid = false;
+    }
 }
 
 static void PruneCaches()
@@ -960,12 +976,16 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             g_perfWorkerUs.fetch_add(dt, std::memory_order_relaxed);
             std::uint64_t prevMax = g_perfWorkerMaxUs.load(std::memory_order_relaxed);
             while (dt > prevMax && !g_perfWorkerMaxUs.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {}
-            // Adaptive sleep: 2 ms when entities are active so the FPGA bus has
-            // clean breathing room for sub-ms camera reads while keeping entity
-            // snapshots fast (~50-70 Hz), or 10 ms during empty lobbies.
-            const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
-            for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
-                Sleep(1);
+            // Adaptive sleep: 0 ms (yield only) when fullscreen map is open and
+            // 3D ESP is hidden so map positions refresh at 300-500 Hz, 2 ms when
+            // normal 3D entities are active, or 10 ms during empty lobbies.
+            if (g_fullMapFastMode.load(std::memory_order_relaxed)) {
+                SwitchToThread();
+            } else {
+                const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
+                for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
+                    Sleep(1);
+            }
         }
     });
 
@@ -2203,59 +2223,119 @@ static bool RestoreDefaultCrosshair()
     return restored;
 }
 
-static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache, bool forceRefresh)
+static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache, bool forceRefresh, const char* tag)
 {
     if (managedRect <= 0x10000) {
         cache.valid = false;
         return false;
     }
     const std::uint64_t now = GetTickCount64();
-    if (!forceRefresh && cache.managed == managedRect && cache.valid && (now - cache.stampMs) < 500)
-        return true;
+    if (!forceRefresh && cache.managed == managedRect && (now - cache.stampMs) < 500)
+        return cache.valid;
 
     cache.managed = managedRect;
     cache.stampMs = now;
 
-    const std::uintptr_t native = ReadPtr(managedRect + rr::UnityTransform::native);
+    // Uncached-first read helpers: under -norefresh, newly instantiated UI
+    // dialogs (e.g. MapDialogView on pressing 'M') may not be in VMM's cache.
+    auto mapReadBytes = [](std::uintptr_t addr, void* buf, std::size_t sz) -> bool {
+        if (addr <= 0x10000 || !buf || !sz) return false;
+        if (TargetProcess.ReadFresh(addr, buf, sz)) return true;
+        return TargetProcess.Read(addr, buf, sz);
+    };
+    auto mapReadPtr = [&](std::uintptr_t addr) -> std::uintptr_t {
+        std::uintptr_t v = 0;
+        return mapReadBytes(addr, &v, sizeof(v)) ? v : 0;
+    };
+    auto mapReadI32 = [&](std::uintptr_t addr, std::int32_t& out) -> bool {
+        return mapReadBytes(addr, &out, sizeof(out));
+    };
+
+    const std::uintptr_t native = mapReadPtr(managedRect + rr::UnityTransform::native);
     if (native <= 0x10000) { cache.valid = false; return false; }
-    const std::uintptr_t hierarchy = ReadPtr(native + rr::UnityTransform::hierarchy);
+    const std::uintptr_t hierarchy = mapReadPtr(native + rr::UnityTransform::hierarchy);
     if (hierarchy <= 0x10000) { cache.valid = false; return false; }
 
-    const std::uintptr_t matrices = ReadPtr(hierarchy + rr::UnityTransform::matrices);
-    const std::uintptr_t parents  = ReadPtr(hierarchy + rr::UnityTransform::parents);
-    const std::uintptr_t pointers = ReadPtr(hierarchy + rr::UnityTransform::pointers);
-    std::int32_t count = RobRunMemory::ReadInt32(hierarchy + rr::UnityTransform::count);
-    if (count < 1 || count > 4096)
-        count = RobRunMemory::ReadInt32(hierarchy + 0x10);
-    if (matrices <= 0x10000 || parents <= 0x10000 || pointers <= 0x10000 ||
-        count < 1 || count > 4096) {
+    const std::uintptr_t matrices = mapReadPtr(hierarchy + rr::UnityTransform::matrices);
+    const std::uintptr_t parents  = mapReadPtr(hierarchy + rr::UnityTransform::parents);
+    const std::uintptr_t pointers = mapReadPtr(hierarchy + rr::UnityTransform::pointers);
+    if (matrices <= 0x10000 || parents <= 0x10000) {
         cache.valid = false;
         return false;
     }
 
-    // Locate native Transform index inside hierarchy.pointers
-    std::vector<std::uintptr_t> ptrs(static_cast<std::size_t>(count), 0);
-    if (!TargetProcess.Read(pointers, ptrs.data(), ptrs.size() * sizeof(std::uintptr_t))) {
-        cache.valid = false;
-        return false;
-    }
+    // 1. Resolve transform index inside the hierarchy.
+    // Fast path: Native Transform + 0x30 holds the uint32 transform index
+    // (verified in single 8-byte read against hierarchy.pointers[idx] == native).
     int idx = -1;
-    for (int i = 0; i < count; ++i) {
-        if (ptrs[static_cast<std::size_t>(i)] == native) { idx = i; break; }
+    if (pointers > 0x10000) {
+        constexpr std::uintptr_t kIdxOffsets[] = {
+            rr::UnityTransform::index, 0x20, 0x34, 0x38, 0x40, 0x44, 0x48
+        };
+        for (std::uintptr_t off : kIdxOffsets) {
+            std::int32_t cand = -1;
+            if (mapReadI32(native + off, cand) && cand >= 0 && cand < 131072) {
+                if (mapReadPtr(pointers + static_cast<std::uintptr_t>(cand) * sizeof(std::uintptr_t)) == native) {
+                    idx = cand;
+                    break;
+                }
+            }
+        }
+        // Fallback: chunked 4 KB scan of hierarchy.pointers (tolerates large
+        // UI Canvas hierarchies with >4096 elements without multi-page cache misses).
+        if (idx < 0) {
+            std::int32_t count = 0;
+            if (!mapReadI32(hierarchy + rr::UnityTransform::count, count) || count < 1 || count > 65536) {
+                if (!mapReadI32(hierarchy + 0x10, count) || count < 1 || count > 65536)
+                    count = 16384;
+            }
+            constexpr int kChunkPtrs = 512;
+            std::uintptr_t chunk[kChunkPtrs];
+            for (int base = 0; base < count && idx < 0; base += kChunkPtrs) {
+                const int n = std::min(kChunkPtrs, count - base);
+                if (!mapReadBytes(pointers + static_cast<std::uintptr_t>(base) * sizeof(std::uintptr_t),
+                                  chunk, static_cast<std::size_t>(n) * sizeof(std::uintptr_t)))
+                    break;
+                for (int i = 0; i < n; ++i) {
+                    if (chunk[i] == native) { idx = base + i; break; }
+                }
+            }
+        }
+    } else {
+        std::int32_t cand = -1;
+        if (mapReadI32(native + rr::UnityTransform::index, cand) && cand >= 0 && cand < 65536)
+            idx = cand;
     }
-    if (idx < 0) { cache.valid = false; return false; }
 
-    std::vector<std::int32_t> par(static_cast<std::size_t>(count), -1);
-    if (!TargetProcess.Read(parents, par.data(), par.size() * sizeof(std::int32_t))) {
+    if (idx < 0) {
+        static bool loggedIdxFail = false;
+        if (!loggedIdxFail) {
+            loggedIdxFail = true;
+            std::printf("[MapProbe] %s idx resolve failed: rc=0x%llX native=0x%llX hier=0x%llX ptrs=0x%llX\n",
+                tag ? tag : "?", (unsigned long long)managedRect,
+                (unsigned long long)native, (unsigned long long)hierarchy, (unsigned long long)pointers);
+        }
         cache.valid = false;
         return false;
     }
 
-    // Collect ancestor chain from idx up to canvas root (typically 4-12 nodes)
+    // 2. Walk ancestor chain from idx up to the Canvas root one parent at a time
+    // (typically 4-10 hops; avoids reading the entire Canvas parent array).
     std::vector<int> chain;
     chain.reserve(16);
-    for (int cur = idx, steps = 0; cur >= 0 && cur < count && steps < 64; cur = par[static_cast<std::size_t>(cur)], ++steps)
+    for (int cur = idx, steps = 0; cur >= 0 && cur < 131072 && steps < 32; ++steps) {
+        bool cycle = false;
+        for (int existing : chain) {
+            if (existing == cur) { cycle = true; break; }
+        }
+        if (cycle) break;
         chain.push_back(cur);
+        std::int32_t p = -1;
+        if (!mapReadI32(parents + static_cast<std::uintptr_t>(cur) * sizeof(std::int32_t), p))
+            break;
+        if (p < 0 || p == cur) break;
+        cur = p;
+    }
     if (chain.empty()) { cache.valid = false; return false; }
     std::reverse(chain.begin(), chain.end());
 
@@ -2267,23 +2347,19 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     static_assert(sizeof(UiTRS) == 48);
 
     std::vector<UiTRS> chainTrs(chain.size());
-    {
-        Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
-        if (sc.handle) {
-            for (std::size_t i = 0; i < chain.size(); ++i) {
-                TargetProcess.AddScatterReadRequest(sc,
-                    matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
-                    &chainTrs[i], sizeof(UiTRS));
-            }
-            TargetProcess.ExecuteScatterReadCached(sc);
-        } else {
-            for (std::size_t i = 0; i < chain.size(); ++i) {
-                TargetProcess.Read(
-                    matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
-                    &chainTrs[i], sizeof(UiTRS));
-            }
+    std::vector<std::uintptr_t> chainNative(chain.size(), 0);
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (!mapReadBytes(matrices + static_cast<std::uintptr_t>(chain[i]) * sizeof(UiTRS),
+                          &chainTrs[i], sizeof(UiTRS))) {
+            cache.valid = false;
+            return false;
+        }
+        if (pointers > 0x10000) {
+            chainNative[i] = mapReadPtr(
+                pointers + static_cast<std::uintptr_t>(chain[i]) * sizeof(std::uintptr_t));
         }
     }
+    chainNative.back() = native;
 
     auto rotateV = [](float qx, float qy, float qz, float qw, float vx, float vy, float vz,
                       float& ox, float& oy, float& oz) {
@@ -2303,6 +2379,11 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
         ow = aw * bw - ax * bx - ay * by - az * bz;
     };
 
+    std::vector<float> nodeWx(chainTrs.size(), 0.f);
+    std::vector<float> nodeWy(chainTrs.size(), 0.f);
+    std::vector<float> nodeWsx(chainTrs.size(), 1.f);
+    std::vector<float> nodeWsy(chainTrs.size(), 1.f);
+
     float wx = 0.f, wy = 0.f, wz = 0.f;
     float rqx = 0.f, rqy = 0.f, rqz = 0.f, rqw = 1.f;
     float wsx = 1.f, wsy = 1.f, wsz = 1.f;
@@ -2314,21 +2395,27 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
             cache.valid = false;
             return false;
         }
+        const float pz = std::isfinite(t.pz) ? t.pz : 0.f;
+        const float sz = (std::isfinite(t.sz) && std::fabs(t.sz) > 1e-4f) ? t.sz : 1.f;
         const float inv = 1.f / std::sqrt(n);
         const float qx = t.qx * inv, qy = t.qy * inv, qz = t.qz * inv, qw = t.qw * inv;
         if (i == 0) {
-            wx = t.px; wy = t.py; wz = t.pz;
+            wx = t.px; wy = t.py; wz = pz;
             rqx = qx; rqy = qy; rqz = qz; rqw = qw;
-            wsx = t.sx; wsy = t.sy; wsz = t.sz;
+            wsx = t.sx; wsy = t.sy; wsz = sz;
         } else {
             float dx = 0.f, dy = 0.f, dz = 0.f;
-            rotateV(rqx, rqy, rqz, rqw, wsx * t.px, wsy * t.py, wsz * t.pz, dx, dy, dz);
+            rotateV(rqx, rqy, rqz, rqw, wsx * t.px, wsy * t.py, wsz * pz, dx, dy, dz);
             wx += dx; wy += dy; wz += dz;
             float nqx, nqy, nqz, nqw;
             mulQ(rqx, rqy, rqz, rqw, qx, qy, qz, qw, nqx, nqy, nqz, nqw);
             rqx = nqx; rqy = nqy; rqz = nqz; rqw = nqw;
-            wsx *= t.sx; wsy *= t.sy; wsz *= t.sz;
+            wsx *= t.sx; wsy *= t.sy; wsz *= sz;
         }
+        nodeWx[i] = wx;
+        nodeWy[i] = wy;
+        nodeWsx[i] = wsx;
+        nodeWsy[i] = wsy;
     }
 
     cache.uiCenterX = wx;
@@ -2336,70 +2423,235 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     cache.uiScaleX = (std::fabs(wsx) > 1e-4f) ? std::fabs(wsx) : 1.f;
     cache.uiScaleY = (std::fabs(wsy) > 1e-4f) ? std::fabs(wsy) : 1.f;
 
-    // Probe native RectTransform::m_Rect (x, y, width, height) in +0x50..+0x150.
-    constexpr std::uintptr_t kScanBase = 0x50;
-    constexpr std::size_t kScanFloats = 64; // 0x100 bytes (+0x50..+0x150)
-    float raw[kScanFloats]{};
-    if (!TargetProcess.Read(native + kScanBase, raw, sizeof(raw))) {
+    // 3. Read native UI::RectTransform fields (+0x30..+0x170) across the chain.
+    // Unity's C++ UI::RectTransform stores five contiguous Vector2f properties:
+    //   m_AnchorMin (+0x00), m_AnchorMax (+0x08), m_AnchoredPosition (+0x10),
+    //   m_SizeDelta (+0x18), m_Pivot (+0x20)
+    // and computes get_rect() recursively from parentSize:
+    //   size = sizeDelta + parentSize * (anchorMax - anchorMin)
+    //   rect = (-size * pivot, size)
+    constexpr std::uintptr_t kScanBase = 0x30;
+    constexpr std::size_t kScanFloats = 80; // 0x140 bytes (+0x30..+0x170)
+    std::vector<std::array<float, kScanFloats>> nodeRaw(chain.size());
+    std::vector<bool> hasRaw(chain.size(), false);
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (chainNative[i] > 0x10000 &&
+            mapReadBytes(chainNative[i] + kScanBase, nodeRaw[i].data(), sizeof(float) * kScanFloats)) {
+            hasRaw[i] = true;
+        }
+    }
+    if (!hasRaw.back()) {
         cache.valid = false;
         return false;
     }
 
-    auto validRectAt = [&](int fi, float& rx, float& ry, float& rw, float& rh) -> int {
-        if (fi < 0 || fi + 3 >= static_cast<int>(kScanFloats)) return 0;
-        rx = raw[fi]; ry = raw[fi + 1]; rw = raw[fi + 2]; rh = raw[fi + 3];
-        if (!std::isfinite(rx) || !std::isfinite(ry) || !std::isfinite(rw) || !std::isfinite(rh)) return 0;
-        if (rw < 60.f || rw > 4000.f || rh < 60.f || rh > 4000.f) return 0;
-        if (rx > 2.f || rx < -rw - 2.f || ry > 2.f || ry < -rh - 2.f) return 0;
-        const float sw = rw * cache.uiScaleX;
-        const float sh = rh * cache.uiScaleY;
-        if (sw < 60.f || sw > 4200.f || sh < 60.f || sh > 2600.f) return 0;
-        // Centered pivot (0.5, 0.5): x == -w/2, y == -h/2
-        if (std::fabs(rx + 0.5f * rw) < 2.f && std::fabs(ry + 0.5f * rh) < 2.f)
-            return 100;
-        // Corner pivot (0,0) / (1,1) / etc.
-        if ((std::fabs(rx) < 1.f || std::fabs(rx + rw) < 1.f) &&
-            (std::fabs(ry) < 1.f || std::fabs(ry + rh) < 1.f))
-            return 60;
-        return 30;
+    auto validAnchorPivot = [](float ax0, float ay0, float ax1, float ay1,
+                               float apx, float apy, float sdx, float sdy,
+                               float px, float py) -> bool {
+        if (!std::isfinite(ax0) || !std::isfinite(ay0) || !std::isfinite(ax1) || !std::isfinite(ay1) ||
+            !std::isfinite(apx) || !std::isfinite(apy) || !std::isfinite(sdx) || !std::isfinite(sdy) ||
+            !std::isfinite(px)  || !std::isfinite(py))
+            return false;
+        if (ax0 < -0.02f || ax0 > 1.02f || ay0 < -0.02f || ay0 > 1.02f ||
+            ax1 < -0.02f || ax1 > 1.02f || ay1 < -0.02f || ay1 > 1.02f ||
+            px  < -0.02f || px  > 1.02f || py  < -0.02f || py  > 1.02f)
+            return false;
+        if (ax1 < ax0 - 0.01f || ay1 < ay0 - 0.01f)
+            return false;
+        if (std::fabs(apx) > 20000.f || std::fabs(apy) > 20000.f ||
+            std::fabs(sdx) > 20000.f || std::fabs(sdy) > 20000.f)
+            return false;
+        return true;
     };
 
-    float rx = 0.f, ry = 0.f, rw = 0.f, rh = 0.f;
+    auto evalRectFieldsAt = [&](int fi,
+                                float& outMinX, float& outMinY, float& outMaxX, float& outMaxY,
+                                float& outScreenW, float& outScreenH,
+                                float& outRw, float& outRh, float& outPivX, float& outPivY) -> int {
+        if (fi < 0 || fi + 9 >= static_cast<int>(kScanFloats))
+            return 0;
+
+        const auto& leafF = nodeRaw.back();
+        if (!validAnchorPivot(leafF[fi + 0], leafF[fi + 1], leafF[fi + 2], leafF[fi + 3],
+                              leafF[fi + 4], leafF[fi + 5], leafF[fi + 6], leafF[fi + 7],
+                              leafF[fi + 8], leafF[fi + 9]))
+            return 0;
+
+        int score = 20;
+        std::size_t canvasIdx = 0;
+        float canvasRefW = 1920.f;
+        float canvasRefH = 1080.f;
+        bool haveCanvasRef = false;
+
+        // Locate the root Canvas RectTransform in chain (anchorMin=(0,0),
+        // anchorMax=(0,0), pivot=(0.5,0.5), sizeDelta=(canvasRefW, canvasRefH)).
+        for (std::size_t k = 0; k + 1 < chain.size(); ++k) {
+            if (!hasRaw[k]) continue;
+            const auto& rf = nodeRaw[k];
+            const float ax0 = rf[fi + 0], ay0 = rf[fi + 1];
+            const float ax1 = rf[fi + 2], ay1 = rf[fi + 3];
+            const float sdx = rf[fi + 6], sdy = rf[fi + 7];
+            const float px  = rf[fi + 8], py  = rf[fi + 9];
+            if (std::fabs(ax0) < 0.01f && std::fabs(ay0) < 0.01f &&
+                std::fabs(ax1) < 0.01f && std::fabs(ay1) < 0.01f &&
+                std::fabs(px - 0.5f) < 0.01f && std::fabs(py - 0.5f) < 0.01f &&
+                sdx >= 600.f && sdx <= 8000.f && sdy >= 360.f && sdy <= 5000.f) {
+                const float aspect = sdx / sdy;
+                if (aspect >= 1.1f && aspect <= 3.8f) {
+                    canvasIdx = k;
+                    canvasRefW = sdx;
+                    canvasRefH = sdy;
+                    haveCanvasRef = true;
+                    score += 200;
+                    break;
+                }
+            }
+        }
+
+        if (!haveCanvasRef) {
+            for (std::size_t k = 0; k + 1 < chain.size(); ++k) {
+                if (nodeWx[k] >= 300.f && nodeWx[k] <= 4000.f &&
+                    nodeWy[k] >= 180.f && nodeWy[k] <= 2500.f &&
+                    std::fabs(nodeWsx[k]) > 1e-4f && std::fabs(nodeWsy[k]) > 1e-4f) {
+                    canvasIdx = k;
+                    canvasRefW = (2.f * nodeWx[k]) / std::fabs(nodeWsx[k]);
+                    canvasRefH = (2.f * nodeWy[k]) / std::fabs(nodeWsy[k]);
+                    haveCanvasRef = true;
+                    break;
+                }
+            }
+        }
+
+        float pw = canvasRefW;
+        float ph = canvasRefH;
+        float ppivX = 0.5f;
+        float ppivY = 0.5f;
+        float cx = 0.f;
+        float cy = 0.f;
+        float csx = 1.f;
+        float csy = 1.f;
+
+        for (std::size_t k = canvasIdx + 1; k < chain.size(); ++k) {
+            const float tx = chainTrs[k].px;
+            const float ty = chainTrs[k].py;
+            cx += csx * tx;
+            cy += csy * ty;
+            if (std::fabs(chainTrs[k].sx) > 1e-4f) csx *= chainTrs[k].sx;
+            if (std::fabs(chainTrs[k].sy) > 1e-4f) csy *= chainTrs[k].sy;
+
+            if (!hasRaw[k]) continue;
+            const auto& rf = nodeRaw[k];
+            const float ax0 = rf[fi + 0], ay0 = rf[fi + 1];
+            const float ax1 = rf[fi + 2], ay1 = rf[fi + 3];
+            const float apx = rf[fi + 4], apy = rf[fi + 5];
+            const float sdx = rf[fi + 6], sdy = rf[fi + 7];
+            const float px  = rf[fi + 8], py  = rf[fi + 9];
+            if (!validAnchorPivot(ax0, ay0, ax1, ay1, apx, apy, sdx, sdy, px, py)) {
+                if (k + 1 == chain.size()) return 0;
+                continue;
+            }
+
+            // Unity uGUI invariant: localPosition.xy == anchoredPosition + anchorRef
+            const float expX = apx + pw * (ax0 + (ax1 - ax0) * px - ppivX);
+            const float expY = apy + ph * (ay0 + (ay1 - ay0) * py - ppivY);
+            const float err  = std::fabs(expX - tx) + std::fabs(expY - ty);
+            if (err < 2.5f) {
+                score += 160;
+            } else if (err < 12.f) {
+                score += 60;
+            } else if (haveCanvasRef && err > 90.f) {
+                return 0;
+            }
+
+            pw = sdx + pw * (ax1 - ax0);
+            ph = sdy + ph * (ay1 - ay0);
+            ppivX = px;
+            ppivY = py;
+        }
+
+        const float rw = pw;
+        const float rh = ph;
+        const float absCsx = (std::fabs(csx) > 1e-4f) ? std::fabs(csx) : 1.f;
+        const float absCsy = (std::fabs(csy) > 1e-4f) ? std::fabs(csy) : 1.f;
+        const float sw = rw * absCsx;
+        const float sh = rh * absCsy;
+        if (!std::isfinite(sw) || !std::isfinite(sh) ||
+            sw < 50.f || sw > 8000.f || sh < 50.f || sh > 8000.f)
+            return 0;
+
+        // Standard UI pivots (0, 0.5, 1) and square/screen-sized containers earn bonus confidence.
+        auto isStandard01 = [](float v) {
+            return std::fabs(v) < 0.01f || std::fabs(v - 0.5f) < 0.01f || std::fabs(v - 1.f) < 0.01f;
+        };
+        if (isStandard01(ppivX) && isStandard01(ppivY))
+            score += 40;
+        if (std::fabs(sw - sh) < 6.f)
+            score += 30;
+
+        const float rx = -rw * ppivX;
+        const float ry = -rh * ppivY;
+        outMinX = (canvasRefW * 0.5f) + cx + rx * absCsx;
+        outMaxX = outMinX + sw;
+        outMinY = (canvasRefH * 0.5f) + cy + ry * absCsy;
+        outMaxY = outMinY + sh;
+        outScreenW = canvasRefW;
+        outScreenH = canvasRefH;
+        outRw = rw;
+        outRh = rh;
+        outPivX = ppivX;
+        outPivY = ppivY;
+        return score;
+    };
+
+    float minX = 0.f, minY = 0.f, maxX = 0.f, maxY = 0.f;
+    float screenW = 0.f, screenH = 0.f;
+    float rw = 0.f, rh = 0.f, pivX = 0.5f, pivY = 0.5f;
     bool foundRect = false;
+
     if (s_rectTransformRectOffset >= static_cast<std::int32_t>(kScanBase)) {
         const int fi = (s_rectTransformRectOffset - static_cast<std::int32_t>(kScanBase)) / 4;
-        if (validRectAt(fi, rx, ry, rw, rh) > 0)
+        if (evalRectFieldsAt(fi, minX, minY, maxX, maxY, screenW, screenH, rw, rh, pivX, pivY) >= 100)
             foundRect = true;
     }
     if (!foundRect) {
         int bestScore = 0;
         int bestFi = -1;
-        for (int fi = 0; fi + 3 < static_cast<int>(kScanFloats); ++fi) {
-            float tx, ty, tw, th;
-            const int score = validRectAt(fi, tx, ty, tw, th);
+        for (int fi = 0; fi + 9 < static_cast<int>(kScanFloats); ++fi) {
+            float tMinX, tMinY, tMaxX, tMaxY, tSW, tSH, tRw, tRh, tPx, tPy;
+            const int score = evalRectFieldsAt(fi, tMinX, tMinY, tMaxX, tMaxY, tSW, tSH, tRw, tRh, tPx, tPy);
             if (score > bestScore) {
                 bestScore = score;
                 bestFi = fi;
-                rx = tx; ry = ty; rw = tw; rh = th;
+                minX = tMinX; minY = tMinY; maxX = tMaxX; maxY = tMaxY;
+                screenW = tSW; screenH = tSH;
+                rw = tRw; rh = tRh; pivX = tPx; pivY = tPy;
             }
         }
-        if (bestFi >= 0) {
+        if (bestFi >= 0 && bestScore >= 60) {
             s_rectTransformRectOffset = static_cast<std::int32_t>(kScanBase) + bestFi * 4;
             foundRect = true;
-            std::printf("[MapProbe] RectTransform m_Rect discovered at native+0x%X: rect=(%.1f,%.1f %.1fx%.1f) uiPos=(%.1f,%.1f) scale=(%.3f,%.3f)\n",
-                s_rectTransformRectOffset, rx, ry, rw, rh, wx, wy, cache.uiScaleX, cache.uiScaleY);
+            std::printf("[MapProbe] RectTransform fields discovered at native+0x%X (score=%d): size=(%.1fx%.1f) pivot=(%.2f,%.2f) canvas=(%.0fx%.0f) bounds=(%.0f,%.0f..%.0f,%.0f)\n",
+                s_rectTransformRectOffset, bestScore, rw, rh, pivX, pivY, screenW, screenH, minX, minY, maxX, maxY);
         }
     }
 
     if (!foundRect) {
+        static bool loggedRectFail = false;
+        if (!loggedRectFail || forceRefresh) {
+            loggedRectFail = true;
+            std::printf("[MapProbe] %s RectTransform probe missed: native=0x%llX idx=%d chain=%zu wx=(%.1f,%.1f) scale=(%.3f,%.3f)\n",
+                tag ? tag : "?", (unsigned long long)native, idx, chain.size(), wx, wy, cache.uiScaleX, cache.uiScaleY);
+        }
         cache.valid = false;
         return false;
     }
 
-    cache.uiMinX = wx + rx * cache.uiScaleX;
-    cache.uiMaxX = cache.uiMinX + rw * cache.uiScaleX;
-    cache.uiMinY = wy + ry * cache.uiScaleY;
-    cache.uiMaxY = cache.uiMinY + rh * cache.uiScaleY;
+    cache.uiMinX = minX;
+    cache.uiMaxX = maxX;
+    cache.uiMinY = minY;
+    cache.uiMaxY = maxY;
+    cache.uiScreenW = screenW;
+    cache.uiScreenH = screenH;
     cache.valid = (cache.uiMaxX - cache.uiMinX >= 50.f) && (cache.uiMaxY - cache.uiMinY >= 50.f);
     return cache.valid;
 }
@@ -2417,17 +2669,24 @@ static void ReadInGameMapState()
     }
 
     if (cachedMapDialogModel <= 0x10000) {
-        const std::uintptr_t dlg = ReadPtr(cachedBattleModel + rr::BattleModel::MapDialogModel);
+        std::uintptr_t dlg = 0;
+        if (!TargetProcess.ReadFresh(cachedBattleModel + rr::BattleModel::MapDialogModel, &dlg, sizeof(dlg)))
+            dlg = ReadPtr(cachedBattleModel + rr::BattleModel::MapDialogModel);
         if (dlg > 0x10000 && IsClass(dlg, "MapDialogModel"))
             cachedMapDialogModel = dlg;
     }
     if (cachedMapConfigModel <= 0x10000) {
-        const std::uintptr_t cfg = ReadPtr(cachedBattleModel + rr::BattleModel::MapConfigModel);
+        std::uintptr_t cfg = 0;
+        if (!TargetProcess.ReadFresh(cachedBattleModel + rr::BattleModel::MapConfigModel, &cfg, sizeof(cfg)))
+            cfg = ReadPtr(cachedBattleModel + rr::BattleModel::MapConfigModel);
         if (cfg > 0x10000 && IsClass(cfg, "MapConfigModel")) {
             cachedMapConfigModel = cfg;
-            cachedMapFullVar  = ReadPtr(cfg + rr::MapConfigModel::FullScreen);
-            cachedMapMiniVar  = ReadPtr(cfg + rr::MapConfigModel::Minimap);
-            cachedMapModelPtr = ReadPtr(cfg + rr::MapConfigModel::MapModel);
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::FullScreen, &cachedMapFullVar, sizeof(cachedMapFullVar)))
+                cachedMapFullVar = ReadPtr(cfg + rr::MapConfigModel::FullScreen);
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::Minimap, &cachedMapMiniVar, sizeof(cachedMapMiniVar)))
+                cachedMapMiniVar = ReadPtr(cfg + rr::MapConfigModel::Minimap);
+            if (!TargetProcess.ReadFresh(cfg + rr::MapConfigModel::MapModel, &cachedMapModelPtr, sizeof(cachedMapModelPtr)))
+                cachedMapModelPtr = ReadPtr(cfg + rr::MapConfigModel::MapModel);
         }
     }
     if (cachedMapConfigModel <= 0x10000) {
@@ -2477,7 +2736,7 @@ static void ReadInGameMapState()
         out.valid = true;
 
         if (blk.resizeContainer > 0x10000 &&
-            ReadRectTransformUiBounds(blk.resizeContainer, rCache, modeFlipped))
+            ReadRectTransformUiBounds(blk.resizeContainer, rCache, modeFlipped, tag))
         {
             out.rectValid = true;
             out.uiMinX = rCache.uiMinX;
@@ -2488,6 +2747,8 @@ static void ReadInGameMapState()
             out.uiCenterY = rCache.uiCenterY;
             out.uiScaleX = rCache.uiScaleX;
             out.uiScaleY = rCache.uiScaleY;
+            out.uiScreenW = rCache.uiScreenW;
+            out.uiScreenH = rCache.uiScreenH;
         }
 
         // One-shot / mode-flip diagnostic log for 2nd-PC verification.
@@ -2496,12 +2757,17 @@ static void ReadInGameMapState()
         bool& loggedFlag = (tag[0] == 'F') ? loggedFull : loggedMini;
         if (!loggedFlag || modeFlipped) {
             loggedFlag = true;
-            std::printf("[MapProbe] %s: pos=(%.1f,%.1f) local=(%.1f,%.1f) rot=%.2f yaw=%.2f camSize=%.1f rect=%d(%.0f,%.0f..%.0f,%.0f)\n",
+            const float camYawDeg = cameraState.valid
+                ? (std::atan2(cameraState.forward.x, cameraState.forward.z) * 57.2957795f)
+                : 0.f;
+            std::printf("[MapProbe] %s: pos=(%.1f,%.1f) local=(%.1f,%.1f) rot=%.2f camYaw=%.1fdeg camSize=%.1f rc=0x%llX rect=%d(%.0f,%.0f..%.0f,%.0f / %.0fx%.0f)\n",
                 tag, out.position.x, out.position.y,
                 localPosition.x, localPosition.z,
-                out.rotation, localYaw, out.cameraSize,
+                out.rotation, camYawDeg, out.cameraSize,
+                (unsigned long long)blk.resizeContainer,
                 out.rectValid ? 1 : 0,
-                out.uiMinX, out.uiMinY, out.uiMaxX, out.uiMaxY);
+                out.uiMinX, out.uiMinY, out.uiMaxX, out.uiMaxY,
+                out.uiScreenW, out.uiScreenH);
         }
     };
 
@@ -2514,6 +2780,22 @@ static void ReadInGameMapState()
     }
 
     inGameMapState.valid = fullOpen ? inGameMapState.fullscreen.valid : inGameMapState.minimap.valid;
+    const bool fastFull = fullOpen && rcfg.InGameFullMap && rcfg.Hide3DEspOnFullMap;
+    g_fullMapFastMode.store(fastFull, std::memory_order_relaxed);
+    if (fullOpen && rcfg.InGameFullMap && cachedMapFullVar > 0x10000) {
+        g_liveFullMapVarPtr.store(cachedMapFullVar, std::memory_order_release);
+        if (inGameMapState.fullscreen.valid) {
+            std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+            g_liveFullMap.pos = inGameMapState.fullscreen.position;
+            g_liveFullMap.rot = inGameMapState.fullscreen.rotation;
+            g_liveFullMap.camSize = inGameMapState.fullscreen.cameraSize;
+            g_liveFullMap.valid = true;
+        }
+    } else {
+        g_liveFullMapVarPtr.store(0, std::memory_order_release);
+        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+        g_liveFullMap.valid = false;
+    }
 }
 
 static void UpdateInternal()
@@ -2550,6 +2832,7 @@ static void UpdateInternal()
         RevalidateSession();
 
     static int gameResolveFails = 0;
+    static std::uint64_t lastWaitLogMs = 0;
     if (!cachedGame) {
         if (gameRetryCountdown <= 0) {
             cachedGame = ResolveGameViaGom();
@@ -2560,13 +2843,23 @@ static void UpdateInternal()
             if (!cachedGame) {
                 if (gameResolveFails == 0)
                     DLOG("GameRoot: GOM resolve failed, backing off");
-                if (++gameResolveFails >= 300) {
-                    DLOG("GameRoot: sustained failure (%d attempts), attempting CR3 fix", gameResolveFails);
+                const std::uint64_t nowMs = GetTickCount64();
+                if (lastWaitLogMs == 0 || nowMs - lastWaitLogMs >= 5000) {
+                    lastWaitLogMs = nowMs;
+                    std::printf("[Reader] Waiting for Game root (GOM walk failed, attempt %d)...\n",
+                        gameResolveFails + 1);
+                }
+                if (++gameResolveFails >= 20) {
+                    DLOG("GameRoot: sustained failure (%d attempts), flushing DMA caches & retrying CR3 fix", gameResolveFails);
+                    std::printf("[Reader] Sustained GOM failure (%d attempts) — flushing DMA caches & retrying CR3 fix...\n",
+                        gameResolveFails);
                     gameResolveFails = 0;
+                    MaybeRefreshDmaCaches("gomResolveFail", 2000);
                     TargetProcess.FixCr3();
                 }
             } else {
                 gameResolveFails = 0;
+                lastWaitLogMs = 0;
             }
         } else {
             --gameRetryCountdown;
@@ -2581,6 +2874,12 @@ static void UpdateInternal()
         cachedBattleModel = ResolveBattleModel(cachedGame);
 
     if (!cachedBattleModel) {
+        const std::uint64_t nowMs = GetTickCount64();
+        if (cachedGame > 0x10000 && (lastWaitLogMs == 0 || nowMs - lastWaitLogMs >= 5000)) {
+            lastWaitLogMs = nowMs;
+            std::printf("[Reader] Game=0x%llX — waiting for BattleModel (in menu/loading)...\n",
+                (unsigned long long)cachedGame);
+        }
         {
             std::lock_guard<std::mutex> lock(g_worldMutex);
             g_worldState = std::make_shared<RobRunWorld::State>();
@@ -2960,6 +3259,28 @@ static void UpdateInternal()
     static int entityDictFailures = 0;
     if (RobRunMemory::ReadDictInt(entityDictionary, entityEntries)) {
         entityDictFailures = 0;
+
+        // Also merge any BattleCharacterModels from WorldEntitiesModel
+        // (_battleCharacters at +0x18 and _notSpawnedBattleCharacters at +0x10)
+        // that aren't in BattleEntitiesModel._models so the fullscreen map sees
+        // every character known to the client regardless of 3D view spawn state.
+        const std::uintptr_t worldModelPtr = ReadPtr(cachedBattleEntities + 0x60);
+        if (worldModelPtr > 0x10000) {
+            std::unordered_set<std::int32_t> seenIds;
+            seenIds.reserve(entityEntries.size() + 32);
+            for (const auto& e : entityEntries) seenIds.insert(e.key);
+            for (std::uintptr_t dictOff : { std::uintptr_t(0x18), std::uintptr_t(0x10) }) {
+                const std::uintptr_t charDict = ReadPtr(worldModelPtr + dictOff);
+                if (charDict <= 0x10000) continue;
+                std::vector<RobRunMemory::DictEntry> extra;
+                if (!RobRunMemory::ReadDictInt(charDict, extra, false)) continue;
+                for (const auto& e : extra) {
+                    if (e.value > 0x10000 && seenIds.insert(e.key).second)
+                        entityEntries.push_back(e);
+                }
+            }
+        }
+
         entities.reserve(entityEntries.size());
 
         struct TransformBlock {
@@ -3138,7 +3459,9 @@ static void UpdateInternal()
 
         const bool haveLocalPos = !localPosition.IsZero();
         const float poseCullDist = static_cast<float>(ConfigInstance.Player.MaxDistance) + 25.0f;
+        const bool fullMapFastMode = g_fullMapFastMode.load(std::memory_order_relaxed);
 
+        if (!fullMapFastMode)
         for (auto& w : work) {
             // Skip expensive multi-KB skeleton reads for the local player,
             // already-dead entities, and players far past ESP MaxDistance.
@@ -3238,8 +3561,9 @@ static void UpdateInternal()
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
         std::vector<std::size_t> lateResolve;
-        int rebuildBudget = 1;
+        int rebuildBudget = fullMapFastMode ? 0 : 1;
 
+        if (!fullMapFastMode)
         for (std::size_t wi = 0; wi < work.size(); ++wi) {
             auto& w = work[wi];
             if (!w.positionValid) continue;
@@ -4200,7 +4524,8 @@ static void UpdateInternal()
                         rig.smoothedValid = true;
                     }
                 }
-            } else if (!rig.layoutValid &&
+            } else if (!fullMapFastMode &&
+                       !rig.layoutValid &&
                        entity.entityId != localEntityId &&
                        !entity.isDead &&
                        (!haveLocalPos || Distance(entity.position, localPosition) <= poseCullDist) &&
@@ -4265,7 +4590,8 @@ static void UpdateInternal()
                     seg.visible = false;
                 }
             }
-            else if ((ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
+            else if (!fullMapFastMode &&
+                (ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
                 g_bvhScene.valid && visCamera.valid &&
                 entity.entityId != localEntityId)
             {
@@ -4724,6 +5050,23 @@ static void StartCameraWorker()
             const std::uint64_t tStart = SteadyMicros();
             CameraStepResult res{};
             try {
+                const std::uintptr_t fullMapPtr = g_liveFullMapVarPtr.load(std::memory_order_acquire);
+                if (fullMapPtr > 0x10000) {
+                    struct LiveMapCam {
+                        float posX, posY, rot, camSize;
+                    } mc{};
+                    if (TargetProcess.ReadFresh(fullMapPtr + rr::MapConfigVariance::Position, &mc, sizeof(mc)) &&
+                        std::isfinite(mc.posX) && std::isfinite(mc.posY) &&
+                        std::isfinite(mc.rot) && std::isfinite(mc.camSize) &&
+                        mc.camSize > 0.1f && mc.camSize < 50000.f)
+                    {
+                        std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+                        g_liveFullMap.pos = Vector2(mc.posX, mc.posY);
+                        g_liveFullMap.rot = mc.rot;
+                        g_liveFullMap.camSize = mc.camSize;
+                        g_liveFullMap.valid = true;
+                    }
+                }
                 res = RefreshCameraStep();
             } catch (const std::exception& e) {
                 DLOG("CameraWorker: %s", e.what());
@@ -5047,6 +5390,17 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
         dyn = &dynCopy;
     }
     return CollisionBVH::IsOccluded(g_bvhScene, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+}
+
+bool GetFreshFullMapVariance(Vector2& pos, float& rot, float& cameraSize)
+{
+    std::lock_guard<std::mutex> lk(g_liveFullMapMutex);
+    if (!g_liveFullMap.valid)
+        return false;
+    pos = g_liveFullMap.pos;
+    rot = g_liveFullMap.rot;
+    cameraSize = g_liveFullMap.camSize;
+    return true;
 }
 
 } // namespace RobRunReader

@@ -397,6 +397,47 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     out.worldPtr = world;
     out.valid = true;
 
+    // Read vehicles FIRST so they are never truncated by the 4096-entity cap
+    // on dense maps with thousands of loot/container objects.
+    AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::CarModel::Transform);
+            return ReadVehiclePosition(transform, position);
+        }, out, out.vehicles);
+
+    AddDictionary(world, rr::WorldEntitiesModel::Helicopters, Kind::Helicopter,
+        [](std::uintptr_t model, Vector3& position) {
+            const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                model + rr::HelicopterModel::Transform);
+            return ReadVehiclePosition(transform, position);
+        }, out, out.vehicles);
+
+    // Also pick up any generic VehicleModel entries not already listed in Cars/Helicopters.
+    {
+        std::unordered_set<int> seenVehIds;
+        seenVehIds.reserve(out.entities.size());
+        for (const auto& e : out.entities) seenVehIds.insert(e.id);
+        std::vector<RobRunMemory::DictEntry> vehEntries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::Vehicles, vehEntries)) {
+            for (const auto& entry : vehEntries) {
+                if (entry.value <= 0x10000 || seenVehIds.count(entry.key)) continue;
+                const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                    entry.value + rr::VehicleModel::Transform);
+                Vector3 position{};
+                if (!ReadVehiclePosition(transform, position)) continue;
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = Kind::Vehicle;
+                entity.position = position;
+                entity.label = KindName(Kind::Vehicle);
+                out.entities.push_back(std::move(entity));
+                seenVehIds.insert(entry.key);
+                ++out.vehicles;
+            }
+        }
+    }
+
     const std::size_t containerStart = out.entities.size();
     AddDictionary(world, rr::WorldEntitiesModel::Containers, Kind::Container,
         [](std::uintptr_t model, Vector3& position) {
@@ -492,20 +533,6 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
             }
         }
     }
-
-    AddDictionary(world, rr::WorldEntitiesModel::Cars, Kind::Car,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::CarModel::Transform);
-            return ReadVehiclePosition(transform, position);
-        }, out, out.vehicles);
-
-    AddDictionary(world, rr::WorldEntitiesModel::Helicopters, Kind::Helicopter,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::HelicopterModel::Transform);
-            return ReadVehiclePosition(transform, position);
-        }, out, out.vehicles);
 
     AddDictionary(world, rr::WorldEntitiesModel::Grenades, Kind::Grenade,
         [](std::uintptr_t model, Vector3& position) {
