@@ -612,7 +612,7 @@ const std::string kWebRadarHtml = std::string(R"raw_html(<!DOCTYPE html>
 
   setInterval(pollState, 33); // 30 Hz polling
 
-)raw_html") + R"raw_html(  // Main Render Loop
+)raw_html" + R"raw_html(  // Main Render Loop
   function draw() {
     requestAnimationFrame(draw);
 
@@ -860,7 +860,7 @@ const std::string kWebRadarHtml = std::string(R"raw_html(<!DOCTYPE html>
 
 </body>
 </html>
-)raw_html");
+)raw_html";
 
 // ---------------------------------------------------------------------------
 // Worker Thread: Lightweight HTTP 1.1 Web Server
