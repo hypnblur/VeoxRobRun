@@ -932,8 +932,8 @@ void RunServerLoop(int port)
 					{ "x", snapshot->localPosition.x },
 					{ "y", snapshot->localPosition.y },
 					{ "z", snapshot->localPosition.z },
-					{ "yaw", snapshot->cameraYaw },
-					{ "pitch", snapshot->cameraPitch },
+					{ "yaw", snapshot->localYaw },
+					{ "pitch", snapshot->localPitch },
 					{ "entityId", snapshot->localEntityId }
 				};
 			} else {
@@ -987,10 +987,10 @@ void RunServerLoop(int port)
 						bool isContainer = (ent.kind == RobRunWorld::Kind::StorageBox ||
 											ent.kind == RobRunWorld::Kind::VehicleTrunk ||
 											ent.kind == RobRunWorld::Kind::FirstAidCabinet);
-						bool isValuable = (ent.kind == RobRunWorld::Kind::GoldBar ||
+						bool isValuable = (ent.kind == RobRunWorld::Kind::CashLootNode ||
 										   ent.kind == RobRunWorld::Kind::CryptoWorkbench ||
 										   ent.kind == RobRunWorld::Kind::MoneyWorkbench ||
-										   ent.kind == RobRunWorld::Kind::Cash);
+										   ent.kind == RobRunWorld::Kind::SettlementCash);
 
 						loot.push_back({
 							{ "kind", (int)ent.kind },
