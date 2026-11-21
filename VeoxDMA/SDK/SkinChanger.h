@@ -39,16 +39,18 @@ inline const SkinEntry kJp7Skins[] = {
 };
 
 inline const SkinEntry kDp9Skins[] = {
-    { "Dp9S0", 0x38, "Factory Paint" },
-    { "Dp9S1", 0x40, "Paint 1" },
-    { "Dp9S2", 0x48, "Flame Paint" },
-    { "Dp9S3", 0x50, "Paint 3" },
-    { "Dp9S4", 0x58, "Paint 4" },
-    { "Dp9S5", 0x60, "Prototype Paint" },
-    { "Dp9S6", 0x68, "Reckless Paint" },
-    { "Dp9S7", 0x70, "Strike Paint" },
-    { "Dp9S8", 0x78, "Makarov Paint" },
-    { "Dp9S9", 0x80, "DIY Paint" },
+    { "Dp9S0",  0x38, "Factory Paint" },
+    { "Dp9S1",  0x40, "Paint 1" },
+    { "Dp9S2",  0x48, "Flame Paint" },
+    { "Dp9S3",  0x50, "Paint 3" },
+    { "Dp9S4",  0x58, "Paint 4" },
+    { "Dp9S5",  0x60, "Prototype Paint" },
+    { "Dp9S6",  0x68, "Reckless Paint" },
+    { "Dp9S7",  0x70, "Strike Paint" },
+    { "Dp9S8",  0x78, "Makarov Paint" },
+    { "Dp9S9",  0x80, "DIY Paint" },
+    { "Dp9S10", 0x88, "Ichigeki Paint" },
+    { "Dp9S12", 0x90, "Nya Paint" },
 };
 
 inline const SkinEntry kKl545Skins[] = {
@@ -65,6 +67,8 @@ inline const SkinEntry kKl545Skins[] = {
     { "Kl545S11", 0xE0,  "Paint 11" },
     { "Kl545S12", 0xE8,  "Chameleon Paint" },
     { "Kl545S13", 0xF0,  "Cuts Paint" },
+    { "Kl545S14", 0x108, "Business Paint" },
+    { "Kl545S15", 0x110, "Limit Paint" },
 };
 
 inline const SkinEntry kLmgSkins[] = {
@@ -86,6 +90,7 @@ inline const SkinEntry kHarris500Skins[] = {
     { "Harris500S3", 0x138, "Paint 3" },
     { "Harris500S4", 0x140, "Pharaoh Paint" },
     { "Harris500S5", 0x148, "Polaris Paint" },
+    { "Harris500S6", 0x170, "Paws Paint" },
 };
 
 inline const SkinEntry kRc556Skins[] = {
@@ -112,6 +117,7 @@ inline const SkinEntry kSrReaperSkins[] = {
     { "SrReaperS4", 0x1C0, "Endurance Paint" },
     { "SrReaperS5", 0x1C8, "Paint 5" },
     { "SrReaperS6", 0x1D0, "Paint 6" },
+    { "SrReaperS7", 0x200, "Threshold Paint" },
 };
 
 inline const SkinEntry kPdw90Skins[] = {
@@ -174,6 +180,8 @@ inline const SkinEntry kMc10Skins[] = {
     { "Mc10S5", 0x308, "Paint 5" },
     { "Mc10S6", 0x310, "Prism Paint" },
     { "Mc10S7", 0x318, "Pungent Paint" },
+    { "Mc10S8", 0x350, "Rensha Paint" },
+    { "Mc10S9", 0x358, "Paint 9" },
 };
 
 inline const SkinEntry kVultureSkins[] = {
@@ -207,11 +215,6 @@ inline const WeaponCatalog kWeaponCatalogs[kWeaponCount] = {
 };
 
 // ---- Cosmetic categories -------------------------------------------------
-// Male bodies in CharacterBodyDescriptions   (TypeDefIndex 1071)
-// Female bodies in CharacterFBodyDescriptions (TypeDefIndex 1073)
-// Masks in CharacterMaskDescriptions          (TypeDefIndex 1085)
-// Bags in CharacterBagDescriptions            (TypeDefIndex 1068)
-// Keychains in CharacterKeychainDescriptions  (TypeDefIndex 1083)
 
 enum Cosmetic {
     OutfitMale, OutfitFemale, Mask, Bag, Keychain,
@@ -227,67 +230,34 @@ inline const SkinEntry kOutfitMaleSkins[] = {
     { "Body2Type1Paint2",  0x10,  "Bucks Sporty" },
     { "Body2Type1Paint3",  0x18,  "Rust Sporty" },
     { "Body2Type1Paint4",  0x20,  "Smoke Sporty" },
-    { "Body3Type1Paint1",  0x28,  "Sporty V1" },
     { "Body3Type1Paint2",  0x30,  "AKINA Sporty" },
     { "Body3Type1Paint3",  0x38,  "Wolf Sporty" },
     { "Body3Type1Paint4",  0x40,  "Energy Sporty" },
     { "Body5Type1Paint1",  0x48,  "New Chapter" },
-    { "Body6Type1Paint1",  0x50,  "Classic Suit" },
-    { "Body6Type1Paint2",  0x58,  "Alt Suit" },
-    { "Body6Type1Paint3",  0x60,  "Dark Suit" },
-    { "Body6Type1Paint4",  0x68,  "Suit V4" },
-    { "Body7Type1Paint1",  0x80,  "Casual V1" },
-    { "Body7Type1Paint2",  0x88,  "Casual V2" },
-    { "Body7Type1Paint3",  0x90,  "Casual V3" },
-    { "Body8Type1Paint1",  0xA0,  "Tactical V1" },
-    { "Body8Type1Paint2",  0xA8,  "Tactical V2" },
-    { "Body8Type1Paint3",  0xB0,  "Tactical V3" },
-    { "Body8Type1Paint4",  0xB8,  "Tactical V4" },
-    { "Body9Type1Paint1",  0xC0,  "Mil V1" },
-    { "Body9Type1Paint2",  0xC8,  "Mil V2" },
-    { "Body9Type1Paint3",  0xD0,  "Mil V3" },
-    { "Body9Type1Paint4",  0xD8,  "Mil V4" },
-    { "Body10Type1Paint1", 0xE0,  "Sport V1" },
-    { "Body11Type1Paint1", 0xF8,  "Hoodie V1" },
-    { "Body11Type1Paint2", 0x100, "Hoodie V2" },
-    { "Body11Type1Paint3", 0x108, "Hoodie V3" },
-    { "Body11Type1Paint4", 0x110, "Hoodie V4" },
     { "Body12Type1Paint1", 0x118, "Apex" },
-    { "Body13Type1Paint1", 0x120, "Jacket V1" },
-    { "Body13Type1Paint2", 0x128, "Jacket V2" },
-    { "Body13Type1Paint3", 0x130, "Jacket V3" },
-    { "Body13Type1Paint4", 0x138, "Jacket V4" },
-    { "Body14Type1Paint1", 0x140, "Coat V1" },
-    { "Body14Type1Paint2", 0x148, "Coat V2" },
-    { "Body14Type1Paint3", 0x150, "Coat V3" },
-    { "Body14Type1Paint4", 0x158, "Coat V4" },
-    { "Body15Type1Paint1", 0x160, "Vest" },
     { "Body16Type1Paint1", 0x168, "Hornet Cook" },
     { "Body16Type1Paint2", 0x170, "Sky Cook" },
     { "Body16Type1Paint3", 0x178, "Sea Cook" },
-    { "Body17Type1Paint1", 0x180, "Worker V1" },
-    { "Body17Type2Paint1", 0x188, "Worker V2" },
     { "Body18Type1Paint1", 0x190, "Noise Street" },
     { "Body18Type1Paint2", 0x198, "Tone Street" },
     { "Body18Type1Paint3", 0x1A0, "Heat Street" },
     { "Body18Type1Paint4", 0x1A8, "Angle Street" },
     { "Body19Type1Paint1", 0x1B0, "Shadow Freedom" },
     { "Body19Type1Paint2", 0x1B8, "Hail Freedom" },
-    { "Body20Type1Paint1", 0x1D0, "Outfit 20" },
-    { "Body21Type1Paint1", 0x1D8, "Outfit 21" },
-    { "Body22Type1Paint1", 0x1E0, "Athlete V1" },
-    { "Body22Type2Paint1", 0x1E8, "Athlete V2" },
-    { "Body22Type3Paint1", 0x1F0, "Athlete V3" },
-    { "Body23Type1Paint1", 0x1F8, "Punk V1" },
-    { "Body23Type1Paint2", 0x200, "Punk V2" },
-    { "Body24Type1Paint1", 0x208, "Farmer Country" },
-    { "Body24Type1Paint2", 0x210, "Hunter Country" },
-    { "Body24Type1Paint3", 0x218, "Lumberjack Country" },
-    { "Body25Type1Paint1", 0x220, "Outfit 25" },
-    { "Body26Type1Paint1", 0x228, "Outfit 26" },
-    { "Body27Type1Paint1", 0x230, "Outfit 27 V1" },
-    { "Body27Type1Paint2", 0x238, "Outfit 27 V2" },
-    { "Body28Type1Paint1", 0x240, "Sinner" },
+    { "Body22Type2Paint2", 0x1F0, "Outfit 22 - V3" },
+    { "Body24Type1Paint1", 0x210, "Farmer Country" },
+    { "Body24Type1Paint2", 0x218, "Hunter Country" },
+    { "Body24Type1Paint3", 0x220, "Lumberjack Country" },
+    { "Body28Type1Paint1", 0x248, "Sinner" },
+    { "Body30Type1Paint1", 0x258, "Snow Cartel" },
+    { "Body30Type1Paint2", 0x260, "Sea Cartel" },
+    { "Body31Type1Paint1", 0x268, "Drive Retreat" },
+    { "Body31Type2Paint1", 0x270, "Style Retreat" },
+    { "Body33Type2Paint1", 0x288, "Power" },
+    { "Body42Type1Paint1", 0x2B8, "Sports Jacket" },
+    { "Body42Type1Paint2", 0x2C8, "Black Sports Jacket" },
+    { "Body42Type1Paint3", 0x2C0, "Blue Sports Jacket" },
+    { "Body46Type1Paint1", 0x2D0, "Outfit 46" },
 };
 
 inline const SkinEntry kOutfitFemaleSkins[] = {
@@ -319,182 +289,81 @@ inline const SkinEntry kOutfitFemaleSkins[] = {
     { "Body31Type2Paint1", 0x210, "Style Retreat" },
     { "Body33Type2Paint1", 0x228, "Power" },
     { "Body35Type1Paint1", 0x250, "Raid" },
+    { "Body42Type1Paint1", 0x270, "Sports Jacket" },
+    { "Body42Type1Paint2", 0x278, "Black Sports Jacket" },
+    { "Body42Type1Paint3", 0x280, "Blue Sports Jacket" },
+    { "Body47Type1Paint1", 0x288, "Apex" },
 };
 
 inline const SkinEntry kMaskSkins[] = {
-    { "Mask1Type1Paint1",  0x8,   "Balaclava V1" },
-    { "Mask1Type1Paint2",  0x10,  "Balaclava V2" },
-    { "Mask1Type1Paint3",  0x18,  "Balaclava V3" },
-    { "Mask1Type1Paint4",  0x20,  "Balaclava V4" },
-    { "Mask2Type1Paint1",  0x28,  "Ski Mask V1" },
-    { "Mask2Type1Paint2",  0x30,  "Ski Mask V2" },
-    { "Mask2Type1Paint3",  0x38,  "Ski Mask V3" },
-    { "Mask2Type1Paint4",  0x40,  "Ski Mask V4" },
     { "Mask3Type1Paint1",  0x48,  "Black Ballistic" },
     { "Mask3Type1Paint2",  0x50,  "Carbon Ballistic" },
-    { "Mask3Type1Paint3",  0x58,  "Ballistic V3" },
-    { "Mask3Type1Paint4",  0x60,  "Ballistic V4" },
-    { "Mask4Type1Paint1",  0x68,  "Mask 4" },
-    { "Mask5Type1Paint1",  0x70,  "Half Mask V1" },
-    { "Mask5Type2Paint1",  0x78,  "Half Mask V2" },
-    { "Mask6Type1Paint1",  0x80,  "Welder V1" },
     { "Mask6Type1Paint2",  0x88,  "Flames Welder" },
-    { "Mask6Type1Paint3",  0x90,  "Welder V3" },
-    { "Mask6Type1Paint4",  0x98,  "Welder V4" },
-    { "Mask6Type1Paint5",  0xA0,  "Welder V5" },
     { "Mask7Type1Paint1",  0xA8,  "Respirator" },
-    { "Mask9Type1Paint1",  0xB0,  "Biker V1" },
-    { "Mask9Type1Paint2",  0xB8,  "Biker V2" },
     { "Mask9Type1Paint3",  0xC0,  "Biker Teeth" },
-    { "Mask9Type1Paint4",  0xC8,  "Biker V4" },
     { "Mask10Type1Paint1", 0xD0,  "Pink Gas Mask" },
     { "Mask10Type1Paint2", 0xD8,  "Blue Gas Mask" },
     { "Mask11Type1Paint1", 0xE0,  "Demon" },
     { "Mask12Type1Paint1", 0xE8,  "Mask 12" },
     { "Mask13Type1Paint1", 0xF0,  "Gold Doll" },
-    { "Mask14Type1Paint1", 0xF8,  "Mask 14" },
     { "Mask15Type1Paint1", 0x100, "Gold Skull" },
-    { "Mask16Type1Paint1", 0x108, "Lover V1" },
     { "Mask16Type1Paint2", 0x110, "Green Lover" },
-    { "Mask17Type1aint1",  0x118, "Mask 17" },
     { "Mask18Type1Paint1", 0x120, "Skull Respirator" },
     { "Mask19Type1Paint1", 0x128, "Mime Doll" },
-    { "Mask20Type1Paint1", 0x130, "Biker V1" },
-    { "Mask21Type1Paint1", 0x138, "Star Horn" },
-    { "Mask22Type1Paint1", 0x140, "Mask 22" },
-    { "Mask23Type1Paint1", 0x148, "Mask 23" },
-    { "Mask24Type1Paint1", 0x150, "Cap V1" },
-    { "Mask24Type1Paint2", 0x158, "Cap V2" },
-    { "Mask25Type1Paint1", 0x160, "Mask 25 V1" },
-    { "Mask25Type1Paint2", 0x168, "Mask 25 V2" },
-    { "Mask26Type1Paint1", 0x170, "Bucket V1" },
-    { "Mask26Type1Paint2", 0x178, "Bucket V2" },
-    { "Mask26Type1Paint3", 0x180, "Bucket V3" },
-    { "Mask26Type2Paint1", 0x188, "Bucket Alt" },
-    { "Mask27Type1Paint1", 0x190, "Black Bucket Hat" },
-    { "Mask27Type1Paint2", 0x198, "Yellow Bucket Hat" },
-    { "Mask27Type1Paint3", 0x1A0, "Bucket Hat V3" },
-    { "Mask27Type1Paint4", 0x1A8, "Bucket Hat V4" },
-    { "Mask28Type1Paint1", 0x1B0, "Urban Biker" },
-    { "Mask29Type1Paint1", 0x1B8, "Mask 29" },
-    { "Mask31Type1Paint1", 0x1C0, "Wild West" },
-    { "Mask32Type1Paint1", 0x1C8, "Mask 32" },
-    { "Mask33Type1Paint1", 0x1D0, "Panther" },
-    { "Mask34Type1Paint1", 0x1D8, "Cap" },
-    { "Mask36Type1Paint1", 0x1E0, "Fan" },
-    { "Mask37Type1Paint1", 0x1E8, "Mask 37" },
-    { "Mask38Type1Paint1", 0x1F0, "Fearsome" },
-    { "Mask38Type1Paint2", 0x1F8, "Madman" },
-    { "Mask39Type1Paint1", 0x200, "Mask 39 V1" },
-    { "Mask39Type1Paint2", 0x208, "Mask 39 V2" },
-    { "Mask41Type1Paint1", 0x210, "Silence" },
-    { "Mask42Type1Paint1", 0x218, "Mask 42 V1" },
-    { "Mask42Type1Paint2", 0x220, "Mask 42 V2" },
-    { "Mask43Type1Paint1", 0x228, "Mask 43 V1" },
-    { "Mask43Type1Paint2", 0x230, "Mask 43 V2" },
-    { "Mask44Type1Paint1", 0x238, "Concrete Gang" },
-    { "Mask44Type1Paint2", 0x240, "Gray Gang" },
+    { "Mask20Type1Paint2", 0x138, "Pink Biker" },
+    { "Mask21Type1Paint1", 0x140, "Star Horn" },
+    { "Mask27Type1Paint1", 0x198, "Black Bucket Hat" },
+    { "Mask27Type1Paint2", 0x1A0, "Yellow Bucket Hat" },
+    { "Mask28Type1Paint1", 0x1B8, "Urban Biker" },
+    { "Mask31Type1Paint1", 0x1C8, "Wild West" },
+    { "Mask33Type1Paint1", 0x1D8, "Panther" },
+    { "Mask34Type1Paint1", 0x1E0, "Cap" },
+    { "Mask36Type1Paint1", 0x1E8, "Fan" },
+    { "Mask38Type1Paint1", 0x1F8, "Fearsome" },
+    { "Mask38Type1Paint2", 0x200, "Madman" },
+    { "Mask41Type1Paint1", 0x218, "Silence" },
+    { "Mask44Type1Paint1", 0x240, "Concrete Gang" },
+    { "Mask44Type1Paint2", 0x248, "Gray Gang" },
+    { "Mask44Type1Paint3", 0x250, "Graffiti Gang" },
 };
 
 inline const SkinEntry kBagSkins[] = {
     { "Bag1Type1Paint1",   0x8,   "Classic Sporty" },
-    { "Bag2Type1Paint1",   0x10,  "Bag 2 V1" },
-    { "Bag2Type2Paint1",   0x18,  "Bag 2 V2" },
-    { "Bag3Type1Paint1",   0x20,  "Bag 3" },
-    { "Bag4Type1Paint1",   0x28,  "Bag 4" },
-    { "Bag5Type1Paint1",   0x30,  "Bag 5 V1" },
-    { "Bag5Type1Paint2",   0x38,  "Bag 5 V2" },
-    { "Bag6Type1Paint1",   0x40,  "Bag 6" },
     { "Bag7Type1Paint1",   0x48,  "Orange Sporty" },
     { "Bag7Type1Paint2",   0x50,  "Tactics Sporty" },
     { "Bag7Type1Paint3",   0x58,  "Edges Sporty" },
-    { "Bag8Type1Paint1",   0x60,  "Bag 8" },
     { "Bag9Type1Paint1",   0x68,  "Crocodile Premium" },
-    { "Bag10Type1Paint1",  0x70,  "Bag 10 V1" },
-    { "Bag10Type2Paint1",  0x78,  "Bag 10 V2" },
-    { "Bag11Type1Paint1",  0x80,  "Bag 11" },
     { "Bag12Type1Paint1",  0x88,  "Lady Urban" },
     { "Bag13Type1Paint1",  0x90,  "Red Demon" },
     { "Bag13Type2Paint1",  0x98,  "Brown Demon" },
     { "Bag14Type1Paint1",  0xA0,  "Black Urban" },
-    { "Bag14Type1Paint2",  0xA8,  "Urban V2" },
     { "Bag15Type1Paint1",  0xB0,  "DANGER Chemical" },
     { "Bag15Type1Paint2",  0xB8,  "MATRIX Chemical" },
-    { "Bag16Type1Paint1",  0xC0,  "Bag 16 V1" },
-    { "Bag16Type1Paint2",  0xC8,  "Bag 16 V2" },
-    { "Bag17Type1Paint1",  0xD0,  "Bag 17 V1" },
-    { "Bag17Type1Paint2",  0xD8,  "Bag 17 V2" },
     { "Bag18Type1Paint1",  0xE0,  "Independence" },
     { "Bag18Type1Paint2",  0xE8,  "Red Hill" },
-    { "Bag19Type1Paint1",  0xF0,  "Bag 19" },
-    { "Bag20Type1Paint1",  0xF8,  "Bag 20" },
     { "Bag21Type1Paint1",  0x100, "Duffel" },
-    { "Bag22Type1Paint1",  0x108, "Bag 22 V1" },
-    { "Bag22Type1Paint2",  0x110, "Bag 22 V2" },
     { "Bag23Type1Paint1",  0x118, "Leopard" },
-    { "Bag24Type1Paint1",  0x120, "Bag 24" },
-    { "Bag25Type1Paint1",  0x128, "Bag 25" },
     { "Bag26Type1Paint1",  0x130, "Klain" },
-    { "Bag28Type1Paint1",  0x138, "Bag 28 V1" },
-    { "Bag28Type1Paint2",  0x140, "Bag 28 V2" },
-    { "Bag28Type1Paint3",  0x148, "Bag 28 V3" },
-    { "Bag30Type1Paint1",  0x150, "Bag 30 V1" },
-    { "Bag30Type1Paint2",  0x158, "Bag 30 V2" },
-    { "Bag31Type1Paint1",  0x160, "Bag 31" },
     { "Bag32Type1Paint1",  0x168, "Extreme" },
+    { "Bag33Type1Paint1",  0x170, "Fluffy Street" },
 };
 
 inline const SkinEntry kKeychainSkins[] = {
-    { "NoKeychain",        0x8,   "None" },
-    { "Keychain1Paint1",   0x10,  "Keychain 1" },
-    { "Keychain2Paint1",   0x18,  "Keychain 2" },
-    { "Keychain3Paint1",   0x20,  "Keychain 3" },
     { "Keychain4Paint1",   0x28,  "RIP" },
-    { "Keychain6Paint1",   0x30,  "Keychain 6" },
-    { "Keychain7Paint1",   0x38,  "Keychain 7" },
-    { "Keychain8Paint1",   0x40,  "Keychain 8" },
-    { "Keychain9Paint1",   0x48,  "Keychain 9" },
-    { "Keychain10Paint1",  0x50,  "Keychain 10" },
-    { "Keychain11Paint1",  0x58,  "Keychain 11" },
-    { "Keychain12Paint1",  0x60,  "Keychain 12" },
-    { "Keychain13Paint1",  0x68,  "Keychain 13" },
-    { "Keychain14Paint1",  0x70,  "Keychain 14" },
     { "Keychain15Paint1",  0x78,  "Like" },
     { "Keychain16Paint1",  0x80,  "Peace" },
     { "Keychain17Paint1",  0x88,  "Heart" },
-    { "Keychain18Paint1",  0x90,  "Keychain 18" },
     { "Keychain19Paint1",  0x98,  "Alien" },
-    { "Keychain20Paint1",  0xA0,  "Keychain 20 V1" },
-    { "Keychain20Paint2",  0xA8,  "Keychain 20 V2" },
-    { "Keychain21Paint1",  0xB0,  "Keychain 21" },
-    { "Keychain22Paint1",  0xB8,  "Keychain 22" },
-    { "Keychain23Paint1",  0xC0,  "Keychain 23" },
-    { "Keychain24Paint1",  0xC8,  "Keychain 24" },
     { "Keychain25Paint1",  0xD0,  "Candy" },
-    { "Keychain26Paint1",  0xD8,  "Keychain 26" },
-    { "Keychain27Paint1",  0xE0,  "Keychain 27" },
-    { "Keychain28Paint1",  0xE8,  "Keychain 28" },
     { "Keychain29Paint1",  0xF0,  "Brass Knuckles" },
-    { "Keychain30Paint1",  0xF8,  "Keychain 30" },
-    { "Keychain31Paint1",  0x100, "Keychain 31" },
-    { "Keychain33Paint1",  0x108, "Keychain 33" },
-    { "Keychain34Paint1",  0x110, "Keychain 34" },
-    { "Keychain35Paint1",  0x118, "Keychain 35 V1" },
-    { "Keychain35Paint2",  0x120, "Keychain 35 V2" },
-    { "Keychain37Paint1",  0x128, "Keychain 37" },
-    { "Keychain38Paint1",  0x130, "Keychain 38" },
     { "Keychain39Paint1",  0x138, "Flask" },
-    { "Keychain40Paint1",  0x140, "Keychain 40" },
-    { "Keychain41Paint1",  0x148, "Keychain 41" },
     { "Keychain42Paint1",  0x150, "Bullet" },
-    { "Keychain43Paint1",  0x158, "Keychain 43" },
-    { "Keychain44Paint1",  0x160, "Keychain 44" },
     { "Keychain45Paint1",  0x168, "Exhibit" },
     { "Keychain46Paint1",  0x170, "Meat Grinder" },
     { "Keychain47Paint1",  0x178, "Canister" },
     { "Keychain48Paint1",  0x180, "Cellphone" },
     { "Keychain49Paint1",  0x188, "Whistle" },
-    { "Keychain51Paint1",  0x190, "Keychain 51" },
+    { "Keychain52Paint1",  0x198, "Little Paw" },
 };
 
 struct CosmeticCatalog {
@@ -510,10 +379,47 @@ inline const CosmeticCatalog kCosmeticCatalogs[kCosmeticCount] = {
     { kKeychainSkins,     (int)std::size(kKeychainSkins) },
 };
 
+// ---- Skin changer offsets (from ROBRUN_offsets_clean) --------------------
+
+namespace Off {
+inline constexpr std::uintptr_t IL2CPP_STATIC_FIELDS          = 0xB8;
+inline constexpr std::uintptr_t GAME_MODELS_REFERENCES        = 0x0;
+inline constexpr std::uintptr_t REFERENCES_CHARACTER_BODIES   = 0x2F0;
+inline constexpr std::uintptr_t REFERENCES_CHARACTER_FBODIES  = 0x300;
+inline constexpr std::uintptr_t ENUM_ITEMS_LIST               = 0x10;
+inline constexpr std::uintptr_t LIST_ITEMS_ARRAY              = 0x10;
+inline constexpr std::uintptr_t LIST_ITEMS_COUNT              = 0x18;
+inline constexpr std::uintptr_t ARRAY_DATA_START              = 0x20;
+inline constexpr std::uintptr_t IDENTIFIED_ID_STRING          = 0x10;
+inline constexpr std::uintptr_t CHAR_MALE_SKIN_LOADING_MODEL  = 0xE8;
+inline constexpr std::uintptr_t CHAR_FEMALE_SKIN_LOADING_MODEL = 0xF0;
+inline constexpr std::uintptr_t SKIN_LOADING_CURRENT_VALUE    = 0x28;
+inline constexpr std::uintptr_t SKIN_LOADING_VERSION          = 0x18;
+inline constexpr std::uintptr_t SNAPSHOT_VERSION              = 0x18;
+inline constexpr std::uintptr_t SNAPSHOT_FEMALE_FBODY         = 0x20;
+inline constexpr std::uintptr_t SNAPSHOT_MALE_BODY            = 0x28;
+inline constexpr std::uintptr_t SNAPSHOT_CUSTOMIZER_VIEW_DESC = 0x10;
+inline constexpr std::uintptr_t CUSTVIEW_IS_CUSTOMIZED        = 0x128;
+inline constexpr std::uintptr_t CUSTVIEW_MODEL                = 0xD8;
+inline constexpr std::uintptr_t ENTITY_VIEW_CUSTOMIZATION_VIEW = 0xB8;
+inline constexpr std::uintptr_t BATTLE_CHAR_CLIENT_MODEL      = 0x20;
+inline constexpr std::uintptr_t BATTLE_CHAR_SERVER_MODEL      = 0x28;
+inline constexpr std::uintptr_t BATTLE_CHAR_SIMULATED_MODEL   = 0x30;
+inline constexpr std::uintptr_t BATTLE_MODELS_DICT            = 0x50;
+inline constexpr std::uintptr_t VIEWS_CHARACTERS              = 0x110;
+inline constexpr std::uintptr_t CHAR_ID                       = 0x38;
+inline constexpr std::uintptr_t CHARTEMP_BODY                 = 0x28;
+inline constexpr std::uintptr_t CHARTEMP_FBODY                = 0x88;
+inline constexpr std::uintptr_t CHARTEMP_VERSION_MODEL        = 0x20;
+inline constexpr std::uintptr_t TEMP_ENUM_VALUE_OBJ           = 0x18;
+inline constexpr std::uintptr_t TEMP_VERSION_INT              = 0x10;
+inline constexpr std::uintptr_t RVA_GAME_MODELS_TYPEINFO      = 0x081B8870;
+} // namespace Off
+
 // ---- Runtime API ---------------------------------------------------------
 
 void Init(std::uintptr_t gameAssemblyBase);
 void Shutdown();
-void ApplySelectedSkins();
+void Tick();
 
 } // namespace SkinChanger
