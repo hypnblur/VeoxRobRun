@@ -47,13 +47,13 @@ void OverlayNotify::Draw()
 	if (!Overlay::MenuOpen() && ConfigInstance.Overlay.StatusPanel)
 	{
 		const PlayerConfig& cfg = ConfigInstance.Player;
-		StatusEntry entries[] = {
-			{ "Player ESP", cfg.BoxEsp || cfg.Skeleton || cfg.Chams || cfg.Name },
+		const StatusEntry entries[4] = {
+			{ "Player ESP", cfg.BoxEsp || cfg.Skeleton || cfg.Chams || cfg.NameByRole },
 			{ "Skeleton", cfg.Skeleton },
 			{ "Health", cfg.Health },
 			{ "Distance", cfg.Distance },
 		};
-		const int count = (int)(sizeof(entries) / sizeof(entries[0]));
+		constexpr int count = 4;
 
 		const float pad = 10.f;
 		const float dotR = 4.f;
