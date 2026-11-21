@@ -256,6 +256,13 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 		case RobRunWorld::Kind::CollectionTable:
 		case RobRunWorld::Kind::PlotContainer:
 		case RobRunWorld::Kind::Cargo:
+		case RobRunWorld::Kind::CargoBush:
+		case RobRunWorld::Kind::CargoCrystal:
+		case RobRunWorld::Kind::CargoDrug:
+		case RobRunWorld::Kind::CargoCash:
+		case RobRunWorld::Kind::CargoExchange:
+		case RobRunWorld::Kind::CargoBox:
+		case RobRunWorld::Kind::CargoGoods:
 		case RobRunWorld::Kind::VehicleTrunk:
 			show = ConfigInstance.Radar.ShowContainers;
 			dotCol = IM_COL32(255, 190, 80, 180);
@@ -391,6 +398,41 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 	case RobRunWorld::Kind::Cargo:
 		categoryEnabled = lf.Cargo;
 		categoryColour = lf.CargoColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoBush:
+		categoryEnabled = lf.CargoBushes;
+		categoryColour = lf.CargoBushColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoCrystal:
+		categoryEnabled = lf.CargoCrystals;
+		categoryColour = lf.CargoCrystalColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoDrug:
+		categoryEnabled = lf.CargoDrugs;
+		categoryColour = lf.CargoDrugColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoCash:
+		categoryEnabled = lf.CargoCash;
+		categoryColour = lf.CargoCashColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoExchange:
+		categoryEnabled = lf.CargoExchange;
+		categoryColour = lf.CargoExchangeColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoBox:
+		categoryEnabled = lf.CargoBoxes;
+		categoryColour = lf.CargoBoxColour;
+		baseSize += 0.5f;
+		break;
+	case RobRunWorld::Kind::CargoGoods:
+		categoryEnabled = lf.CargoGoods;
+		categoryColour = lf.CargoGoodsColour;
 		baseSize += 0.5f;
 		break;
 	case RobRunWorld::Kind::PlotLoot:

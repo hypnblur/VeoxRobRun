@@ -38,6 +38,20 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.Loot || world.VehicleLoots;
 	case RobRunWorld::Kind::Cargo:
 		return world.Loot || world.Cargos;
+	case RobRunWorld::Kind::CargoBush:
+		return world.Loot || world.Cargos || world.CargoBushes;
+	case RobRunWorld::Kind::CargoCrystal:
+		return world.Loot || world.Cargos || world.CargoCrystals;
+	case RobRunWorld::Kind::CargoDrug:
+		return world.Loot || world.Cargos || world.CargoDrugs;
+	case RobRunWorld::Kind::CargoCash:
+		return world.Loot || world.Cargos || world.CargoCash;
+	case RobRunWorld::Kind::CargoExchange:
+		return world.Loot || world.Cargos || world.CargoExchange;
+	case RobRunWorld::Kind::CargoBox:
+		return world.Loot || world.Cargos || world.CargoBoxes;
+	case RobRunWorld::Kind::CargoGoods:
+		return world.Loot || world.Cargos || world.CargoGoods;
 	case RobRunWorld::Kind::PlotLoot:
 		return world.Loot || world.PlotLoots;
 	case RobRunWorld::Kind::FurnitureLoot:
@@ -104,6 +118,20 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.VehicleLootColour);
 	case RobRunWorld::Kind::Cargo:
 		return Esp::D2DColorToImU32(world.CargoColour);
+	case RobRunWorld::Kind::CargoBush:
+		return Esp::D2DColorToImU32(world.CargoBushColour);
+	case RobRunWorld::Kind::CargoCrystal:
+		return Esp::D2DColorToImU32(world.CargoCrystalColour);
+	case RobRunWorld::Kind::CargoDrug:
+		return Esp::D2DColorToImU32(world.CargoDrugColour);
+	case RobRunWorld::Kind::CargoCash:
+		return Esp::D2DColorToImU32(world.CargoCashColour);
+	case RobRunWorld::Kind::CargoExchange:
+		return Esp::D2DColorToImU32(world.CargoExchangeColour);
+	case RobRunWorld::Kind::CargoBox:
+		return Esp::D2DColorToImU32(world.CargoBoxColour);
+	case RobRunWorld::Kind::CargoGoods:
+		return Esp::D2DColorToImU32(world.CargoGoodsColour);
 	case RobRunWorld::Kind::PlotLoot:
 		return Esp::D2DColorToImU32(world.PlotLootColour);
 	case RobRunWorld::Kind::FurnitureLoot:

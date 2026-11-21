@@ -980,6 +980,7 @@ inline constexpr std::uintptr_t HasCargo         = 0x38; // IPrimitiveModel<bool
 }
 
 namespace CargoModel {
+inline constexpr std::uintptr_t Description      = 0x10; // speculative — IdentifiedBase
 inline constexpr std::uintptr_t Transform        = 0x30;
 inline constexpr std::uintptr_t InteractPosition = 0x38;
 }

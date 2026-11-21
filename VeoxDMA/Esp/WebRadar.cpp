@@ -27,7 +27,7 @@ SOCKET g_listenSocket = INVALID_SOCKET;
 // ---------------------------------------------------------------------------
 // Embedded HTML5 / Canvas Single-Page Application
 // ---------------------------------------------------------------------------
-const char* const kWebRadarHtml = R"raw_html(<!DOCTYPE html>
+const std::string kWebRadarHtml = std::string(R"raw_html(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -232,7 +232,7 @@ const char* const kWebRadarHtml = R"raw_html(<!DOCTYPE html>
     transition: transform 0.1s linear;
   }
 </style>
-</head>
+)raw_html") + R"raw_html(</head>
 <body>
 
 <canvas id="radarCanvas"></canvas>
@@ -558,7 +558,7 @@ const char* const kWebRadarHtml = R"raw_html(<!DOCTYPE html>
 
   setInterval(pollState, 33); // 30 Hz polling
 
-  // Main Render Loop
+)raw_html") + R"raw_html(  // Main Render Loop
   function draw() {
     requestAnimationFrame(draw);
 
@@ -806,7 +806,7 @@ const char* const kWebRadarHtml = R"raw_html(<!DOCTYPE html>
 
 </body>
 </html>
-)raw_html";
+)raw_html");
 
 // ---------------------------------------------------------------------------
 // Worker Thread: Lightweight HTTP 1.1 Web Server
