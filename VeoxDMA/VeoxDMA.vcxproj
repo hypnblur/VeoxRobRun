@@ -86,6 +86,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
@@ -94,10 +95,15 @@
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll next to the overlay</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
@@ -110,10 +116,15 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll next to the overlay</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions Condition="'$(VeoxPlainStrings)'=='true'">VEOX_PLAIN_STRINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
@@ -128,10 +139,15 @@
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll next to the overlay</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
+      <ExceptionHandling>Async</ExceptionHandling>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
@@ -151,6 +167,10 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
+    <PostBuildEvent>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll next to the overlay</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Config\ConfigFile.cpp" />
@@ -179,6 +199,7 @@
     <ClCompile Include="SDK\SkinChanger.cpp" />
     <ClCompile Include="Esp\Radar.cpp" />
     <ClCompile Include="Esp\WeaponSprites.cpp" />
+    <ClCompile Include="Esp\IconSprites.cpp" />
     <ClCompile Include="Esp\WorldEsp.cpp" />
     <ClCompile Include="Misc\Colour.cpp" />
     <ClCompile Include="UI\VeoxMenu.cpp" />
@@ -226,6 +247,7 @@
     <ClInclude Include="Esp\PlayerEsp.h" />
     <ClInclude Include="Esp\Radar.h" />
     <ClInclude Include="Esp\WeaponSprites.h" />
+    <ClInclude Include="Esp\IconSprites.h" />
     <ClInclude Include="Esp\WorldEsp.h" />
     <ClInclude Include="Esp\EspDraw.h" />
     <ClInclude Include="Overlay\Backdrop.h" />
@@ -236,6 +258,7 @@
     <ClInclude Include="Memory\Memory.h" />
     <ClInclude Include="Misc\Input.h" />
     <ClInclude Include="Misc\Pch\Pch.h" />
+    <ClInclude Include="Misc\Diag.h" />
     <ClInclude Include="Misc\Vector.h" />
     <ClInclude Include="SDK\RobRunSDK.h" />
     <ClInclude Include="SDK\Matrix4x4.h" />
