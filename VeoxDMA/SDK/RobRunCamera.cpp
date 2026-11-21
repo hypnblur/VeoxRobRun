@@ -6,11 +6,22 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <mutex>
 
 namespace RobRunCamera {
 
 static std::uintptr_t gaBase = 0;
 static std::uintptr_t g_cachedBrain = 0;
+
+struct ManagedPhysCache {
+    std::uintptr_t va = 0;
+    std::uint64_t pa = 0;
+    std::uint64_t stampMs = 0;
+};
+static std::mutex g_managedPhysMutex;
+static ManagedPhysCache g_managedPhys{};
+static float g_cachedFov = 0.f;
+static std::uint64_t g_cachedFovStampMs = 0;
 
 static bool ReadBytes(std::uintptr_t address, void* buffer, std::size_t size)
 {
@@ -76,6 +87,12 @@ void Init(std::uintptr_t gameAssemblyBase)
 {
     gaBase = gameAssemblyBase;
     g_cachedBrain = 0;
+    g_cachedFov = 0.f;
+    g_cachedFovStampMs = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_managedPhysMutex);
+        g_managedPhys = ManagedPhysCache{};
+    }
     Il2Cpp::Init(gameAssemblyBase);
 }
 
@@ -153,13 +170,52 @@ CameraState Read(std::uintptr_t battleCameraModel)
     static_assert(offsetof(CameraBlock, distance) == 0x50, "distance offset");
 
     CameraBlock block{};
-    if (!ReadBytesFresh(battleCameraModel + rr::BattleCameraModelOffsets::Position,
-            &block, sizeof(block)) &&
-        !ReadBytes(battleCameraModel + rr::BattleCameraModelOffsets::Position,
-            &block, sizeof(block))) {
+    const std::uintptr_t blockVa = battleCameraModel + rr::BattleCameraModelOffsets::Position;
+    const bool singlePage = ((blockVa & ~static_cast<std::uintptr_t>(0xFFF)) ==
+        ((blockVa + sizeof(block) - 1) & ~static_cast<std::uintptr_t>(0xFFF)));
+    bool readOk = false;
+    bool usedPhys = false;
+
+    if (singlePage) {
+        std::uint64_t pa = 0;
+        const std::uint64_t nowMs = GetTickCount64();
+        {
+            std::lock_guard<std::mutex> lock(g_managedPhysMutex);
+            if (g_managedPhys.va == blockVa && g_managedPhys.pa != 0 &&
+                (nowMs - g_managedPhys.stampMs) < 3000) {
+                pa = g_managedPhys.pa;
+            }
+        }
+        if (!pa) {
+            std::uint64_t translated = 0;
+            if (TargetProcess.VirtToPhys(blockVa, translated) && translated != 0) {
+                pa = translated;
+                std::lock_guard<std::mutex> lock(g_managedPhysMutex);
+                g_managedPhys = ManagedPhysCache{ blockVa, pa, nowMs };
+            }
+        }
+        if (pa && TargetProcess.ReadPhysicalFast(pa, &block, sizeof(block))) {
+            const Vector3 p(block.position[0], block.position[1], block.position[2]);
+            const Vector3 f(block.forward[0], block.forward[1], block.forward[2]);
+            const float fLenSq = f.x * f.x + f.y * f.y + f.z * f.z;
+            if (Finite(p) && std::fabs(p.x) < 1e6f && std::fabs(p.y) < 1e6f && std::fabs(p.z) < 1e6f &&
+                Finite(f) && fLenSq > 0.25f && fLenSq < 2.0f) {
+                readOk = true;
+                usedPhys = true;
+            } else {
+                std::lock_guard<std::mutex> lock(g_managedPhysMutex);
+                g_managedPhys = ManagedPhysCache{};
+            }
+        }
+    }
+
+    if (!readOk &&
+        !ReadBytesFresh(blockVa, &block, sizeof(block)) &&
+        !ReadBytes(blockVa, &block, sizeof(block))) {
         return camera;
     }
 
+    camera.usedPhysical = usedPhys;
     camera.position = Vector3(block.position[0], block.position[1], block.position[2]);
     if (!Finite(camera.position)) return camera;
     std::memcpy(camera.orientation, block.orientation, sizeof(camera.orientation));
@@ -191,7 +247,18 @@ CameraState Read(std::uintptr_t battleCameraModel)
         camera.up = up;
     }
 
-    const float fov = ReadCinemachineFov();
+    // Throttle Cinemachine FOV reads to 40 Hz (25 ms) so high-rate camera
+    // polling doesn't burn a second uncached DMA transaction every cycle.
+    const std::uint64_t fovNowMs = GetTickCount64();
+    float fov = g_cachedFov;
+    if (fov <= 0.f || (fovNowMs - g_cachedFovStampMs) >= 25) {
+        const float freshFov = ReadCinemachineFov();
+        if (freshFov > 0.f) {
+            fov = freshFov;
+            g_cachedFov = freshFov;
+            g_cachedFovStampMs = fovNowMs;
+        }
+    }
     if (fov > 0.f) {
         camera.verticalFov = fov;
         camera.fovFromCinemachine = true;
