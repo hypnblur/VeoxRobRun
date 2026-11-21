@@ -651,6 +651,8 @@ static void PublishSnapshot()
     snapshot->lookDirectionModel = cachedLookDirectionModel;
     snapshot->lookDirDirect = cachedLookDirDirect;
     snapshot->playerRotationInput = cachedPlayerRotationInput;
+    snapshot->battleEntities = cachedBattleEntities;
+    snapshot->battleEntitiesUpdater = cachedUpdater;
     snapshot->failureCount = failureCount;
     snapshot->poseFailures = poseFailureCount;
     snapshot->boneTotal = boneTotalAcc;

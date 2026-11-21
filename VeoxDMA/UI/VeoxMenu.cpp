@@ -2270,119 +2270,109 @@ void DrawMisc()
 
 void DrawSkins()
 {
+	const SkinChanger::State state = SkinChanger::GetState();
 	auto& skin = ConfigInstance.Skin;
-	const bool isFemale = (skin.Gender == 2);
 
-	if (!g_singleColumn)
+	BeginCard("SKIN CHANGER", kCardW * 2.f + kGap);
+	ToggleRow("Skin Changer", &skin.Enabled, true);
+	if (state.inMatch)
+		Note("Character: %s", state.female ? "Female" : "Male");
+	else
+		Note("Status: %s", state.status.empty() ? "-" : state.status.c_str());
+	Note("Client-side only. Your real item is drawn with the chosen item's assets, so "
+		"other players wearing the same real item change too (on your screen only). "
+		"Choices are saved per male / female character and applied in every match. "
+		"Everything is restored when turned off or when VeoxDMA closes.");
+	EndCard();
+
+	BeginCard("COSMETICS", kCardW * 2.f + kGap);
+	if (!state.inMatch)
 	{
-		const float r1 = ImMax(CardNaturalHeight("SKIN CHANGER"), CardNaturalHeight("OUTFIT"));
-		const float r2 = ImMax(CardNaturalHeight("COSMETICS"), CardNaturalHeight("WEAPON SKINS"));
-		ForceCardHeight("SKIN CHANGER", r1);
-		ForceCardHeight("OUTFIT", r1);
-		ForceCardHeight("COSMETICS", r2);
-		ForceCardHeight("WEAPON SKINS", r2);
+		Note("Join a match to pick cosmetics.");
 	}
-
-	ImGui::BeginGroup();
+	else
 	{
-		BeginCard("SKIN CHANGER", kCardW);
-		ToggleRow("Enable Skin Changer", &skin.Enabled, true);
-
-		static const char* genderNames[] = { "Male", "Female" };
-		int genderIdx = ImClamp(skin.Gender - 1, 0, 1);
-		if (ComboRow("Character Gender", &genderIdx, genderNames, 2))
-			skin.Gender = genderIdx + 1;
-
-		const char* statusLabel = "Idle";
-		if (skin.Status == 1) statusLabel = "Applying...";
-		else if (skin.Status == 2) statusLabel = "Applied";
-		else if (skin.Status == -1) statusLabel = "Error";
-		Note("Status: %s", statusLabel);
-
-		if (ButtonRow("", "Apply Skins", 130.f, true))
+		static std::vector<std::string> labels[SkinChanger::kSlotCount];
+		static std::vector<const char*> items[SkinChanger::kSlotCount];
+		for (int slot = 0; slot < SkinChanger::kSlotCount; ++slot)
 		{
-			skin.ApplyNow = true;
-			skin.Status = 1;
+			const auto& s = state.slots[slot];
+			SectionLabel(SkinChanger::SlotName(slot));
+			if (!s.supported)
+			{
+				Note("%s", s.status.c_str());
+				continue;
+			}
+			const std::string wanted = SkinChanger::Wanted(slot, state.female);
+			labels[slot].clear();
+			items[slot].clear();
+			labels[slot].push_back("Real item (no change)");
+			int selected = 0;
+			for (std::size_t i = 0; i < s.options.size(); ++i)
+			{
+				const std::string& name = i < s.names.size() ? s.names[i] : s.options[i];
+				const bool duplicate = std::count(s.names.begin(), s.names.end(), name) > 1;
+				labels[slot].push_back(duplicate ? name + " (" + s.options[i] + ")" : name);
+				if (!wanted.empty() && _stricmp(s.options[i].c_str(), wanted.c_str()) == 0)
+					selected = static_cast<int>(i) + 1;
+			}
+			for (const auto& l : labels[slot]) items[slot].push_back(l.c_str());
+			if (ComboRow(SkinChanger::SlotName(slot), &selected, items[slot].data(),
+					static_cast<int>(items[slot].size()), 280.f, true))
+				SkinChanger::SetWanted(slot, state.female,
+					selected > 0 ? s.options[selected - 1] : std::string());
+			Note("Real: %s", s.realName.c_str());
+			Note("Status: %s", s.status.empty() ? "-" : s.status.c_str());
 		}
-
-		Note("Applies the selected outfit to your character while in a match. "
-			"The watchdog re-applies every 800 ms if the game reverts your skin.");
-		EndCard();
-
-		BeginCard("COSMETICS", kCardW);
-		{
-			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Mask];
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow("Mask", &skin.MaskSkin, names, cat.count + 1, 150.f);
-		}
-		{
-			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Bag];
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow("Bag", &skin.BagSkin, names, cat.count + 1, 150.f);
-		}
-		{
-			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::Keychain];
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow("Keychain", &skin.KeychainSkin, names, cat.count + 1, 150.f);
-		}
-		Note("Cosmetic apply paths for masks, bags and keychains are not yet wired "
-			"into the battle path.");
-		EndCard();
 	}
-	ImGui::EndGroup();
+	EndCard();
 
-	if (!g_singleColumn)
-		ImGui::SameLine(0.f, kGap);
-
-	ImGui::BeginGroup();
+	BeginCard("WEAPON SKINS", kCardW * 2.f + kGap);
+	if (!state.inMatch)
 	{
-		BeginCard("OUTFIT", kCardW);
-		if (isFemale)
-		{
-			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::OutfitFemale];
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow("Female Outfit", &skin.OutfitFemale, names, cat.count + 1, 150.f, true);
-		}
-		else
-		{
-			const auto& cat = SkinChanger::kCosmeticCatalogs[SkinChanger::OutfitMale];
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow("Male Outfit", &skin.OutfitMale, names, cat.count + 1, 150.f, true);
-		}
-		Note("Select an outfit and press Apply Skins to change your character's body in battle.");
-		EndCard();
-
-		BeginCard("WEAPON SKINS", kCardW);
-		for (int w = 0; w < SkinChanger::kWeaponCount; ++w)
-		{
-			const auto& cat = SkinChanger::kWeaponCatalogs[w];
-			if (cat.count <= 0) continue;
-			const char* names[64];
-			names[0] = "None";
-			for (int i = 0; i < cat.count && i < 63; ++i)
-				names[i + 1] = cat.skins[i].name;
-			ComboRow(SkinChanger::WeaponNames[w], &skin.WeaponSkin[w], names, cat.count + 1, 150.f);
-		}
-		Note("Weapon skin application in battle is not yet implemented. "
-			"Selections are saved for a future update.");
-		EndCard();
+		Note("Join a match to pick weapon skins.");
 	}
-	ImGui::EndGroup();
+	else if (!state.weaponsSupported)
+	{
+		Note("Weapon skin data not found (offsets changed?).");
+	}
+	else
+	{
+		if (!state.heldWeapon.empty())
+			Note("Holding: %s  -  real skin: %s", state.heldWeapon.c_str(), state.heldSkin.c_str());
+		Note("A chosen skin replaces every skin of that weapon, also on other players "
+			"(on your screen only). Switch weapons once if it does not change right away.");
+
+		static std::vector<std::vector<std::string>> labels;
+		static std::vector<std::vector<const char*>> items;
+		labels.resize(state.weapons.size());
+		items.resize(state.weapons.size());
+		for (std::size_t w = 0; w < state.weapons.size(); ++w)
+		{
+			const auto& weapon = state.weapons[w];
+			const std::string wanted = SkinChanger::WantedWeaponSkin(weapon.key);
+			labels[w].clear();
+			items[w].clear();
+			labels[w].push_back("Real skins (no change)");
+			int selected = 0;
+			for (std::size_t i = 0; i < weapon.skins.size(); ++i)
+			{
+				const std::string& name = i < weapon.names.size() ? weapon.names[i] : weapon.skins[i];
+				const bool duplicate = std::count(weapon.names.begin(), weapon.names.end(), name) > 1;
+				labels[w].push_back(duplicate ? name + " (" + weapon.skins[i] + ")" : name);
+				if (!wanted.empty() && _stricmp(weapon.skins[i].c_str(), wanted.c_str()) == 0)
+					selected = static_cast<int>(i) + 1;
+			}
+			for (const auto& l : labels[w]) items[w].push_back(l.c_str());
+			if (ComboRow(weapon.name.c_str(), &selected, items[w].data(),
+					static_cast<int>(items[w].size()), 280.f, true))
+				SkinChanger::SetWantedWeaponSkin(weapon.key,
+					selected > 0 ? weapon.skins[selected - 1] : std::string());
+			if (!wanted.empty())
+				Note("%s", weapon.status.c_str());
+		}
+	}
+	EndCard();
 }
 
 void DrawSettings(bool attached, const std::string& statusText)

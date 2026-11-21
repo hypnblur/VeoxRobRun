@@ -1,51 +1,40 @@
 #pragma once
 #include "pch.h"
-#include "../SDK/SkinChanger.h"
+#include <map>
 
+// Cosmetic skin changer settings (see SDK/SkinChanger.h). Items are stored by
+// the game's id string, per slot and separately for male and female
+// characters, and applied automatically in every match while Enabled is on.
+// An empty id keeps the real item.
 class SkinConfig
 {
     std::string ConfigName;
 
 public:
+    // Must match SkinChanger::kSlotCount and its slot order.
+    static constexpr int kSlots = 4;
+    static constexpr const char* kSlotKeys[kSlots] = { "Outfit", "Mask", "Bag", "Keychain" };
+
     SkinConfig(const std::string& name) { ConfigName = name; }
 
     bool Enabled = false;
-
-    // 1 = male, 2 = female. Determines which outfit catalog + snapshot offsets.
-    int Gender = 1;
-
-    // Set to true from the menu to trigger an immediate apply.
-    bool ApplyNow = false;
-
-    // Runtime status: 0 = idle, 1 = applying, 2 = applied, -1 = error
-    int Status = 0;
-
-    // 0 = no override (keep game default). 1+ = index into the weapon's skin array.
-    int WeaponSkin[SkinChanger::kWeaponCount] = {};
-
-    // Cosmetic selections (same 0 = off, 1+ = catalog index).
-    int OutfitMale   = 0;
-    int OutfitFemale = 0;
-    int MaskSkin     = 0;
-    int BagSkin      = 0;
-    int KeychainSkin = 0;
+    std::string Male[kSlots];
+    std::string Female[kSlots];
+    // Weapon type (skin id prefix, e.g. "rc_556") -> chosen skin id.
+    std::map<std::string, std::string> WeaponSkins;
 
     json ToJson()
     {
         json j;
         j[ConfigName][LIT("Enabled")] = Enabled;
-        j[ConfigName][LIT("Gender")]  = Gender;
-
-        json ws = json::array();
-        for (int i = 0; i < SkinChanger::kWeaponCount; ++i)
-            ws.push_back(WeaponSkin[i]);
-        j[ConfigName][LIT("WeaponSkin")] = ws;
-
-        j[ConfigName][LIT("OutfitMale")]   = OutfitMale;
-        j[ConfigName][LIT("OutfitFemale")] = OutfitFemale;
-        j[ConfigName][LIT("MaskSkin")]     = MaskSkin;
-        j[ConfigName][LIT("BagSkin")]      = BagSkin;
-        j[ConfigName][LIT("KeychainSkin")] = KeychainSkin;
+        for (int i = 0; i < kSlots; ++i) {
+            j[ConfigName][std::string("Male") + kSlotKeys[i]] = Male[i];
+            j[ConfigName][std::string("Female") + kSlotKeys[i]] = Female[i];
+        }
+        json weapons = json::object();
+        for (const auto& [weapon, skin] : WeaponSkins)
+            if (!skin.empty()) weapons[weapon] = skin;
+        j[ConfigName][LIT("WeaponSkins")] = weapons;
         return j;
     }
 
@@ -53,18 +42,14 @@ public:
     {
         if (!j.contains(ConfigName))
             return;
-        Enabled      = j[ConfigName].value(LIT("Enabled"), Enabled);
-        Gender       = j[ConfigName].value(LIT("Gender"), Gender);
-        OutfitMale   = j[ConfigName].value(LIT("OutfitMale"), OutfitMale);
-        OutfitFemale = j[ConfigName].value(LIT("OutfitFemale"), OutfitFemale);
-        MaskSkin     = j[ConfigName].value(LIT("MaskSkin"), MaskSkin);
-        BagSkin      = j[ConfigName].value(LIT("BagSkin"), BagSkin);
-        KeychainSkin = j[ConfigName].value(LIT("KeychainSkin"), KeychainSkin);
-
-        if (j[ConfigName].contains(LIT("WeaponSkin"))) {
-            const auto& arr = j[ConfigName][LIT("WeaponSkin")];
-            for (int i = 0; i < SkinChanger::kWeaponCount && i < (int)arr.size(); ++i)
-                WeaponSkin[i] = arr[i].get<int>();
+        Enabled = j[ConfigName].value(LIT("Enabled"), Enabled);
+        for (int i = 0; i < kSlots; ++i) {
+            Male[i] = j[ConfigName].value(std::string("Male") + kSlotKeys[i], Male[i]);
+            Female[i] = j[ConfigName].value(std::string("Female") + kSlotKeys[i], Female[i]);
         }
+        WeaponSkins.clear();
+        if (j[ConfigName].contains(LIT("WeaponSkins")) && j[ConfigName][LIT("WeaponSkins")].is_object())
+            for (const auto& [weapon, skin] : j[ConfigName][LIT("WeaponSkins")].items())
+                if (skin.is_string()) WeaponSkins[weapon] = skin.get<std::string>();
     }
 };
