@@ -2510,10 +2510,18 @@ void DrawSettings(bool attached, const std::string& statusText)
 			SliderFloatRow("Distance", &ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f, " m");
 			Note("Pulls the third-person camera back for wide tactical overview.");
 		}
+
+		ToggleRow("FOV Changer", &ConfigInstance.Overlay.FovChanger, true);
+		if (ConfigInstance.Overlay.FovChanger)
+		{
+			SliderFloatRow("Camera FOV", &ConfigInstance.Overlay.CameraFov, 30.0f, 140.0f, " deg");
+			Note("Overrides Cinemachine virtual camera lens FOV.");
+		}
 		EndCard();
 
 		BeginCard("DISPLAY", kCardW);
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
+		ToggleRow("Status Panel", &ConfigInstance.Overlay.StatusPanel);
 
 		{
 			static const char* fontNames[kFontCount];
