@@ -36,6 +36,13 @@ const char* KindName(Kind kind)
     case Kind::DroppedBag:      return "Dropped Bag";
     case Kind::VehicleLoot:     return "Vehicle Loot";
     case Kind::Cargo:           return "Cargo";
+    case Kind::CargoBush:       return "Bush";
+    case Kind::CargoCrystal:    return "Crystal";
+    case Kind::CargoDrug:       return "Drug";
+    case Kind::CargoCash:       return "Cash Cargo";
+    case Kind::CargoExchange:   return "Exchange";
+    case Kind::CargoBox:        return "Cargo Box";
+    case Kind::CargoGoods:      return "Goods";
     case Kind::PlotLoot:        return "Plot Loot";
     case Kind::FurnitureLoot:   return "Furniture Loot";
     case Kind::BuildingLoot:    return "Building Loot";
@@ -53,6 +60,27 @@ const char* KindName(Kind kind)
     case Kind::DefenseBlock:           return "Defense Block";
     }
     return "World";
+}
+
+Kind ClassifyCargo(const std::string& name)
+{
+    if (name.find("Bush") != std::string::npos || name.find("Datura") != std::string::npos)
+        return Kind::CargoBush;
+    if (name.find("Crystal") != std::string::npos)
+        return Kind::CargoCrystal;
+    if (name.find("Drug") != std::string::npos || name.find("Reagent") != std::string::npos)
+        return Kind::CargoDrug;
+    if (name.find("Cash") != std::string::npos || name.find("Gold") != std::string::npos)
+        return Kind::CargoCash;
+    if (name.find("Exchange") != std::string::npos)
+        return Kind::CargoExchange;
+    if (name.find("Box") != std::string::npos || name.find("Case") != std::string::npos ||
+        name.find("Military") != std::string::npos)
+        return Kind::CargoBox;
+    if (name.find("Electronics") != std::string::npos || name.find("Food") != std::string::npos ||
+        name.find("Material") != std::string::npos || name.find("Medical") != std::string::npos)
+        return Kind::CargoGoods;
+    return Kind::Cargo;
 }
 
 namespace {
@@ -642,13 +670,40 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
         }
     }
 
-    AddDictionary(world, rr::WorldEntitiesModel::Cargos, Kind::Cargo,
-        [](std::uintptr_t model, Vector3& position) {
-            const std::uintptr_t transform = RobRunMemory::ReadPtr(
-                model + rr::CargoModel::Transform);
-            if (ReadVehiclePosition(transform, position)) return true;
-            return ReadInlineField(model, rr::CargoModel::InteractPosition, position);
-        }, out, out.loots);
+    // Cargo with per-type category labels
+    {
+        std::vector<RobRunMemory::DictEntry> entries;
+        if (ReadCollection(world, rr::WorldEntitiesModel::Cargos, entries)) {
+            for (const auto& entry : entries) {
+                const std::uintptr_t model = entry.value;
+                if (model <= 0x10000) continue;
+
+                Vector3 position{};
+                const std::uintptr_t transform = RobRunMemory::ReadPtr(
+                    model + rr::CargoModel::Transform);
+                if (!ReadVehiclePosition(transform, position) &&
+                    !ReadInlineField(model, rr::CargoModel::InteractPosition, position))
+                    continue;
+
+                std::string name;
+                const std::uintptr_t desc = RobRunMemory::ReadPtr(
+                    model + rr::CargoModel::Description);
+                if (desc > 0x10000)
+                    name = ReadIdentifiedId(desc);
+
+                Kind cargoKind = name.empty() ? Kind::Cargo : ClassifyCargo(name);
+
+                Entity entity{};
+                entity.id = entry.key;
+                entity.kind = cargoKind;
+                entity.position = position;
+                entity.label = name.empty() ? KindName(cargoKind) : std::move(name);
+                out.entities.push_back(std::move(entity));
+                ++out.loots;
+                if (out.entities.size() >= 4096) break;
+            }
+        }
+    }
 
     AddDictionaryInlineScatter(world, rr::WorldEntitiesModel::PlotLoots, Kind::PlotLoot,
         rr::PlotLootModel::Position, out, out.loots);

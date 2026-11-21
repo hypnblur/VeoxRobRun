@@ -1178,6 +1178,17 @@ void DrawVisuals()
 			ToggleRow("Drug Labs", &ConfigInstance.World.DrugWorkbenches);
 			ToggleRow("Weed", &ConfigInstance.World.Weed);
 			ToggleRow("Defense Blocks", &ConfigInstance.World.DefenseBlocks);
+
+			SectionLabel("CARGO CATEGORIES");
+			ToggleRow("All Cargo", &ConfigInstance.World.Cargos);
+			ToggleRow("  Bushes", &ConfigInstance.World.CargoBushes);
+			ToggleRow("  Crystals", &ConfigInstance.World.CargoCrystals);
+			ToggleRow("  Drugs", &ConfigInstance.World.CargoDrugs);
+			ToggleRow("  Cash Cargo", &ConfigInstance.World.CargoCash);
+			ToggleRow("  Exchange", &ConfigInstance.World.CargoExchange);
+			ToggleRow("  Boxes", &ConfigInstance.World.CargoBoxes);
+			ToggleRow("  Goods", &ConfigInstance.World.CargoGoods);
+
 			ToggleRow("House Info", &ConfigInstance.World.HouseEsp);
 			SliderIntRow("House Range", &ConfigInstance.World.HouseMaxDistance, 50, 1000, "m");
 			SliderIntRow("Max Distance", &ConfigInstance.World.MaxDistance, 0, 2000, "m");
@@ -1341,7 +1352,14 @@ void DrawLootFilter()
 		ColorToggleRow("Static Loot", &ConfigInstance.LootFilter.StaticLoot, ConfigInstance.LootFilter.StaticLootColour);
 		ColorToggleRow("Random Loot", &ConfigInstance.LootFilter.RandomLoot, ConfigInstance.LootFilter.RandomLootColour);
 		ColorToggleRow("Vehicle Loot", &ConfigInstance.LootFilter.VehicleLoot, ConfigInstance.LootFilter.VehicleLootColour);
-		ColorToggleRow("Cargo Drops", &ConfigInstance.LootFilter.Cargo, ConfigInstance.LootFilter.CargoColour);
+		ColorToggleRow("Cargo (All)", &ConfigInstance.LootFilter.Cargo, ConfigInstance.LootFilter.CargoColour);
+		ColorToggleRow("  Bushes", &ConfigInstance.LootFilter.CargoBushes, ConfigInstance.LootFilter.CargoBushColour);
+		ColorToggleRow("  Crystals", &ConfigInstance.LootFilter.CargoCrystals, ConfigInstance.LootFilter.CargoCrystalColour);
+		ColorToggleRow("  Drugs", &ConfigInstance.LootFilter.CargoDrugs, ConfigInstance.LootFilter.CargoDrugColour);
+		ColorToggleRow("  Cash Cargo", &ConfigInstance.LootFilter.CargoCash, ConfigInstance.LootFilter.CargoCashColour);
+		ColorToggleRow("  Exchange", &ConfigInstance.LootFilter.CargoExchange, ConfigInstance.LootFilter.CargoExchangeColour);
+		ColorToggleRow("  Boxes", &ConfigInstance.LootFilter.CargoBoxes, ConfigInstance.LootFilter.CargoBoxColour);
+		ColorToggleRow("  Goods", &ConfigInstance.LootFilter.CargoGoods, ConfigInstance.LootFilter.CargoGoodsColour);
 		ColorToggleRow("Plot Loot", &ConfigInstance.LootFilter.PlotLoot, ConfigInstance.LootFilter.PlotLootColour);
 		ColorToggleRow("Furniture Loot", &ConfigInstance.LootFilter.FurnitureLoot, ConfigInstance.LootFilter.FurnitureLootColour);
 		ColorToggleRow("Building Loot", &ConfigInstance.LootFilter.BuildingLoot, ConfigInstance.LootFilter.BuildingLootColour);
@@ -1414,6 +1432,13 @@ void DrawLootFilter()
 			ConfigInstance.LootFilter.RandomLoot = true;
 			ConfigInstance.LootFilter.VehicleLoot = true;
 			ConfigInstance.LootFilter.Cargo = true;
+			ConfigInstance.LootFilter.CargoBushes = true;
+			ConfigInstance.LootFilter.CargoCrystals = true;
+			ConfigInstance.LootFilter.CargoDrugs = true;
+			ConfigInstance.LootFilter.CargoCash = true;
+			ConfigInstance.LootFilter.CargoExchange = true;
+			ConfigInstance.LootFilter.CargoBoxes = true;
+			ConfigInstance.LootFilter.CargoGoods = true;
 			ConfigInstance.LootFilter.PlotLoot = true;
 			ConfigInstance.LootFilter.FurnitureLoot = true;
 			ConfigInstance.LootFilter.BuildingLoot = true;
@@ -1432,6 +1457,14 @@ void DrawLootFilter()
 			ConfigInstance.LootFilter.PlotLoot = false;
 			ConfigInstance.LootFilter.FurnitureLoot = false;
 			ConfigInstance.LootFilter.BuildingLoot = false;
+			ConfigInstance.LootFilter.Cargo = false;
+			ConfigInstance.LootFilter.CargoBushes = false;
+			ConfigInstance.LootFilter.CargoCrystals = false;
+			ConfigInstance.LootFilter.CargoDrugs = false;
+			ConfigInstance.LootFilter.CargoCash = true;
+			ConfigInstance.LootFilter.CargoExchange = false;
+			ConfigInstance.LootFilter.CargoBoxes = false;
+			ConfigInstance.LootFilter.CargoGoods = false;
 			ConfigInstance.LootFilter.CashNodes = true;
 			ConfigInstance.LootFilter.SettlementCash = true;
 			ConfigInstance.LootFilter.MoneyWorkbenches = true;
