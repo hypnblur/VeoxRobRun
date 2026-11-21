@@ -33,6 +33,8 @@ enum class Kind {
     MoneyWorkbench,
     SecurityAlarm,
     LocationSecurityAlarm,
+    SecurityPanel,
+    MetalDetector,
     FirstAidCabinet,
     CryptoWorkbench,
     VehicleTrunk,

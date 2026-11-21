@@ -665,6 +665,7 @@ inline constexpr std::uintptr_t Doors                      = 0x4B0;
 inline constexpr std::uintptr_t Vehicles                   = 0x4C0;
 inline constexpr std::uintptr_t Cars                       = 0x4C8;
 inline constexpr std::uintptr_t Helicopters                = 0x4D0;
+inline constexpr std::uintptr_t MetalDetectors             = 0x4E8;
 inline constexpr std::uintptr_t StaticLootObjects          = 0x4F0;
 inline constexpr std::uintptr_t RandomLootObjects          = 0x4F8;
 inline constexpr std::uintptr_t LootNodes                  = 0x500;
@@ -892,8 +893,11 @@ inline constexpr std::uintptr_t DescriptionPosition = 0x38;
 }
 
 namespace SafeDoorModel {
+inline constexpr std::uintptr_t _isUnlocked         = 0x10; // IPrimitiveData<bool>
+inline constexpr std::uintptr_t _unlockEndTs        = 0x18; // IPrimitiveData<long>
 inline constexpr std::uintptr_t Description         = 0x28;
 inline constexpr std::uintptr_t DescriptionPosition = 0x14;
+inline constexpr std::uintptr_t ShouldSwitchState   = 0x30; // bool
 }
 
 namespace StorageBoxModel {

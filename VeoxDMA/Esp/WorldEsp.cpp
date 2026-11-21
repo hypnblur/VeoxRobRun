@@ -60,6 +60,8 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 		return world.Valuables || world.CryptoWorkbenches;
 	case RobRunWorld::Kind::SecurityAlarm:
 	case RobRunWorld::Kind::LocationSecurityAlarm:
+	case RobRunWorld::Kind::SecurityPanel:
+	case RobRunWorld::Kind::MetalDetector:
 		return world.SecurityAlarms;
 	case RobRunWorld::Kind::FirstAidCabinet:
 		return world.FirstAidCabinets;
@@ -124,6 +126,8 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 		return Esp::D2DColorToImU32(world.CryptoWorkbenchColour);
 	case RobRunWorld::Kind::SecurityAlarm:
 	case RobRunWorld::Kind::LocationSecurityAlarm:
+	case RobRunWorld::Kind::SecurityPanel:
+	case RobRunWorld::Kind::MetalDetector:
 		return Esp::D2DColorToImU32(world.SecurityAlarmColour);
 	case RobRunWorld::Kind::FirstAidCabinet:
 		return Esp::D2DColorToImU32(world.FirstAidColour);
