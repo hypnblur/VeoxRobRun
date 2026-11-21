@@ -1331,8 +1331,24 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     const std::uintptr_t common = ReadPtr(data + rr::BattleData::Common);
     if (common <= 0x10000) return;
 
-    if (entity.roleName.empty() && entity.role == 0)
-        ApplyRoleFromWrapper(ReadPtr(common + rr::CommonModel::Role), entity);
+    if (entity.roleName.empty() && entity.role == 0) {
+        const std::uintptr_t roleW = ReadPtr(common + rr::CommonModel::Role);
+        ApplyRoleFromWrapper(roleW, entity);
+        // Direct offset fallback: role+0x18 → desc+0x10 → name string
+        if (entity.roleName.empty() && entity.role == 0 && roleW > 0x10000) {
+            const std::uintptr_t desc = ReadPtr(roleW + rr::ReferenceData::Value);
+            if (desc > 0x10000 && desc < 0x7FFFFFFFFFFFull) {
+                const std::uintptr_t nameStr = ReadPtr(desc + rr::Description::Name);
+                if (nameStr > 0x10000) {
+                    std::wstring w;
+                    if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
+                        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                        if (!norm.empty()) entity.roleName = norm;
+                    }
+                }
+            }
+        }
+    }
 
     bool flag = false;
     if (Il2Cpp::ReadPrimitiveBool(ReadPtr(common + rr::CommonModel::IsFiring), flag))
@@ -1346,6 +1362,17 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
     if (Il2Cpp::ReadPrimitiveBool(
             ReadPtr(characterModel + rr::BattleCharacterModel::HasArmor), flag))
         entity.hasArmor = flag;
+    // PublicData hasArmor fallback: Data+0x30 → +0x38 → +0x10
+    if (!entity.hasArmor) {
+        const std::uintptr_t pub = ReadPtr(data + 0x30);
+        if (pub > 0x10000) {
+            const std::uintptr_t armorW = ReadPtr(pub + 0x38);
+            if (armorW > 0x10000) {
+                const std::uint8_t val = RobRunMemory::ReadUInt8(armorW + 0x10);
+                if (val != 0) entity.hasArmor = true;
+            }
+        }
+    }
 
     std::int32_t vehicleId = 0;
     if (Il2Cpp::ReadPrimitiveInt(ReadPtr(common + rr::CommonModel::VehicleEntityId), vehicleId)) {
@@ -2740,6 +2767,7 @@ static void UpdateInternal()
             std::uintptr_t initArmorModel{};
             std::uintptr_t staminaModel{};
             std::uintptr_t common{};
+            std::uintptr_t publicData{};
             std::uintptr_t vehicleWrapper{};
             std::uintptr_t reloadState{};
             std::uintptr_t reloadEndTsW{};
@@ -2753,7 +2781,9 @@ static void UpdateInternal()
             struct { std::uintptr_t hw; std::uintptr_t dw; std::int32_t maxAmt; std::int32_t critHp; } hb{};
             std::uintptr_t staminaW{};
             std::uintptr_t armorW{};
+            std::uintptr_t pubHasArmorW{};
             std::uintptr_t commonRole{};
+            std::uintptr_t roleDesc{};
             std::uintptr_t firingW{};
             std::uintptr_t sprintingW{};
             std::uintptr_t crouchingW{};
@@ -2769,6 +2799,7 @@ static void UpdateInternal()
             std::int32_t staminaVal{};
             std::int32_t armorVal{};
             std::uint8_t hasArmorVal{};
+            std::uint8_t pubHasArmorVal{};
             std::uint8_t firingVal{};
             std::uint8_t sprintingVal{};
             std::uint8_t crouchingVal{};
@@ -2841,8 +2872,10 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(sc, s.privateModel + rr::BattleCharacterPrivateModel::InitArmorModel, &s.initArmorModel, 8);
                         TargetProcess.AddScatterReadRequest(sc, s.privateModel + rr::BattleCharacterPrivateModel::Stamina, &s.staminaModel, 8);
                     }
-                    if (s.data > 0x10000)
+                    if (s.data > 0x10000) {
                         TargetProcess.AddScatterReadRequest(sc, s.data + rr::BattleData::Common, &s.common, 8);
+                        TargetProcess.AddScatterReadRequest(sc, s.data + 0x30, &s.publicData, 8);
+                    }
                     if (s.inVehicle > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.inVehicle + rr::InVehicleModel::EntityId, &s.vehicleWrapper, 8);
                     if (s.weaponReload > 0x10000) {
@@ -2872,6 +2905,8 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(sc, s.staminaModel + rr::StaminaModel::Amount, &s.staminaW, 8);
                     if (s.initArmorModel > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.initArmorModel + rr::InitArmorModel::Amount, &s.armorW, 8);
+                    if (s.publicData > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.publicData + 0x38, &s.pubHasArmorW, 8);
                     if (s.common > 0x10000) {
                         TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::Role, &s.commonRole, 8);
                         TargetProcess.AddScatterReadRequest(sc, s.common + rr::CommonModel::IsFiring, &s.firingW, 8);
@@ -2906,6 +2941,10 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(sc, s.armorW + V, &s.armorVal, 4);
                     if (s.hasArmorWrapper > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.hasArmorWrapper + V, &s.hasArmorVal, 1);
+                    if (s.pubHasArmorW > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.pubHasArmorW + 0x10, &s.pubHasArmorVal, 1);
+                    if (s.commonRole > 0x10000)
+                        TargetProcess.AddScatterReadRequest(sc, s.commonRole + rr::ReferenceData::Value, &s.roleDesc, 8);
                     if (s.firingW > 0x10000)
                         TargetProcess.AddScatterReadRequest(sc, s.firingW + V, &s.firingVal, 1);
                     if (s.sprintingW > 0x10000)
@@ -2969,6 +3008,9 @@ static void UpdateInternal()
                 if (s.crouchingW > 0x10000) det.isCrouching = s.crouchingVal != 0;
                 if (s.deadCommonW > 0x10000 && s.deadCommonVal != 0) det.isDead = true;
                 if (s.hasArmorWrapper > 0x10000) det.hasArmor = s.hasArmorVal != 0;
+                // PublicData hasArmor fallback (Data+0x30 → +0x38 → +0x10)
+                if (!det.hasArmor && s.pubHasArmorW > 0x10000)
+                    det.hasArmor = s.pubHasArmorVal != 0;
 
                 // Vehicle (from ReadRoleAndVehicle path)
                 if (s.vehicleWrapper > 0x10000 && s.vehIdRole > 0) {
@@ -2986,6 +3028,18 @@ static void UpdateInternal()
                 ApplyRoleFromWrapper(s.playerRole, roleScratch);
                 if (roleScratch.roleName.empty() && roleScratch.role == 0)
                     ApplyRoleFromWrapper(s.commonRole, roleScratch);
+                // Direct offset fallback: commonRole+0x18 → desc+0x10 → name string
+                if (roleScratch.roleName.empty() && roleScratch.role == 0 &&
+                    s.roleDesc > 0x10000 && s.roleDesc < 0x7FFFFFFFFFFFull) {
+                    const std::uintptr_t nameStr = ReadPtr(s.roleDesc + rr::Description::Name);
+                    if (nameStr > 0x10000) {
+                        std::wstring w;
+                        if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
+                            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                            if (!norm.empty()) roleScratch.roleName = norm;
+                        }
+                    }
+                }
                 if (roleScratch.role != 0) det.role = roleScratch.role;
                 if (!roleScratch.roleName.empty()) det.roleName = std::move(roleScratch.roleName);
 
