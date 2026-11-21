@@ -71,14 +71,17 @@ void KmBoxNetManager::DisableUdpConnReset()
 
 void KmBoxNetManager::DisconnectNoLock()
 {
-    m_connected = false;
+    m_connected.store(false, std::memory_order_release);
     m_consecFails = 0;
     m_keyboardData = {};
     if (s_Client != INVALID_SOCKET) {
         closesocket(s_Client);
         s_Client = INVALID_SOCKET;
     }
-    WSACleanup();
+    if (m_wsaInitialized) {
+        WSACleanup();
+        m_wsaInitialized = false;
+    }
 }
 
 void KmBoxNetManager::Disconnect()
@@ -89,15 +92,16 @@ void KmBoxNetManager::Disconnect()
 
 int KmBoxNetManager::InitDevice(const std::string& IP, uint16_t Port, const std::string& Mac)
 {
-    m_connected = false;
-    m_keyboardData = {};
+    std::lock_guard<std::mutex> lock(m_ioMutex);
+    DisconnectNoLock();
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(1, 1), &wsaData) != 0)
         return err_creat_socket;
+    m_wsaInitialized = true;
 
     if (LOBYTE(wsaData.wVersion) != 1 || HIBYTE(wsaData.wVersion) != 1) {
-        WSACleanup();
+        DisconnectNoLock();
         return err_net_version;
     }
 
@@ -105,7 +109,7 @@ int KmBoxNetManager::InitDevice(const std::string& IP, uint16_t Port, const std:
 
     s_Client = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
     if (s_Client == INVALID_SOCKET) {
-        WSACleanup();
+        DisconnectNoLock();
         return err_creat_socket;
     }
 
@@ -115,7 +119,7 @@ int KmBoxNetManager::InitDevice(const std::string& IP, uint16_t Port, const std:
 
     const unsigned long addr = inet_addr(IP.c_str());
     if (addr == INADDR_NONE) {
-        Disconnect();
+        DisconnectNoLock();
         return err_creat_socket;
     }
 
@@ -128,14 +132,14 @@ int KmBoxNetManager::InitDevice(const std::string& IP, uint16_t Port, const std:
     PostData.head.indexpts = 0;
     PostData.head.cmd = cmd_connect;
 
-    const int r = SendData(static_cast<int>(sizeof(cmd_head_t)));
+    const int r = SendDataNoLock(static_cast<int>(sizeof(cmd_head_t)));
     if (r != 0) {
-        Disconnect();
+        DisconnectNoLock();
         return r;
     }
 
     SetSocketTimeouts(kRuntimeRecvTimeoutMs, kRuntimeSendTimeoutMs);
-    m_connected = true;
+    m_connected.store(true, std::memory_order_release);
     m_consecFails = 0;
     m_reconnectRequested = false;
     return 0;
@@ -280,6 +284,7 @@ int KmBoxNetManager::NetHandler()
 
 int KmBoxMouse::Move(int x, int y)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
 
@@ -294,11 +299,12 @@ int KmBoxMouse::Move(int x, int y)
     MouseData.y = 0;
 
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
-    return KmBoxMgr.SendData(length);
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Move_Auto(int x, int y, int Runtime)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
 
@@ -313,11 +319,12 @@ int KmBoxMouse::Move_Auto(int x, int y, int Runtime)
     MouseData.y = 0;
 
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
-    return KmBoxMgr.SendData(length);
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Left(bool Down)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
 
@@ -329,11 +336,12 @@ int KmBoxMouse::Left(bool Down)
     memcpy(&KmBoxMgr.PostData.cmd_mouse, &MouseData, sizeof(soft_mouse_t));
 
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
-    return KmBoxMgr.SendData(length);
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Right(bool Down)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
 
@@ -345,11 +353,12 @@ int KmBoxMouse::Right(bool Down)
     memcpy(&KmBoxMgr.PostData.cmd_mouse, &MouseData, sizeof(soft_mouse_t));
 
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
-    return KmBoxMgr.SendData(length);
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Middle(bool Down)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
 
@@ -361,27 +370,44 @@ int KmBoxMouse::Middle(bool Down)
     memcpy(&KmBoxMgr.PostData.cmd_mouse, &MouseData, sizeof(soft_mouse_t));
 
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
-    return KmBoxMgr.SendData(length);
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Side1(bool Down)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
     MouseData.button = Down ? (MouseData.button | 0x08) : (MouseData.button & ~0x08);
-    return Move(0, 0);
+    KmBoxMgr.PostData.head.indexpts++;
+    KmBoxMgr.PostData.head.cmd = cmd_mouse_move;
+    KmBoxMgr.PostData.head.rand = rand();
+    MouseData.x = 0;
+    MouseData.y = 0;
+    memcpy(&KmBoxMgr.PostData.cmd_mouse, &MouseData, sizeof(soft_mouse_t));
+    const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxMouse::Side2(bool Down)
 {
+    std::lock_guard<std::mutex> lock(KmBoxMgr.m_ioMutex);
     if (!KmBoxMgr.IsConnected())
         return err_creat_socket;
     MouseData.button = Down ? (MouseData.button | 0x10) : (MouseData.button & ~0x10);
-    return Move(0, 0);
+    KmBoxMgr.PostData.head.indexpts++;
+    KmBoxMgr.PostData.head.cmd = cmd_mouse_move;
+    KmBoxMgr.PostData.head.rand = rand();
+    MouseData.x = 0;
+    MouseData.y = 0;
+    memcpy(&KmBoxMgr.PostData.cmd_mouse, &MouseData, sizeof(soft_mouse_t));
+    const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_mouse_t));
+    return KmBoxMgr.SendDataNoLock(length);
 }
 
 int KmBoxNetManager::KeyboardKey(unsigned char hid, bool down)
 {
+    std::lock_guard<std::mutex> lock(m_ioMutex);
     if (!IsConnected() || hid == 0 || hid > 0xE7)
         return err_creat_socket;
 
@@ -414,7 +440,7 @@ int KmBoxNetManager::KeyboardKey(unsigned char hid, bool down)
     PostData.head.rand = rand();
     memcpy(&PostData.cmd_keyboard, &m_keyboardData, sizeof(m_keyboardData));
     const int length = static_cast<int>(sizeof(cmd_head_t) + sizeof(soft_keyboard_t));
-    return SendData(length);
+    return SendDataNoLock(length);
 }
 
 KmBoxNetManager KmBoxMgr;

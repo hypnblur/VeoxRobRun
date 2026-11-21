@@ -41,6 +41,7 @@ static ID3D11ShaderResourceView* DecodePng(
     HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, pngSize);
     if (!hMem) { factory->Release(); return nullptr; }
     void* pMem = GlobalLock(hMem);
+    if (!pMem) { GlobalFree(hMem); factory->Release(); return nullptr; }
     std::memcpy(pMem, pngData, pngSize);
     GlobalUnlock(hMem);
 
@@ -80,16 +81,23 @@ static ID3D11ShaderResourceView* DecodePng(
     }
 
     UINT pw = 0, ph = 0;
-    converter->GetSize(&pw, &ph);
-    w = static_cast<int>(pw);
-    h = static_cast<int>(ph);
+    hr = converter->GetSize(&pw, &ph);
+    if (FAILED(hr) || pw == 0 || ph == 0 || pw > 16384 || ph > 16384) {
+        converter->Release(); frame->Release();
+        decoder->Release(); stream->Release(); factory->Release();
+        return nullptr;
+    }
 
-    std::vector<BYTE> pixels(pw * ph * 4);
+    const std::size_t pixelBytes = static_cast<std::size_t>(pw) * static_cast<std::size_t>(ph) * 4u;
+    std::vector<BYTE> pixels(pixelBytes);
     hr = converter->CopyPixels(nullptr, pw * 4,
         static_cast<UINT>(pixels.size()), pixels.data());
     converter->Release(); frame->Release();
     decoder->Release(); stream->Release(); factory->Release();
     if (FAILED(hr)) return nullptr;
+
+    w = static_cast<int>(pw);
+    h = static_cast<int>(ph);
 
     D3D11_TEXTURE2D_DESC desc{};
     desc.Width            = pw;
