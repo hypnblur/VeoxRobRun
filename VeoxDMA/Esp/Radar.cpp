@@ -1656,15 +1656,25 @@ void DrawInGameMapOverlay()
 				if (!(pcfg.HideTeammates && lk.isTeammate)) {
 					ImVec2 pt{};
 					if (worldToMap(lk.position, pt)) {
-						const float fade = 1.f - 0.55f * (static_cast<float>(ageMs) / static_cast<float>(kLastKnownMaxAgeMs));
+						// On a DMA fuser, low alpha blends with the black overlay background
+						// (making colors muddy/dark and exposing internal triangle AA seams).
+						// Keep alpha=255 and desaturate toward a soft grey instead.
+						const float t = std::clamp(static_cast<float>(ageMs) / static_cast<float>(kLastKnownMaxAgeMs), 0.f, 1.f);
+						const float mix = 0.35f + 0.35f * t; // 35% -> 70% muted grey as age grows
 						const ImU32 baseCol = GetInGameMapRoleColor(lk.role, lk.roleName, lk.isTeammate);
-						const int alpha = static_cast<int>(155.f * fade);
-						const ImU32 fadedCol = (baseCol & 0x00FFFFFFu) | (static_cast<ImU32>(std::clamp(alpha, 55, 165)) << 24);
+						const int br = static_cast<int>((baseCol >> IM_COL32_R_SHIFT) & 0xFF);
+						const int bg = static_cast<int>((baseCol >> IM_COL32_G_SHIFT) & 0xFF);
+						const int bb = static_cast<int>((baseCol >> IM_COL32_B_SHIFT) & 0xFF);
+						const int mr = static_cast<int>(br * (1.f - mix) + 155.f * mix);
+						const int mg = static_cast<int>(bg * (1.f - mix) + 160.f * mix);
+						const int mb = static_cast<int>(bb * (1.f - mix) + 168.f * mix);
+						const ImU32 mutedCol = IM_COL32(mr, mg, mb, 255);
 						const float arrowR = 8.5f * scale;
 						if (lk.hasYaw) {
-							DrawPlayerArrow(dl, pt, lk.yaw - rotRad, arrowR, fadedCol);
+							DrawPlayerArrow(dl, pt, lk.yaw - rotRad, arrowR, mutedCol);
 						} else {
-							dl->AddCircleFilled(pt, 5.2f * scale, fadedCol, 12);
+							dl->AddCircleFilled(pt, 5.2f * scale, mutedCol, 12);
+							dl->AddCircle(pt, 5.2f * scale, IM_COL32(26, 28, 32, 255), 12, 1.4f);
 						}
 						if (cfg.InGameMapPlayerNames && font) {
 							char label[96];
@@ -1678,8 +1688,8 @@ void DrawInGameMapOverlay()
 							dl->AddRectFilled(
 								ImVec2(textPos.x - 4.f, textPos.y - 1.5f),
 								ImVec2(textPos.x + sz.x + 4.f, textPos.y + sz.y + 1.5f),
-								IM_COL32(26, 28, 32, 195), 3.5f);
-							Esp::DrawOutlinedText(dl, textPos, fadedCol, font, fontSize * 0.92f, label);
+								IM_COL32(26, 28, 32, 235), 3.5f);
+							Esp::DrawOutlinedText(dl, textPos, mutedCol, font, fontSize * 0.92f, label);
 						}
 					}
 				}
