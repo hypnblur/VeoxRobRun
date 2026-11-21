@@ -2,6 +2,7 @@
 #include "OverlayNotify.h"
 #include "ConfigInstance.h"
 #include "Overlay.h"
+#include "Esp/EspDraw.h"
 #include "ImGUI/imgui.h"
 #include <chrono>
 #include <mutex>
@@ -20,7 +21,7 @@ ImVec2 g_statusPos{ 20.f, 20.f };
 constexpr ImU32 kAccent = IM_COL32(30, 120, 255, 255);
 constexpr ImU32 kText = IM_COL32(235, 238, 245, 255);
 constexpr ImU32 kTextDim = IM_COL32(110, 118, 135, 255);
-constexpr ImU32 kBg = IM_COL32(20, 22, 30, 190);
+constexpr ImU32 kBg = IM_COL32(26, 28, 34, 225);
 constexpr ImU32 kBorder = IM_COL32(50, 70, 120, 210);
 
 struct StatusEntry {
@@ -89,13 +90,15 @@ void OverlayNotify::Draw()
 		ImDrawList* dl = ImGui::GetWindowDrawList();
 		const ImVec2 cursor = ImGui::GetCursorScreenPos();
 
+		ImFont* statusFont = ImGui::GetFont();
+		const float statusFontSize = ImGui::GetFontSize();
 		for (int i = 0; i < count; ++i)
 		{
 			const float y = cursor.y + lineH * i + lineH * 0.5f;
 			const ImU32 col = entries[i].enabled ? kAccent : kTextDim;
 			dl->AddCircleFilled(ImVec2(cursor.x + dotR, y), dotR, col);
-			dl->AddText(ImVec2(cursor.x + dotR * 2.f + 8.f, y - lineH * 0.5f),
-				entries[i].enabled ? kText : kTextDim, entries[i].label);
+			Esp::DrawOutlinedText(dl, ImVec2(cursor.x + dotR * 2.f + 8.f, y - lineH * 0.5f),
+				entries[i].enabled ? kText : kTextDim, statusFont, statusFontSize, entries[i].label);
 		}
 
 		ImGui::End();
@@ -118,9 +121,10 @@ void OverlayNotify::Draw()
 		color = g_notifyColor;
 	}
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	ImFont* toastFont = ImGui::GetFont();
+	const float toastFontSize = ImGui::GetFontSize();
 	const ImVec2 sz = ImGui::GetIO().DisplaySize;
 	const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
 	const float x = sz.x - ts.x - 20.f;
-	dl->AddText(ImVec2(x + 1.f, 21.f), IM_COL32(0, 0, 0, 200), text.c_str());
-	dl->AddText(ImVec2(x, 20.f), color, text.c_str());
+	Esp::DrawOutlinedText(dl, ImVec2(x, 20.f), color, toastFont, toastFontSize, text.c_str());
 }

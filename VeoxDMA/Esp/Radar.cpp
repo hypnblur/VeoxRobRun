@@ -1642,14 +1642,15 @@ void DrawInGameMapOverlay()
 			const bool recentlyMoved = (mot.lastMovedMs != 0) && (vehNowMs - mot.lastMovedMs <= kVehRecentMoveMs);
 			const bool activeRemoteVeh = !occ.occupied && (mv.hasDriver || recentlyMoved);
 
-			// Check remembered live driver (covers helicopters & stolen cars leaving 200-300 m bubble).
+			// Check remembered live driver (covers helicopters & stolen cars leaving 200-300 m bubble
+			// AND recently exited parked vehicles so they keep a soft role tint + name).
 			const LastVehicleDriver* remembered = nullptr;
-			if (activeRemoteVeh) {
+			if (!occ.occupied) {
 				auto it = s_lastVehDriver.find(mv.id);
 				if (it != s_lastVehDriver.end()) {
 					if (vehNowMs - it->second.stampMs <= kLastDriverMaxAgeMs) {
 						remembered = &it->second;
-						if (remembered->entityId >= 0)
+						if (activeRemoteVeh && remembered->entityId >= 0)
 							trackedByVehicleEntityIds.insert(remembered->entityId);
 					} else {
 						s_lastVehDriver.erase(it);
@@ -1659,6 +1660,15 @@ void DrawInGameMapOverlay()
 
 			ImVec2 pt{};
 			if (!worldToMap(vehWorldPos, pt)) continue;
+
+			auto muteRoleColor = [](ImU32 col) -> ImU32 {
+				// 100% opaque soft tint (55% role + 45% silver-grey) for parked/exited vehicles
+				// so they stay visibly tinted red/blue/green without looking active or muddying on fuser.
+				const int r = static_cast<int>(((col >> IM_COL32_R_SHIFT) & 0xFF) * 0.55f + 185.f * 0.45f);
+				const int g = static_cast<int>(((col >> IM_COL32_G_SHIFT) & 0xFF) * 0.55f + 190.f * 0.45f);
+				const int b = static_cast<int>(((col >> IM_COL32_B_SHIFT) & 0xFF) * 0.55f + 198.f * 0.45f);
+				return IM_COL32(r, g, b, 255);
+			};
 
 			ImU32 vehCol = IM_COL32(210, 216, 224, 240);
 			std::string remoteLabel;
@@ -1673,16 +1683,29 @@ void DrawInGameMapOverlay()
 					remoteLabel = mv.ownerNicknameUtf8;
 				if (!remembered && !mv.ownerRoleName.empty())
 					vehCol = GetInGameMapRoleColor(0, mv.ownerRoleName, false);
+			} else if (remembered || !mv.ownerRoleName.empty()) {
+				// Recently exited or owned parked car: keep a soft role tint + name
+				// so you can still tell whose car is parked there.
+				ImU32 baseRole = IM_COL32(210, 216, 224, 255);
+				if (remembered) {
+					baseRole = GetInGameMapRoleColor(remembered->role, remembered->roleName, remembered->isTeammate);
+					remoteLabel = remembered->nicknameUtf8;
+				} else {
+					baseRole = GetInGameMapRoleColor(0, mv.ownerRoleName, false);
+				}
+				if (remoteLabel.empty() && !mv.ownerNicknameUtf8.empty())
+					remoteLabel = mv.ownerNicknameUtf8;
+				vehCol = muteRoleColor(baseRole);
 			}
 
-			const float vehScale = (occ.occupied || activeRemoteVeh) ? scale : (scale * 0.85f);
+			const float vehScale = (occ.occupied || activeRemoteVeh) ? scale : (scale * 0.90f);
 			if (mv.kind == RobRunWorld::Kind::Helicopter) {
 				DrawHeliIcon(dl, pt, vehScale, vehCol);
 			} else {
 				DrawCarIcon(dl, pt, vehScale, vehCol);
 			}
 
-			// Show occupant name(s) on the fullscreen ('M') map above the car/heli icon.
+			// Show occupant/owner name(s) on the fullscreen ('M') map above the car/heli icon.
 			if (isFull && cfg.InGameMapPlayerNames && font) {
 				std::string label;
 				if (occ.occupied && !occ.occupantNames.empty()) {
@@ -1690,7 +1713,7 @@ void DrawInGameMapOverlay()
 						if (ni > 0) label += ", ";
 						label += occ.occupantNames[ni];
 					}
-				} else if (activeRemoteVeh && !remoteLabel.empty()) {
+				} else if (!remoteLabel.empty()) {
 					label = remoteLabel;
 				}
 				if (!label.empty()) {
