@@ -1036,10 +1036,10 @@ void DrawPlayers()
 		if (savedAlert.Saved)
 			ImGui::SetNextWindowPos(ImVec2(savedAlert.X, savedAlert.Y), ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(ImVec2(280.f, 0.f), ImGuiCond_FirstUseEver);
-		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 0, 0, 200));
-		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 50, 50, 200));
-		ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(140, 20, 20, 220));
-		ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(180, 30, 30, 230));
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(34, 26, 28, 235));
+		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 55, 55, 220));
+		ImGui::PushStyleColor(ImGuiCol_TitleBg, IM_COL32(140, 26, 26, 235));
+		ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(180, 32, 32, 240));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.f);
 
@@ -1057,10 +1057,16 @@ void DrawPlayers()
 		}
 
 		const ImU32 alertCol = Esp::D2DColorToImU32(pcfg.LookingColour);
+		ImDrawList* alertDl = ImGui::GetWindowDrawList();
+		ImFont* alertFont = ImGui::GetFont();
+		const float alertFontSize = ImGui::GetFontSize();
 		for (const auto& name : lookingNames)
 		{
 			std::string line = name + " is looking at you!";
-			ImGui::TextColored(ImColor(alertCol).Value, "%s", line.c_str());
+			const ImVec2 pos = ImGui::GetCursorScreenPos();
+			const ImVec2 sz = alertFont->CalcTextSizeA(alertFontSize, FLT_MAX, 0.f, line.c_str());
+			Esp::DrawOutlinedText(alertDl, pos, alertCol, alertFont, alertFontSize, line.c_str());
+			ImGui::Dummy(sz);
 		}
 
 		ImGui::End();
@@ -1076,8 +1082,8 @@ void DrawPlayers()
 	{
 		const auto& inv = *snapshot->inventory;
 		ImGui::SetNextWindowPos(ImVec2(20.f, 106.f), ImGuiCond_FirstUseEver);
-		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(12, 16, 26, 225));
-		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 200, 75, 190));
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(26, 28, 34, 235));
+		ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(255, 200, 75, 210));
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14.f, 8.f));
@@ -1087,14 +1093,29 @@ void DrawPlayers()
 			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoFocusOnAppearing |
 			ImGuiWindowFlags_NoNav);
 
-		ImGui::TextColored(ImVec4(1.0f, 0.84f, 0.30f, 1.0f), "COINS : $%d", inv.coins);
+		ImDrawList* hudDl = ImGui::GetWindowDrawList();
+		ImFont* hudFont = ImGui::GetFont();
+		const float hudFontSize = ImGui::GetFontSize();
+		auto drawHudLine = [&](ImU32 col, const char* fmt, ...) {
+			char buf[192];
+			va_list args;
+			va_start(args, fmt);
+			std::vsnprintf(buf, sizeof(buf), fmt, args);
+			va_end(args);
+			const ImVec2 pos = ImGui::GetCursorScreenPos();
+			const ImVec2 sz = hudFont->CalcTextSizeA(hudFontSize, FLT_MAX, 0.f, buf);
+			Esp::DrawOutlinedText(hudDl, pos, col, hudFont, hudFontSize, buf);
+			ImGui::Dummy(sz);
+		};
+
+		drawHudLine(IM_COL32(255, 214, 76, 255), "COINS : $%d", inv.coins);
 		if (inv.cryptoCoins > 0)
-			ImGui::TextColored(ImVec4(0.45f, 0.88f, 1.0f, 1.0f), "CRYPTO : %d", inv.cryptoCoins);
-		ImGui::TextColored(ImVec4(0.60f, 0.96f, 0.65f, 0.95f),
+			drawHudLine(IM_COL32(115, 224, 255, 255), "CRYPTO : %d", inv.cryptoCoins);
+		drawHudLine(IM_COL32(153, 245, 166, 255),
 			"BAG VALUE : $%d (Cash $%d / Items $%d)",
 			inv.inventoryTotalValue, inv.inventoryCashValue, inv.inventoryItemsValue);
 		if (inv.equipValue > 0 || inv.vehicleTotalValue > 0)
-			ImGui::TextColored(ImVec4(0.75f, 0.82f, 0.92f, 0.90f),
+			drawHudLine(IM_COL32(191, 209, 235, 255),
 				"EQUIP : $%d  |  VEH : $%d", inv.equipValue, inv.vehicleTotalValue);
 
 		ImGui::End();
