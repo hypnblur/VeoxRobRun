@@ -1066,10 +1066,11 @@ ImU32 LightenColor(ImU32 col, int add)
 void DrawCarIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
 {
 	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
-	const ImU32 outline = IM_COL32(12, 14, 18, std::min(255, alpha + 20));
-	const ImU32 glassCol = IM_COL32(34, 46, 62, alpha);
-	const ImU32 glassHi = IM_COL32(140, 185, 225, std::min(150, alpha));
-	const ImU32 tireCol = IM_COL32(22, 25, 30, alpha);
+	// Fuser-safe dark charcoal (pure/near-black gets luma-keyed transparent on DMA fusers).
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 20));
+	const ImU32 glassCol = IM_COL32(54, 68, 86, alpha);
+	const ImU32 glassHi = IM_COL32(150, 195, 235, std::min(170, alpha));
+	const ImU32 tireCol = IM_COL32(44, 48, 56, alpha);
 	const ImU32 rimCol = IM_COL32(225, 232, 240, alpha);
 
 	const float out = std::max(1.8f, 1.55f * scale);
@@ -1152,8 +1153,8 @@ void DrawCarIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
 void DrawHeliIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
 {
 	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
-	const ImU32 outline = IM_COL32(12, 14, 18, std::min(255, alpha + 20));
-	const ImU32 glassCol = IM_COL32(34, 48, 66, alpha);
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 20));
+	const ImU32 glassCol = IM_COL32(54, 68, 86, alpha);
 	const ImU32 rotorIn = IM_COL32(232, 238, 246, alpha);
 
 	const float out = std::max(1.8f, 1.55f * scale);
@@ -1215,7 +1216,7 @@ void DrawHeliIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
 void DrawPlayerArrow(ImDrawList* dl, const ImVec2& c, float relYaw, float radius, ImU32 fillCol)
 {
 	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
-	const ImU32 outline = IM_COL32(10, 12, 16, std::min(255, alpha + 25));
+	const ImU32 outline = IM_COL32(38, 40, 46, std::min(255, alpha + 25));
 
 	const float dirX = std::sin(relYaw);
 	const float dirY = -std::cos(relYaw);
@@ -1417,7 +1418,7 @@ void DrawInGameMapOverlay()
 				dl->AddQuad(
 					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
 					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
-					IM_COL32(0, 0, 0, 220), 1.2f);
+					IM_COL32(38, 40, 46, 235), 1.4f);
 			} else if (cfg.InGameMapValuables &&
 				(we.kind == RobRunWorld::Kind::Cargo ||
 				 we.kind == RobRunWorld::Kind::CashLootNode ||
@@ -1429,7 +1430,7 @@ void DrawInGameMapOverlay()
 					? IM_COL32(255, 110, 230, 235)
 					: IM_COL32(100, 255, 140, 235);
 				dl->AddRectFilled(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), col);
-				dl->AddRect(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), IM_COL32(0, 0, 0, 220));
+				dl->AddRect(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), IM_COL32(38, 40, 46, 235), 0.f, 0, 1.4f);
 			}
 		}
 	}
@@ -1623,7 +1624,7 @@ void DrawInGameMapOverlay()
 			} else {
 				const float dotR = (isFull ? 6.0f : 5.2f) * scale;
 				dl->AddCircleFilled(pt, dotR, col, 14);
-				dl->AddCircle(pt, dotR, IM_COL32(10, 12, 16, 250), 14, 1.8f);
+				dl->AddCircle(pt, dotR, IM_COL32(38, 40, 46, 250), 14, 1.8f);
 			}
 
 			// Player names are only shown on the fullscreen ('M') map, never on the minimap.
@@ -1635,7 +1636,7 @@ void DrawInGameMapOverlay()
 				dl->AddRectFilled(
 					ImVec2(textPos.x - padX, textPos.y - padY),
 					ImVec2(textPos.x + sz.x + padX, textPos.y + sz.y + padY),
-					IM_COL32(10, 12, 16, 175), 3.f);
+					IM_COL32(34, 36, 42, 220), 3.f);
 				Esp::DrawOutlinedText(dl, textPos, col, font, fontSize, ent.nicknameUtf8.c_str());
 			}
 		}
@@ -1677,7 +1678,7 @@ void DrawInGameMapOverlay()
 							dl->AddRectFilled(
 								ImVec2(textPos.x - 3.5f, textPos.y - 1.5f),
 								ImVec2(textPos.x + sz.x + 3.5f, textPos.y + sz.y + 1.5f),
-								IM_COL32(10, 12, 16, 130), 3.f);
+								IM_COL32(34, 36, 42, 190), 3.f);
 							Esp::DrawOutlinedText(dl, textPos, fadedCol, font, fontSize * 0.92f, label);
 						}
 					}
