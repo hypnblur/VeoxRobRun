@@ -82,7 +82,7 @@ static inline bool IsValidBone(const Vector3& p, const Vector3& root)
 	if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
 		return false;
 	const float d = Distance(p, root);
-	return d >= 0.01f && d <= 2.5f;
+	return d <= 3.0f;
 }
 
 static inline bool IsValidBoneSegment(const Vector3& a, const Vector3& b, const Vector3& root)
@@ -489,12 +489,16 @@ void DrawPlayers()
 	// One snapshot for the whole frame. No DMA reads happen here; bones and
 	// positions were resolved by the reader worker.
 	const auto snapshot = RobRunReader::GetSnapshot();
-	if (!snapshot)
+	if (!snapshot) {
+		RobRunReader::ReportRenderState(false, FLT_MAX);
 		return;
+	}
 
 	Matrix4x4 viewProjection{};
-	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
+	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH)) {
+		RobRunReader::ReportRenderState(false, FLT_MAX);
 		return;
+	}
 
 	const int32_t localId = snapshot->localEntityId;
 	const Vector3 localPos = snapshot->localPosition;
@@ -531,6 +535,9 @@ void DrawPlayers()
 	thread_local std::vector<TextSeg> stateSegs;
 	thread_local std::vector<TextSeg> lookSeg;
 	thread_local std::string segFull;
+
+	bool anyEnemyOnScreen = false;
+	float nearestOnScreenDist = FLT_MAX;
 
 	for (const auto& ent : snapshot->entities)
 	{
@@ -581,8 +588,15 @@ void DrawPlayers()
 			continue;
 		}
 
-		// Attenuate colors by HiddenAlpha when entity is occluded (item 5)
-		const float alphaMult = ent.visible ? 1.0f : std::clamp(pcfg.HiddenAlpha, 0.05f, 0.60f);
+		anyEnemyOnScreen = true;
+		if (haveLocalPosition && distF < nearestOnScreenDist)
+			nearestOnScreenDist = distF;
+
+		// Only dim to HiddenAlpha when visibility/wall checking is actually
+		// enabled; otherwise the fallback animator-motion heuristic dims idle
+		// or LOD-throttled players to grey and causes a white/grey strobe.
+		const bool visActive = pcfg.VisCheck || pcfg.WallCheck;
+		const float alphaMult = (!visActive || ent.visible) ? 1.0f : std::clamp(pcfg.HiddenAlpha, 0.05f, 0.60f);
 		const ImU32 boxCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.BoxColour), alphaMult);
 		const ImU32 nameCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.NameColour), alphaMult);
 		const ImU32 distCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.DistanceColour), alphaMult);
@@ -1022,6 +1036,8 @@ void DrawPlayers()
 			}
 		}
 	}
+
+	RobRunReader::ReportRenderState(anyEnemyOnScreen, nearestOnScreenDist);
 
 	if (pcfg.LookingAlert && !lookingNames.empty())
 	{

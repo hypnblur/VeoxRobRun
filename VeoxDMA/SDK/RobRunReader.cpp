@@ -107,11 +107,45 @@ static std::unordered_map<std::uintptr_t, WeaponDescCache> g_weaponDescCache;
 
 static std::atomic<bool> g_cameraInvalidated{ false };
 
+// Lightweight render-thread visibility feedback (written lock-free from
+// PlayerEsp::DrawPlayers, read by the worker and world threads to time
+// manual VMM Mem/TLB cache refreshes when nobody is in sight or nearby).
+static std::atomic<bool> g_renderAnyOnScreen{ false };
+static std::atomic<float> g_renderNearestDist{ 9999.f };
+static std::atomic<std::uint64_t> g_renderReportMs{ 0 };
+static std::atomic<std::uint64_t> g_lastCacheRefreshMs{ 0 };
+
+void ReportRenderState(bool anyOnScreen, float nearestOnScreenDist)
+{
+    g_renderAnyOnScreen.store(anyOnScreen, std::memory_order_relaxed);
+    g_renderNearestDist.store(nearestOnScreenDist, std::memory_order_relaxed);
+    g_renderReportMs.store(GetTickCount64(), std::memory_order_relaxed);
+}
+
+static bool MaybeRefreshDmaCaches(const char* reason, std::uint64_t cooldownMs)
+{
+    const std::uint64_t now = GetTickCount64();
+    std::uint64_t prev = g_lastCacheRefreshMs.load(std::memory_order_relaxed);
+    if (cooldownMs > 0 && prev != 0 && now >= prev && (now - prev) < cooldownMs)
+        return false;
+    if (!g_lastCacheRefreshMs.compare_exchange_strong(prev, now, std::memory_order_relaxed))
+        return false;
+    TargetProcess.RefreshAllCaches();
+    static std::uint64_t lastLogMs = 0;
+    if (now - lastLogMs >= 5000) {
+        lastLogMs = now;
+        DLOG("DmaCacheRefresh: reason=%s", reason ? reason : "manual");
+    }
+    return true;
+}
+
+static void ClearEntityCaches();
+
 static void MarkSessionChanged()
 {
     ++sessionGeneration;
     g_cameraInvalidated.store(true, std::memory_order_release);
-    TargetProcess.RefreshAllCaches();
+    MaybeRefreshDmaCaches("sessionChanged", 0);
     DLOG("SessionChange: gen=%llu bm=0x%llx be=0x%llx lc=0x%llx game=0x%llx",
          (unsigned long long)sessionGeneration,
          (unsigned long long)cachedBattleModel,
@@ -123,6 +157,7 @@ static void MarkSessionChanged()
     cachedViews.clear();
     cachedViewOwner.clear();
     viewOwnerMisses.clear();
+    ClearEntityCaches();
     g_slotIdentityCache.clear();
     g_roleCache.clear();
     g_weaponDescCache.clear();
@@ -297,8 +332,24 @@ struct RigCacheEntry {
     Vector3 lastSampledPos{};
     std::vector<Matrix4x4> worldMatrices;
     std::vector<Matrix4x4> smoothedWorldMatrices;
+    // 3-sample ring buffer of pelvis-relative bone postures. Taking the
+    // 3-sample temporal median on (bone - pelvis) and adding back the live,
+    // undelayed pelvis world position keeps moving players at full worker
+    // refresh rate (0 ms position lag) while mathematically erasing isolated
+    // 1-frame pre-LateUpdate / torn-DMA flickers of any amplitude.
+    std::vector<Skeleton::BoneSegment> relBoneHist[3];
+    Skeleton::BonePoints relPtsHist[3]{};
+    int poseHistCount = 0;
+    int poseHistCursor = 0;
+    int upgradeAttempts = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
+
+static void ClearEntityCaches()
+{
+    rigCache.clear();
+    detailCache.clear();
+}
 
 static void PruneCaches()
 {
@@ -328,6 +379,16 @@ static std::atomic<bool> g_cameraRunning{ false };
 static std::thread g_cameraThread;
 static std::atomic<std::uint64_t> g_perfWorkerPasses{ 0 };
 static std::atomic<std::uint64_t> g_perfWorkerUs{ 0 };
+static std::atomic<std::uint64_t> g_perfWorkerMaxUs{ 0 };
+static std::atomic<std::uint64_t> g_perfP1Us{ 0 };
+static std::atomic<std::uint64_t> g_perfP2Us{ 0 };
+static std::atomic<std::uint64_t> g_perfP3Us{ 0 };
+static std::atomic<std::uint64_t> g_perfDetUs{ 0 };
+static std::atomic<std::uint64_t> g_perfP5Us{ 0 };
+static std::atomic<std::uint64_t> g_perfRebuilds{ 0 };
+static std::atomic<std::uint64_t> g_perfFallbacks{ 0 };
+static std::atomic<int> g_perfSkels{ 0 };
+static std::atomic<int> g_perfLiving{ 0 };
 static void StartCameraWorker();
 static void StopCameraWorker();
 
@@ -870,6 +931,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             const std::uint64_t dt = SteadyMicros() - t0;
             g_perfWorkerPasses.fetch_add(1, std::memory_order_relaxed);
             g_perfWorkerUs.fetch_add(dt, std::memory_order_relaxed);
+            std::uint64_t prevMax = g_perfWorkerMaxUs.load(std::memory_order_relaxed);
+            while (dt > prevMax && !g_perfWorkerMaxUs.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {}
             // Adaptive sleep: 2 ms when entities are active so the FPGA bus has
             // clean breathing room for sub-ms camera reads while keeping entity
             // snapshots fast (~50-70 Hz), or 10 ms during empty lobbies.
@@ -889,9 +952,15 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 ++wwCount;
                 // Controlled partial MemProcFS cache expiry (paired with
                 // -norefresh): purely in-RAM invalidation with zero background
-                // FPGA stalls. 33% data cache every ~500 ms, 33% TLB every ~10 s.
+                // FPGA stalls. Expire 33% data cache every tick (~0.6-1s) and
+                // 33% TLB faster when no enemy is close on screen (~2.5-3s) vs
+                // ~6-8s during close-range visibility.
                 TargetProcess.RefreshMemCachePartial();
-                if ((wwCount % 20) == 0)
+                const bool renderQuiet =
+                    !g_renderAnyOnScreen.load(std::memory_order_relaxed) ||
+                    g_renderNearestDist.load(std::memory_order_relaxed) > 40.f;
+                const int tlbDiv = renderQuiet ? 4 : 10;
+                if ((wwCount % tlbDiv) == 0)
                     TargetProcess.RefreshTlbCachePartial();
                 const std::uint64_t gen = sessionGeneration;
                 const std::uintptr_t bm = cachedBattleModel;
@@ -2027,6 +2096,30 @@ static void RevalidateSession()
         DLOG("GameRoot: class check failed for cachedGame=0x%llx", (unsigned long long)cachedGame);
         cachedGame = 0;
     }
+    // Check live Game -> GameModel -> BattleModel with uncached DMA so leaving
+    // a map or loading into a new session is caught immediately instead of
+    // sticking to an old (not yet GC'd) BattleModel under -norefresh.
+    if (cachedGame > 0x10000) {
+        std::uintptr_t liveGameModel = 0;
+        if (TargetProcess.ReadFresh(cachedGame + rr::Game::GameModel, &liveGameModel, sizeof(liveGameModel)) &&
+            liveGameModel > 0x10000)
+        {
+            std::uintptr_t liveBattleModel = 0;
+            if (TargetProcess.ReadFresh(liveGameModel + rr::GameModel::BattleModel, &liveBattleModel, sizeof(liveBattleModel))) {
+                if (liveBattleModel != cachedBattleModel) {
+                    DLOG("ReaderRoot: BattleModel changed 0x%llx -> 0x%llx, refreshing DMA caches",
+                         (unsigned long long)cachedBattleModel, (unsigned long long)liveBattleModel);
+                    MaybeRefreshDmaCaches("battleModelChanged", 0);
+                    cachedBattleModel = (liveBattleModel > 0x10000 && IsClass(liveBattleModel, "BattleModel"))
+                        ? liveBattleModel : 0;
+                    cachedBattleEntities = 0;
+                    cachedUpdater = 0;
+                    cachedCameraModel = 0;
+                    cachedLocalCharacter = 0;
+                }
+            }
+        }
+    }
     if (cachedBattleModel && !IsClass(cachedBattleModel, "BattleModel")) {
         DLOG("ReaderRoot: class check failed for BattleModel=0x%llx", (unsigned long long)cachedBattleModel);
         cachedBattleModel = 0;
@@ -2085,6 +2178,11 @@ static bool RestoreDefaultCrosshair()
 
 static void UpdateInternal()
 {
+    const std::uint64_t tPassStart = SteadyMicros();
+    std::uint64_t tRootsUs = 0, tViewsUs = 0, tP1Us = 0, tP2Us = 0, tP3Us = 0, tDetUs = 0, tP5Us = 0, tMatchUs = 0;
+    int passRebuilds = 0;
+    int passFallbacks = 0;
+
     static int uiCount = 0;
     ++uiCount;
 
@@ -2158,6 +2256,7 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
         cachedLocalCharacter = 0;
+        MaybeRefreshDmaCaches("noBattleModel", 2000);
         NoteSessionState();
         ++failureCount;
         DLOG("ReaderRoot: BattleModel lost, failures=%u game=0x%llx",
@@ -2183,6 +2282,7 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
         cachedLocalCharacter = 0;
+        MaybeRefreshDmaCaches("noBattleEntities", 2000);
         NoteSessionState();
         ++failureCount;
         return;
@@ -2200,10 +2300,25 @@ static void UpdateInternal()
                 std::wstring wide;
                 if (RobRunMemory::ReadString(idStr, wide)) {
                     std::string id = RobRunMemory::WideToUtf8(wide);
-                    std::lock_guard<std::mutex> lk(locationMutex);
-                    if (id != cachedLocationId)
-                        DLOG("Location: '%s' -> '%s'", cachedLocationId.c_str(), id.c_str());
-                    cachedLocationId = std::move(id);
+                    bool mapChanged = false;
+                    {
+                        std::lock_guard<std::mutex> lk(locationMutex);
+                        if (id != cachedLocationId) {
+                            DLOG("Location: '%s' -> '%s'", cachedLocationId.c_str(), id.c_str());
+                            mapChanged = !cachedLocationId.empty() && !id.empty();
+                        }
+                        cachedLocationId = std::move(id);
+                    }
+                    if (mapChanged) {
+                        MaybeRefreshDmaCaches("locationChanged", 0);
+                        cachedViews.clear();
+                        cachedViewOwner.clear();
+                        viewOwnerMisses.clear();
+                        rigCache.clear();
+                        viewRefreshStamp = 0;
+                        slotRefreshStamp = 0;
+                        fullResolveStamp = 0;
+                    }
                 }
             }
         }
@@ -2304,6 +2419,38 @@ static void UpdateInternal()
         cachedLookDirDirect = 0;
         cachedPlayerRotationInput = 0;
     }
+
+    // Detect full respawn / fast-travel / zone teleport: a >25 m instant jump
+    // in local position means Unity streamed in new character views and bone
+    // hierarchies on freshly mapped pages whose TLB/Mem cache entries may be
+    // stale under -norefresh.
+    {
+        static Vector3 s_prevLocalPos{};
+        static bool s_hadLocalPos = false;
+        const bool nowValid = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+        if (nowValid) {
+            const bool jumped = s_hadLocalPos && Distance(s_prevLocalPos, localPosition) > 25.f;
+            if (jumped) {
+                DLOG("Respawn/Teleport detected (jump=%.1fm), refreshing DMA caches & views",
+                     Distance(s_prevLocalPos, localPosition));
+                MaybeRefreshDmaCaches("respawnTeleport", 1500);
+                cachedViews.clear();
+                cachedViewOwner.clear();
+                viewOwnerMisses.clear();
+                rigCache.clear();
+                viewRefreshStamp = 0;
+                slotRefreshStamp = 0;
+                fullResolveStamp = 0;
+            }
+            s_prevLocalPos = localPosition;
+            s_hadLocalPos = true;
+        } else {
+            s_hadLocalPos = false;
+        }
+    }
+
+    const std::uint64_t tAfterRoots = SteadyMicros();
+    tRootsUs = tAfterRoots - tPassStart;
 
     // Drop a stale updater when the scene changes; otherwise the view
     // dictionary silently stays empty across a map transition.
@@ -2457,6 +2604,9 @@ static void UpdateInternal()
         g_partyStamp = partyNow;
         RefreshParty(cachedGame, localEntityId, localPublicId);
     }
+
+    const std::uint64_t tAfterViews = SteadyMicros();
+    tViewsUs = tAfterViews - tAfterRoots;
 
     if (uiCount <= 3) DLOG("UpdateInternal #%d: pre-entity, battleModel=0x%llx, battleEntities=0x%llx",
         uiCount, (unsigned long long)cachedBattleModel, (unsigned long long)cachedBattleEntities);
@@ -2672,6 +2822,9 @@ static void UpdateInternal()
         }
         poseBuf.resize(poseTotal, 0);
 
+        const std::uint64_t tAfterP1 = SteadyMicros();
+        tP1Us = tAfterP1 - tAfterViews;
+
         // ---------------------------------------------------------------
         // Phase 2: Chunked scatter-read of positions AND poses.
         // Splitting into small batches (max 4 pose-bearing entities per
@@ -2730,17 +2883,28 @@ static void UpdateInternal()
 
         if (uiCount <= 3) DLOG("UpdateInternal #%d: phase2 done, %zu work items", uiCount, work.size());
 
+        const std::uint64_t tAfterP2 = SteadyMicros();
+        tP2Us = tAfterP2 - tAfterP1;
+
         // ---------------------------------------------------------------
         // Phase 3: Rig layout rebuilds and late pose collection.
         // Layouts already valid had their pose read above; newly
         // rebuilt layouts get a supplementary scatter.
+        // Budgeted to at most 1 layout build/upgrade per pass so a wave
+        // of spawns or refreshes can never stall the worker thread.
         // ---------------------------------------------------------------
         const std::uint64_t now = GetTickCount64();
         std::vector<std::size_t> lateResolve;
+        int rebuildBudget = 1;
 
         for (std::size_t wi = 0; wi < work.size(); ++wi) {
             auto& w = work[wi];
             if (!w.positionValid) continue;
+            if (w.entityId == localEntityId) continue;
+            const auto dIt = detailCache.find(w.entityId);
+            if (dIt != detailCache.end() && dIt->second.isDead) continue;
+            if (haveLocalPos && Distance(w.block.position, localPosition) > poseCullDist)
+                continue;
 
             const auto viewIt = views.find(w.entityId);
             const std::uintptr_t viewPtr =
@@ -2751,6 +2915,7 @@ static void UpdateInternal()
                 rig.view = viewPtr;
                 rig.layoutValid = false;
                 rig.layoutStamp = 0;
+                rig.upgradeAttempts = 0;
                 rig.bones.clear();
                 rig.points = Skeleton::BonePoints{};
                 rig.prevLocalValid = false;
@@ -2759,34 +2924,109 @@ static void UpdateInternal()
                 rig.lastSampledPos = Vector3{};
                 rig.lastMotionTick = 0;
                 rig.animatorActive = true;
+                rig.poseHistCount = 0;
+                rig.poseHistCursor = 0;
             }
 
             // Skeleton layout rebuild is wrapped in try/catch because the
             // DMA reads through the entity view hierarchy can trigger AVs
             // on some hardware setups. With /EHa this catch handles SEH.
             try {
-            if (rig.layoutValid && now - rig.layoutStamp >= 1500) {
-                rig.layoutStamp = now;
+            auto limbScore = [](const Skeleton::RigLayout& l) -> int {
+                int s = 0;
+                if (l.leftHip >= 0)       s += 4;
+                if (l.leftKnee >= 0)      s += 4;
+                if (l.leftFoot >= 0)      s += 2;
+                if (l.rightHip >= 0)      s += 4;
+                if (l.rightKnee >= 0)     s += 4;
+                if (l.rightFoot >= 0)     s += 2;
+                if (l.leftShoulder >= 0)  s += 2;
+                if (l.leftElbow >= 0)     s += 2;
+                if (l.leftHand >= 0)      s += 1;
+                if (l.rightShoulder >= 0) s += 2;
+                if (l.rightElbow >= 0)    s += 2;
+                if (l.rightHand >= 0)     s += 1;
+                return s;
+            };
+            auto layoutMissingLimbs = [](const Skeleton::RigLayout& l) -> bool {
+                return l.leftHip < 0 || l.rightHip < 0 ||
+                       l.leftKnee < 0 || l.rightKnee < 0 ||
+                       l.leftShoulder < 0 || l.rightShoulder < 0;
+            };
+
+            auto buildBestLayout = [&](const Skeleton::ReadFn& readFn,
+                                       Skeleton::RigLayout& best) -> bool {
+                bool ok = Skeleton::BuildLayoutFromView(viewPtr, readFn, best);
+                if (!ok) {
+                    ok = Skeleton::BuildLayoutByName(viewPtr, readFn, best);
+                } else if (layoutMissingLimbs(best)) {
+                    Skeleton::RigLayout byName;
+                    if (Skeleton::BuildLayoutByName(viewPtr, readFn, byName) &&
+                        limbScore(byName) > limbScore(best)) {
+                        best = std::move(byName);
+                    }
+                }
+                return ok;
+            };
+
+            const bool incomplete = rig.layoutValid && layoutMissingLimbs(rig.layout) &&
+                rig.upgradeAttempts < 4;
+            const std::uint64_t upgradeIntervalMs =
+                (rig.upgradeAttempts == 0) ? 500 :
+                (rig.upgradeAttempts == 1) ? 1500 : 4000;
+            const std::uint64_t checkIntervalMs = incomplete ? upgradeIntervalMs : 1500;
+            if (rig.layoutValid && now - rig.layoutStamp >= checkIntervalMs) {
                 if (viewPtr <= 0x10000 ||
                     !Skeleton::ValidateHierarchy(rig.layout, DmaRead)) {
+                    rig.layoutStamp = now;
                     rig.layoutValid = false;
                     rig.layoutStamp = 0;
+                    rig.upgradeAttempts = 0;
+                } else if (incomplete && rebuildBudget > 0) {
+                    rig.layoutStamp = now;
+                    --rebuildBudget;
+                    ++passRebuilds;
+                    ++rig.upgradeAttempts;
+                    // Silently try upgrading an incomplete layout using cached
+                    // DMA (bone name lookup inside uses 3 fast scatter calls).
+                    Skeleton::RigLayout candidate;
+                    const bool ok = buildBestLayout(DmaRead, candidate);
+                    SwitchToThread();
+                    if (ok && limbScore(candidate) > limbScore(rig.layout)) {
+                        const bool sameBuf =
+                            candidate.matrices == rig.layout.matrices &&
+                            candidate.count == rig.layout.count;
+                        rig.layout = std::move(candidate);
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
+                        rig.smoothedValid = false;
+                        if (!layoutMissingLimbs(rig.layout))
+                            rig.upgradeAttempts = 0;
+                        if (!sameBuf) w.needsPose = false;
+                    }
+                } else if (!incomplete) {
+                    rig.layoutStamp = now;
                 }
             }
             const bool dueForRebuild = !rig.layoutValid && viewPtr > 0x10000 &&
+                rebuildBudget > 0 &&
                 (rig.layoutStamp == 0 || now - rig.layoutStamp >= 250);
             if (dueForRebuild) {
                 rig.layoutStamp = now;
+                --rebuildBudget;
+                ++passRebuilds;
                 Skeleton::RigLayout candidate;
-                bool ok = Skeleton::BuildLayoutFromView(viewPtr, DmaRead, candidate);
-                if (!ok)
-                    ok = Skeleton::BuildLayoutByName(viewPtr, DmaRead, candidate);
+                const bool ok = buildBestLayout(DmaRead, candidate);
+                SwitchToThread();
                 if (ok) {
                     rig.layout = std::move(candidate);
                     rig.layoutValid = true;
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     rig.smoothedValid = false;
+                    rig.poseHistCount = 0;
+                    rig.poseHistCursor = 0;
+                    rig.upgradeAttempts = 0;
                 } else {
                     if (rig.poseFailureSince == 0)
                         rig.poseFailureSince = now;
@@ -2795,6 +3035,8 @@ static void UpdateInternal()
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
                         rig.smoothedWorldMatrices.clear();
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
                     }
                 }
             }
@@ -2824,6 +3066,9 @@ static void UpdateInternal()
                 TargetProcess.ExecuteReadScatter(scatter);
             }
         }
+
+        const std::uint64_t tAfterP3 = SteadyMicros();
+        tP3Us = tAfterP3 - tAfterP2;
 
         // ---------------------------------------------------------------
         // Phase 5: Process poses, build entities, wall check.
@@ -2970,6 +3215,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 1 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 2: second-level pointers
                 for (int i = 0; i < seCount; ++i) {
@@ -3002,6 +3248,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 2 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 3: third-level pointers + block reads
                 for (int i = 0; i < seCount; ++i) {
@@ -3033,6 +3280,7 @@ static void UpdateInternal()
                 }
                 if (!TargetProcess.ExecuteScatterReadCached(sc))
                     DLOG("ScatterFail: detail phase 3 (seCount=%d)", seCount);
+                SwitchToThread();
 
                 // Phase 4: wrapper primitive values (all at +0x18)
                 constexpr std::uintptr_t V = rr::PrimitiveData::value;
@@ -3237,6 +3485,10 @@ static void UpdateInternal()
             }
         }
 
+        const std::uint64_t tAfterDet = SteadyMicros();
+        tDetUs = tAfterDet - tAfterP3;
+
+        int fallbackBudget = 1;
         for (auto& w : work) {
             if (!w.positionValid) continue;
             if (uiCount <= 3) DLOG("UpdateInternal #%d: entity id=%d, cp=A (init)", uiCount, w.entityId);
@@ -3367,9 +3619,100 @@ static void UpdateInternal()
                         rig.points = Skeleton::BonePoints{};
                         rig.smoothedValid = false;
                         rig.smoothedWorldMatrices.clear();
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
                     }
                 } else {
-                    // Commit the good frame.
+                    // Pelvis-relative 3-sample temporal median:
+                    // anchor is taken from the SAME TransformHierarchy read so
+                    // world-space movement has 0 ms lag while any isolated
+                    // 1-frame pre-LateUpdate / torn-DMA flicker is erased.
+                    const Skeleton::Vec anchor = tmpPoints.hasPelvis
+                        ? tmpPoints.pelvis
+                        : (tmpPoints.hasChest
+                            ? tmpPoints.chest
+                            : Skeleton::Vec{ entity.position.x, entity.position.y, entity.position.z });
+
+                    if (rig.poseHistCount > 0 &&
+                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
+                    {
+                        rig.poseHistCount = 0;
+                        rig.poseHistCursor = 0;
+                    }
+
+                    const int slot = rig.poseHistCursor;
+                    auto& relSegs = rig.relBoneHist[slot];
+                    relSegs.resize(tmpBones.size());
+                    for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                        relSegs[i].a = { tmpBones[i].a.x - anchor.x, tmpBones[i].a.y - anchor.y, tmpBones[i].a.z - anchor.z };
+                        relSegs[i].b = { tmpBones[i].b.x - anchor.x, tmpBones[i].b.y - anchor.y, tmpBones[i].b.z - anchor.z };
+                        relSegs[i].visible = tmpBones[i].visible;
+                    }
+                    auto subVec = [&](const Skeleton::Vec& v) -> Skeleton::Vec {
+                        return { v.x - anchor.x, v.y - anchor.y, v.z - anchor.z };
+                    };
+                    auto& relPts = rig.relPtsHist[slot];
+                    relPts = tmpPoints;
+                    relPts.head          = subVec(tmpPoints.head);
+                    relPts.neck          = subVec(tmpPoints.neck);
+                    relPts.chest         = subVec(tmpPoints.chest);
+                    relPts.pelvis        = subVec(tmpPoints.pelvis);
+                    relPts.leftShoulder  = subVec(tmpPoints.leftShoulder);
+                    relPts.leftElbow     = subVec(tmpPoints.leftElbow);
+                    relPts.leftHand      = subVec(tmpPoints.leftHand);
+                    relPts.rightShoulder = subVec(tmpPoints.rightShoulder);
+                    relPts.rightElbow    = subVec(tmpPoints.rightElbow);
+                    relPts.rightHand     = subVec(tmpPoints.rightHand);
+                    relPts.leftHip       = subVec(tmpPoints.leftHip);
+                    relPts.leftKnee      = subVec(tmpPoints.leftKnee);
+                    relPts.leftFoot      = subVec(tmpPoints.leftFoot);
+                    relPts.rightHip      = subVec(tmpPoints.rightHip);
+                    relPts.rightKnee     = subVec(tmpPoints.rightKnee);
+                    relPts.rightFoot     = subVec(tmpPoints.rightFoot);
+
+                    rig.poseHistCursor = (slot + 1) % 3;
+                    if (rig.poseHistCount < 3) ++rig.poseHistCount;
+
+                    if (rig.poseHistCount == 3) {
+                        auto med3f = [](float a, float b, float c) -> float {
+                            return (std::max)((std::min)(a, b), (std::min)((std::max)(a, b), c));
+                        };
+                        auto med3v = [&](const Skeleton::Vec& v0, const Skeleton::Vec& v1, const Skeleton::Vec& v2) -> Skeleton::Vec {
+                            return {
+                                anchor.x + med3f(v0.x, v1.x, v2.x),
+                                anchor.y + med3f(v0.y, v1.y, v2.y),
+                                anchor.z + med3f(v0.z, v1.z, v2.z)
+                            };
+                        };
+                        const auto& h0 = rig.relBoneHist[0];
+                        const auto& h1 = rig.relBoneHist[1];
+                        const auto& h2 = rig.relBoneHist[2];
+                        for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
+                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                        }
+                        const auto& p0 = rig.relPtsHist[0];
+                        const auto& p1 = rig.relPtsHist[1];
+                        const auto& p2 = rig.relPtsHist[2];
+                        tmpPoints.head          = med3v(p0.head, p1.head, p2.head);
+                        tmpPoints.neck          = med3v(p0.neck, p1.neck, p2.neck);
+                        tmpPoints.chest         = med3v(p0.chest, p1.chest, p2.chest);
+                        tmpPoints.pelvis        = med3v(p0.pelvis, p1.pelvis, p2.pelvis);
+                        tmpPoints.leftShoulder  = med3v(p0.leftShoulder, p1.leftShoulder, p2.leftShoulder);
+                        tmpPoints.leftElbow     = med3v(p0.leftElbow, p1.leftElbow, p2.leftElbow);
+                        tmpPoints.leftHand      = med3v(p0.leftHand, p1.leftHand, p2.leftHand);
+                        tmpPoints.rightShoulder = med3v(p0.rightShoulder, p1.rightShoulder, p2.rightShoulder);
+                        tmpPoints.rightElbow    = med3v(p0.rightElbow, p1.rightElbow, p2.rightElbow);
+                        tmpPoints.rightHand     = med3v(p0.rightHand, p1.rightHand, p2.rightHand);
+                        tmpPoints.leftHip       = med3v(p0.leftHip, p1.leftHip, p2.leftHip);
+                        tmpPoints.leftKnee      = med3v(p0.leftKnee, p1.leftKnee, p2.leftKnee);
+                        tmpPoints.leftFoot      = med3v(p0.leftFoot, p1.leftFoot, p2.leftFoot);
+                        tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
+                        tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
+                        tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+                    }
+
+                    // Commit every pass so world position stays at full worker rate.
                     rig.bones = std::move(tmpBones);
                     rig.points = tmpPoints;
                     rig.curLocal = std::move(tmpLocal);
@@ -3379,7 +3722,7 @@ static void UpdateInternal()
                     constexpr float kPosEpsSq  = 1.0e-6f;
                     constexpr float kRotEps    = 1.0e-6f;
                     constexpr float kScaleEps  = 1.0e-6f;
-                    constexpr std::uint64_t kFreezeMs = 150;
+                    constexpr std::uint64_t kFreezeMs = 500;
 
                     bool moved = !rig.prevLocalValid ||
                         rig.prevLocal.size() != rig.curLocal.size();
@@ -3514,20 +3857,26 @@ static void UpdateInternal()
                         rig.smoothedValid = true;
                     }
                 }
-            } else if (!rig.layoutValid && now - rig.fallbackStamp > 1000) {
+            } else if (!rig.layoutValid &&
+                       entity.entityId != localEntityId &&
+                       !entity.isDead &&
+                       (!haveLocalPos || Distance(entity.position, localPosition) <= poseCullDist) &&
+                       fallbackBudget > 0 &&
+                       now - rig.fallbackStamp > 1000) {
                 rig.fallbackStamp = now;
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D2 (pre-BuildSkeleton)", uiCount);
-                // Never replace good bones with an empty result: this fallback
-                // runs on a timer, so a single failed read used to blank the
-                // skeleton for a full second (a visible strobe).
-                auto fallback = Skeleton::BuildSkeleton(cachedGame, cachedBattleModel,
-                    entity.entityId, DmaRead);
-                if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D3 (post-BuildSkeleton, %zu bones)", uiCount, fallback.size());
-                if (!fallback.empty()) {
-                    rig.bones = std::move(fallback);
-                    rig.points = Skeleton::BonePoints{};
-                    rig.smoothedValid = false;
-                    rig.smoothedWorldMatrices.clear();
+                --fallbackBudget;
+                ++passFallbacks;
+                // Promote unmatched entities straight into cachedViewOwner so
+                // Phase 3 caches their RigLayout and samples them at full worker
+                // rate instead of re-running BuildSkeleton at 1 Hz forever.
+                const std::uintptr_t foundView = static_cast<std::uintptr_t>(
+                    Skeleton::FindEntityView(cachedGame, cachedBattleModel, entity.entityId, DmaRead));
+                if (foundView > 0x10000) {
+                    cachedViewOwner[entity.entityId] = foundView;
+                    rig.view = foundView;
+                    rig.layoutValid = false;
+                    rig.layoutStamp = 0;
+                    rig.upgradeAttempts = 0;
                 }
             }
 
@@ -3688,6 +4037,8 @@ static void UpdateInternal()
                     e.isClanMate = true;
             }
         }
+        const std::uint64_t tAfterP5 = SteadyMicros();
+        tP5Us = tAfterP5 - tAfterDet;
     } else {
         if (++entityDictFailures >= 50) {
             cachedBattleEntities = 0;
@@ -3701,11 +4052,84 @@ static void UpdateInternal()
     // was just cleared.
     if (viewsRefreshed)
     {
+        const std::uint64_t tMatchStart = SteadyMicros();
         viewsRefreshed = false;
         MatchViewsToEntities();
+        tMatchUs = SteadyMicros() - tMatchStart;
     }
 
     const std::uint64_t passNow = GetTickCount64();
+
+    // Opportunistic manual Mem/TLB cache refresh under -norefresh:
+    // 1) When no enemy is currently rendered on screen, everyone on screen is
+    //    far away (> 80 m), or the lobby is empty, refresh caches every 2.5 s
+    //    so newly mapped pages stay warm with zero combat stutter.
+    // 2) Safety net: if nearby living players exist yet most/all have no bones
+    //    for >= 600 ms (e.g. spawned straight into a new area with stale TLB),
+    //    force a cache/TLB refresh and immediately re-read views + layouts.
+    {
+        const std::uint64_t reportMs = g_renderReportMs.load(std::memory_order_relaxed);
+        const bool reportFresh = reportMs != 0 && passNow >= reportMs && (passNow - reportMs) < 1500;
+        const bool anyOnScreen = reportFresh && g_renderAnyOnScreen.load(std::memory_order_relaxed);
+        const float nearestDist = reportFresh ? g_renderNearestDist.load(std::memory_order_relaxed) : 9999.f;
+
+        if (!anyOnScreen || nearestDist > 80.f || entities.size() <= 1) {
+            MaybeRefreshDmaCaches("idleOrOutOfSight", 2500);
+        }
+
+        const bool haveLocal = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+        const float boneRange = static_cast<float>(ConfigInstance.Player.MaxDistance);
+        int nearbyLiving = 0;
+        int nearbyWithBones = 0;
+        for (const auto& e : entities) {
+            if (e.entityId == localEntityId || e.isDead) continue;
+            if (haveLocal && Distance(e.position, localPosition) > boneRange) continue;
+            ++nearbyLiving;
+            if (!e.bones.empty()) ++nearbyWithBones;
+        }
+
+        static std::uint64_t s_boneStarveSince = 0;
+        if (nearbyLiving > 0 && (nearbyWithBones == 0 || nearbyWithBones * 2 < nearbyLiving)) {
+            if (s_boneStarveSince == 0)
+                s_boneStarveSince = passNow;
+            if (passNow - s_boneStarveSince >= 600) {
+                if (MaybeRefreshDmaCaches("boneStarvation", 2500)) {
+                    viewRefreshStamp = 0;
+                    for (auto& kv : rigCache) {
+                        if (kv.second.bones.empty()) {
+                            kv.second.layoutValid = false;
+                            kv.second.layoutStamp = 0;
+                        }
+                    }
+                }
+            }
+        } else {
+            s_boneStarveSince = 0;
+        }
+        g_perfSkels.store(nearbyWithBones, std::memory_order_relaxed);
+        g_perfLiving.store(nearbyLiving, std::memory_order_relaxed);
+        g_perfP1Us.fetch_add(tP1Us, std::memory_order_relaxed);
+        g_perfP2Us.fetch_add(tP2Us, std::memory_order_relaxed);
+        g_perfP3Us.fetch_add(tP3Us, std::memory_order_relaxed);
+        g_perfDetUs.fetch_add(tDetUs, std::memory_order_relaxed);
+        g_perfP5Us.fetch_add(tP5Us, std::memory_order_relaxed);
+        if (passRebuilds) g_perfRebuilds.fetch_add(static_cast<std::uint64_t>(passRebuilds), std::memory_order_relaxed);
+        if (passFallbacks) g_perfFallbacks.fetch_add(static_cast<std::uint64_t>(passFallbacks), std::memory_order_relaxed);
+
+        const std::uint64_t totalPassUs = SteadyMicros() - tPassStart;
+        if (totalPassUs >= 50'000ULL) {
+            static std::uint64_t s_lastSlowLogMs = 0;
+            if (passNow - s_lastSlowLogMs >= 2000) {
+                s_lastSlowLogMs = passNow;
+                std::printf("[SlowPass] total=%.1fms (roots=%.1f views=%.1f p1=%.1f p2=%.1f p3=%.1f det=%.1f p5=%.1f match=%.1f) reb=%d fb=%d skel=%d/%d ents=%zu\n",
+                    totalPassUs / 1000.0,
+                    tRootsUs / 1000.0, tViewsUs / 1000.0,
+                    tP1Us / 1000.0, tP2Us / 1000.0, tP3Us / 1000.0,
+                    tDetUs / 1000.0, tP5Us / 1000.0, tMatchUs / 1000.0,
+                    passRebuilds, passFallbacks, nearbyWithBones, nearbyLiving, entities.size());
+            }
+        }
+    }
 
     // World and inventory reading runs on dedicated g_worldWorkerThread
     // so this player pose pass runs at full speed without latency spikes.
@@ -3859,14 +4283,29 @@ static CameraStepResult RefreshCameraStep()
 
     // Full path: read managed camera, then validate/re-resolve native against it.
     RobRunCamera::CameraState managed{};
+    bool managedChanged = false;
     const std::uintptr_t model = g_renderCameraModel.load(std::memory_order_acquire);
     if (model) {
         managed = RobRunCamera::Read(model);
         if (managed.valid) {
-            const float nativeFov = CameraFinder::ReadNativeFov();
-            if (nativeFov > 0.f)
-                managed.verticalFov = nativeFov;
+            static std::uint64_t lastNativeFovMs = 0;
+            static float cachedNativeFov = 0.f;
+            const std::uint64_t fovNowMs = GetTickCount64();
+            if (fovNowMs - lastNativeFovMs >= 8) {
+                lastNativeFovMs = fovNowMs;
+                const float nf = CameraFinder::ReadNativeFov();
+                if (nf > 0.f) cachedNativeFov = nf;
+            }
+            if (cachedNativeFov > 0.f)
+                managed.verticalFov = cachedNativeFov;
             std::lock_guard<std::mutex> lock(g_freshCameraMutex);
+            managedChanged = !g_freshCamera.valid ||
+                g_freshCamera.position.x != managed.position.x ||
+                g_freshCamera.position.y != managed.position.y ||
+                g_freshCamera.position.z != managed.position.z ||
+                g_freshCamera.forward.x != managed.forward.x ||
+                g_freshCamera.forward.y != managed.forward.y ||
+                g_freshCamera.forward.z != managed.forward.z;
             g_freshCamera = managed;
         }
     }
@@ -3901,8 +4340,10 @@ static CameraStepResult RefreshCameraStep()
     snap.stampUs = SteadyMicros();
     PublishNativeCamera(snap);
     res.active = native.valid || managed.valid;
-    res.usedPhysical = native.usedPhysical;
-    res.changed = native.valid && (!prev.valid || MatrixChanged(prev.view, native.view));
+    res.usedPhysical = native.valid ? native.usedPhysical : managed.usedPhysical;
+    res.changed = native.valid
+        ? (!prev.valid || MatrixChanged(prev.view, native.view))
+        : managedChanged;
     return res;
 }
 
@@ -3966,12 +4407,25 @@ static void StartCameraWorker()
                     const std::uint64_t avgUs = reads ? (rttSumUs / reads) : 0;
                     const std::uint64_t wPasses = g_perfWorkerPasses.exchange(0, std::memory_order_relaxed);
                     const std::uint64_t wUs = g_perfWorkerUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wMaxUs = g_perfWorkerMaxUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p1Us = g_perfP1Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p2Us = g_perfP2Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p3Us = g_perfP3Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t detUs = g_perfDetUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p5Us = g_perfP5Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t rebs = g_perfRebuilds.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t fbs = g_perfFallbacks.exchange(0, std::memory_order_relaxed);
+                    const int skels = g_perfSkels.load(std::memory_order_relaxed);
+                    const int living = g_perfLiving.load(std::memory_order_relaxed);
                     const double wHz = sec > 0.0 ? (wPasses / sec) : 0.0;
                     const double wMs = wPasses ? (static_cast<double>(wUs) / wPasses / 1000.0) : 0.0;
-                    std::printf("[Perf] cam=%.0fHz (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (%.1fms) | overlay=%.0ffps mode=%s cap=%d\n",
-                        camHz, physPct,
+                    const double invP = wPasses ? (1.0 / (wPasses * 1000.0)) : 0.0;
+                    std::printf("[Perf] cam=%.0fHz src=%s (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (avg=%.1fms max=%.1fms p1/p2/p3/det/p5=%.1f/%.1f/%.1f/%.1f/%.1fms reb=%llu fb=%llu skel=%d/%d) | overlay=%.0ffps mode=%s cap=%d\n",
+                        camHz, GetViewProjectionSource(), physPct,
                         (unsigned long long)avgUs, (unsigned long long)rttMaxUs, chgHz,
-                        wHz, wMs,
+                        wHz, wMs, wMaxUs / 1000.0,
+                        p1Us * invP, p2Us * invP, p3Us * invP, detUs * invP, p5Us * invP,
+                        (unsigned long long)rebs, (unsigned long long)fbs, skels, living,
                         Overlay::CurrentFps(), Overlay::PresentModeName(), Overlay::FrameCap());
                     winStartUs = tEnd;
                     reads = physHits = changes = rttSumUs = rttMaxUs = 0;

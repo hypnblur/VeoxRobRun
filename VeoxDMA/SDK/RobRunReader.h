@@ -207,6 +207,12 @@ bool ResolveViewProjection(Matrix4x4& out, int screenWidth, int screenHeight);
 void BeginRenderFrame(int screenWidth, int screenHeight);
 void EndRenderFrame();
 
+// Lightweight render-thread feedback telling the worker whether any enemy is
+// currently projected on screen and how close the nearest on-screen enemy is.
+// Used to schedule manual VMM Mem/TLB cache refreshes when nobody is in sight
+// or everyone is far away, avoiding mid-fight stutters under -norefresh.
+void ReportRenderState(bool anyOnScreen, float nearestOnScreenDist);
+
 // Single role-label resolver. Role ids are hashed enums, so names come from the
 // reflection pass and the known-id fallbacks live here; the aim filter and the
 // ESP must both go through it so they cannot disagree about a target.
