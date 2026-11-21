@@ -162,9 +162,12 @@ void DrawWorldEntities()
 
 	const Vector3 localPos = snapshot->localPosition;
 	const bool haveLocalPosition = !localPos.IsZero();
+	const float maxDist = (float)ConfigInstance.World.MaxDistance;
+	const float maxDistSq = maxDist * maxDist;
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	ImFont* font = ImGui::GetFont();
 	const float fontSize = (float)ConfigInstance.World.FontSize;
+	thread_local std::string label;
 
 	for (const auto& entity : snapshot->world->entities)
 	{
@@ -174,8 +177,8 @@ void DrawWorldEntities()
 		const float dx = entity.position.x - localPos.x;
 		const float dy = entity.position.y - localPos.y;
 		const float dz = entity.position.z - localPos.z;
-		const int distance = (int)std::sqrt(dx * dx + dy * dy + dz * dz);
-		if (haveLocalPosition && distance > ConfigInstance.World.MaxDistance)
+		const float distSq = dx * dx + dy * dy + dz * dz;
+		if (haveLocalPosition && distSq > maxDistSq)
 			continue;
 
 		if (ConfigInstance.LootFilter.Enabled && ConfigInstance.LootFilter.FilterByMinPrice && ConfigInstance.LootFilter.MinPrice > 0)
@@ -194,17 +197,13 @@ void DrawWorldEntities()
 			viewProjection, entity.position, screenW, screenH, screen))
 			continue;
 
-		ImU32 colour = ColourFor(entity.kind);
-		if (ConfigInstance.LootFilter.Enabled && entity.hasCashAmount)
-		{
-			if (entity.cashAmount >= ConfigInstance.LootFilter.HighValueThreshold)
-				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.HighValueColour);
-			else if (entity.cashAmount >= ConfigInstance.LootFilter.MidValueThreshold)
-				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.MidValueColour);
-		}
-		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
+		// Skip off-screen world items before allocating/measuring text or
+		// emitting draw commands.
+		if (screen.x < -120.f || screen.x > (float)screenW + 120.f ||
+			screen.y < -60.f || screen.y > (float)screenH + 60.f)
+			continue;
 
-		std::string label = entity.label;
+		label = entity.label;
 
 		// Rename "Bush" → "Weed" in display labels + optional hide
 		{
@@ -217,6 +216,16 @@ void DrawWorldEntities()
 				continue;
 		}
 
+		ImU32 colour = ColourFor(entity.kind);
+		if (ConfigInstance.LootFilter.Enabled && entity.hasCashAmount)
+		{
+			if (entity.cashAmount >= ConfigInstance.LootFilter.HighValueThreshold)
+				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.HighValueColour);
+			else if (entity.cashAmount >= ConfigInstance.LootFilter.MidValueThreshold)
+				colour = Esp::D2DColorToImU32(ConfigInstance.LootFilter.MidValueColour);
+		}
+		dl->AddCircleFilled(ImVec2(screen.x, screen.y), 2.5f, colour);
+
 		if (entity.hasCashAmount) {
 			label += " | $" + FormatCash(entity.cashAmount);
 			if (entity.kind == RobRunWorld::Kind::MoneyWorkbench && entity.cleanCash > 0 && entity.dirtyCash > 0) {
@@ -228,8 +237,10 @@ void DrawWorldEntities()
 		} else if (entity.kind == RobRunWorld::Kind::DefenseBlock && entity.hasEmptyFlag) {
 			label += entity.empty ? " [empty]" : " [armed]";
 		}
-		if (ConfigInstance.World.ShowDistance)
+		if (ConfigInstance.World.ShowDistance) {
+			const int distance = (int)std::sqrt(distSq);
 			label += " [" + std::to_string(distance) + "m]";
+		}
 
 		ImFont* useFont = font;
 		ImVec2 textSize = useFont

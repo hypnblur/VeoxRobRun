@@ -50,7 +50,7 @@ public:
 
 	int MonitorIndex = 0;            // display the overlay is pinned to
 	bool FPSEnabled = false;         // small FPS readout in the top-left
-	int FrameCap = 144;              // default 144 fps, 0 = uncapped
+	int FrameCap = 240;              // default 240 fps, 0 = uncapped
 	std::string FontName = "Maven Pro";
 	bool Transparent = true;         // per-pixel alpha over the game
 	bool HighContrastMenu = false;   // solid menu fills for bright scenes

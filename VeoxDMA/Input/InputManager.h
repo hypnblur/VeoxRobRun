@@ -6,6 +6,8 @@ namespace Keyboard {
 
 bool InitKeyboard();
 void UpdateKeys();
+void PollKeysAsync();
+void SetAsyncKeyPolling(bool active);
 bool IsKeyDown(uint32_t virtual_key_code);
 bool IsReady();
 
