@@ -10,6 +10,7 @@
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../Esp/Radar.h"
+#include "../Esp/WebRadar.h"
 #include "../Overlay/Backdrop.h"
 #include "imgui_internal.h"
 #include "imgui_settings.h"
@@ -1215,6 +1216,32 @@ void DrawRadar()
 		SliderFloatRow("Size", &ConfigInstance.Radar.Size, 100.f, 1000.f, "px");
 		SliderFloatRow("Zoom", &ConfigInstance.Radar.Zoom, 0.1f, 10.f, "x");
 		SliderFloatRow("Opacity", &ConfigInstance.Radar.Opacity, 0.0f, 1.f);
+
+		SectionLabel("WEB RADAR (LOCALHOST)");
+		bool webRunning = WebRadar::IsRunning();
+		if (ToggleRow("Web Radar Server", &ConfigInstance.Radar.WebRadarEnabled))
+		{
+			if (ConfigInstance.Radar.WebRadarEnabled)
+				WebRadar::Start(ConfigInstance.Radar.WebRadarPort);
+			else
+				WebRadar::Stop();
+		}
+
+		if (ConfigInstance.Radar.WebRadarEnabled)
+		{
+			if (SliderIntRow("Web Port", &ConfigInstance.Radar.WebRadarPort, 1024, 65535))
+			{
+				WebRadar::Start(ConfigInstance.Radar.WebRadarPort);
+			}
+
+			if (ButtonRow("", "Pop Out Web Radar", 170.f, true))
+			{
+				WebRadar::OpenInBrowser();
+			}
+
+			Note("URL: %s", WebRadar::GetUrl().c_str());
+			Note("Open on any browser, second monitor, or mobile phone on Wi-Fi.");
+		}
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -1225,22 +1252,37 @@ void DrawRadar()
 	ImGui::BeginGroup();
 	{
 		BeginCard("MAP BOUNDS", kCardW);
-		Note("World coordinates used to calibrate entity scale over the in-game map.");
+		Note("2D BVH collision maps calibrated to in-game world coordinates.");
+
+		SectionLabel("MAP SELECTION");
+		ToggleRow("Auto Map Select", &ConfigInstance.Radar.AutoMapSelect);
+		Note("Automatically selects the 2D map for the current location.");
+
+		const auto& mapFiles = Radar::GetMapFiles();
+		if (!mapFiles.empty())
+		{
+			std::vector<const char*> ptrs(mapFiles.size());
+			for (size_t i = 0; i < mapFiles.size(); ++i)
+				ptrs[i] = mapFiles[i].c_str();
+
+			int curMap = Radar::GetCurrentMapIndex();
+			if (ComboRow("Active Map", &curMap, ptrs.data(), (int)ptrs.size()))
+			{
+				Radar::SetMap(curMap);
+			}
+		}
+
 		SectionLabel("X AXIS");
 		SliderFloatRow("Min X", &ConfigInstance.Radar.WorldMinX, -5000.f, 5000.f);
 		SliderFloatRow("Max X", &ConfigInstance.Radar.WorldMaxX, -5000.f, 5000.f);
 		SectionLabel("Z AXIS");
 		SliderFloatRow("Min Z", &ConfigInstance.Radar.WorldMinZ, -5000.f, 5000.f);
 		SliderFloatRow("Max Z", &ConfigInstance.Radar.WorldMaxZ, -5000.f, 5000.f);
-		if (ButtonRow("", "Reset Bounds", 130.f))
+		if (ButtonRow("", "Calibrate to Map", 150.f))
 		{
-			ConfigInstance.Radar.WorldMinX = -600.f;
-			ConfigInstance.Radar.WorldMaxX = 600.f;
-			ConfigInstance.Radar.WorldMinZ = -400.f;
-			ConfigInstance.Radar.WorldMaxZ = 400.f;
+			Radar::CalibrateBoundsForMap(Radar::GetCurrentMapName());
 		}
-		Note("The radar reads entity positions from the same snapshot as the ESP. "
-			"Bounds calibrate where positions land on the map.");
+		Note("The radar scales entity positions over the 2D BVH map using these bounds.");
 		EndCard();
 	}
 	ImGui::EndGroup();

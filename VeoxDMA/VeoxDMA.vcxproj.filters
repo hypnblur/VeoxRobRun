@@ -71,6 +71,12 @@
     <ClCompile Include="Esp\WorldEsp.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Esp\Radar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Esp\WebRadar.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Misc\Colour.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -149,6 +155,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Overlay\OverlayNotify.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Esp\Radar.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Esp\WebRadar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Misc\CheatFunction.h">
