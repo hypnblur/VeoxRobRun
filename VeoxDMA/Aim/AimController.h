@@ -42,6 +42,8 @@ void DrawDebug();
 DebugInfo GetDebug();
 void StartAimWorker();
 void StopAimWorker();
+void StartRecoilWorker();
+void StopRecoilWorker();
 void SetDisplaySize(float width, float height);
 
 // Activation-key labels shared with the menu so the combo and the runtime
