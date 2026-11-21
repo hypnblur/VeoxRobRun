@@ -1474,6 +1474,7 @@ void DrawInGameMapOverlay()
 		int id = 0;
 		RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
 		Vector3 position{};
+		std::uint64_t ownerPublicId = 0;
 		std::string ownerRoleName;
 		std::string ownerNicknameUtf8;
 		bool hasDriver = false;
@@ -1489,13 +1490,28 @@ void DrawInGameMapOverlay()
 		mapVehicles.reserve(snapshot->fastVehicles.size());
 		for (const auto& fv : snapshot->fastVehicles) {
 			mapVehicles.push_back(MapVehicle{
-				fv.id, fv.kind, fv.position, fv.ownerRoleName, fv.ownerNicknameUtf8, fv.hasDriver
+				fv.id, fv.kind, fv.position, fv.ownerPublicId, fv.ownerRoleName, fv.ownerNicknameUtf8, fv.hasDriver
 			});
 		}
 	} else if (haveWorld) {
 		for (const auto& we : snapshot->world->entities) {
 			if (!isWorldVehicle(we.kind)) continue;
-			mapVehicles.push_back(MapVehicle{ we.id, we.kind, we.position, {}, {}, false });
+			mapVehicles.push_back(MapVehicle{ we.id, we.kind, we.position, 0, {}, {}, false });
+		}
+	}
+
+	// Track the local player's publicId so we never mark our own parked/driven
+	// vehicle (the game already draws our own car icon on the map).
+	static std::uint64_t s_localPublicId = 0;
+	static std::uint64_t s_localPubSession = 0;
+	if (snapshot->sessionGeneration != s_localPubSession) {
+		s_localPubSession = snapshot->sessionGeneration;
+		s_localPublicId = 0;
+	}
+	for (const auto& ent : snapshot->entities) {
+		if (ent.entityId == localId && ent.publicId > 0) {
+			s_localPublicId = ent.publicId;
+			break;
 		}
 	}
 
@@ -1621,8 +1637,9 @@ void DrawInGameMapOverlay()
 		for (std::size_t vi = 0; vi < vehCount; ++vi) {
 			const auto& mv = mapVehicles[vi];
 			const auto& occ = vehOcc[vi];
-			if (occ.localOccupied && !occ.occupied)
-				continue; // Don't clutter under the local player's own arrow
+			if (!occ.occupied &&
+				(occ.localOccupied || (s_localPublicId > 0 && mv.ownerPublicId == s_localPublicId)))
+				continue; // Game already marks our own vehicle on the map
 
 			const Vector3& vehWorldPos = (occ.occupied && occ.hasDriverPos) ? occ.driverPos : mv.position;
 
