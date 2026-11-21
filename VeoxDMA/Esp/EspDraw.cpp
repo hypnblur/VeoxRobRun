@@ -64,11 +64,16 @@ void DrawOutlinedText(ImDrawList* dl, const ImVec2& pos, ImU32 col,
 	if (!text || !text[0] || !font) return;
 	const ImVec2 p = Snap(pos);
 	// Fuser-safe dark charcoal (pure black gets luma-keyed to transparent on DMA fusers).
-	const ImU32 outline = IM_COL32(36, 38, 44, 235);
+	// Full 8-direction outline keeps text crisp and readable over bright map terrain.
+	const ImU32 outline = IM_COL32(26, 28, 32, 245);
 	dl->AddText(font, size, ImVec2(p.x - 1.f, p.y), outline, text);
 	dl->AddText(font, size, ImVec2(p.x + 1.f, p.y), outline, text);
 	dl->AddText(font, size, ImVec2(p.x, p.y - 1.f), outline, text);
 	dl->AddText(font, size, ImVec2(p.x, p.y + 1.f), outline, text);
+	dl->AddText(font, size, ImVec2(p.x - 1.f, p.y - 1.f), outline, text);
+	dl->AddText(font, size, ImVec2(p.x + 1.f, p.y - 1.f), outline, text);
+	dl->AddText(font, size, ImVec2(p.x - 1.f, p.y + 1.f), outline, text);
+	dl->AddText(font, size, ImVec2(p.x + 1.f, p.y + 1.f), outline, text);
 	dl->AddText(font, size, p, col, text);
 }
 
