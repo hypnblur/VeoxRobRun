@@ -637,30 +637,30 @@ static void TickInstantLoot()
         if (cachedRevealDescs <= 0x10000) { cachedRevealDescs = 0; return; }
 
         namespace rv = rr::InventoryRevealViewDescriptions;
-        const std::uintptr_t items = RobRunMemory::ReadPtr(
-            cachedRevealDescs + rv::Items);
-        if (items <= 0x10000) { cachedRevealDescs = 0; return; }
-        const int count = RobRunMemory::ReadInt32(items + rv::Size);
-        if (count <= 0 || count > 64) { cachedRevealDescs = 0; return; }
-        const std::uintptr_t data = RobRunMemory::ReadPtr(items + rv::Data);
-        if (data <= 0x10000) { cachedRevealDescs = 0; return; }
 
+        // Cell delay on the container itself (TimeToOneCellBorder).
+        // Write to the instance, NOT to individual descriptions at +0x58
+        // (that offset on a description is GlowColor and will crash).
         const float nearZero = 0.0001f;
         const float zero = 0.0f;
+        TargetProcess.Write(cachedRevealDescs + 0x58, nearZero);
+
+        const std::uintptr_t list = RobRunMemory::ReadPtr(
+            cachedRevealDescs + rv::Items);
+        if (list <= 0x10000) { cachedRevealDescs = 0; return; }
+        const std::uintptr_t items = RobRunMemory::ReadPtr(list + 0x10);
+        const int count = RobRunMemory::ReadInt32(list + 0x18);
+        if (items <= 0x10000 || count <= 0 || count > 500) { cachedRevealDescs = 0; return; }
+
         for (int i = 0; i < count; i++) {
-            const std::uintptr_t pair = data + 0x20 + (std::uintptr_t)i * rv::Stride;
+            const std::uintptr_t pair = items + 0x20 + (std::uintptr_t)i * rv::Stride;
             const std::uintptr_t desc = RobRunMemory::ReadPtr(pair + rv::PairDesc);
             if (desc <= 0x10000) continue;
 
-            TargetProcess.Write(desc + rv::ScanTime, nearZero);
-
-            const std::uintptr_t shine = RobRunMemory::ReadPtr(desc + rv::ShineView);
-            if (shine > 0x10000)
-                TargetProcess.Write(shine + rv::ShineDuration, zero);
-
-            const std::uintptr_t icon = RobRunMemory::ReadPtr(desc + rv::IconView);
-            if (icon > 0x10000)
-                TargetProcess.Write(icon + rv::IconDuration, zero);
+            // Shine duration (inline struct 0x18 + 0x28 = desc + 0x40)
+            TargetProcess.Write(desc + 0x40, zero);
+            // Icon duration (inline struct 0x50 + 0x18 = desc + 0x68)
+            TargetProcess.Write(desc + 0x68, zero);
         }
     }
 }
