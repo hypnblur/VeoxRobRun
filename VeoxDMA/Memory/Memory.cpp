@@ -22,9 +22,9 @@ Memory::Memory()
 		// A DebugBreak here looks like a freeze/crash with no explanation.
 		// Fail loudly instead: the runtime DLLs must be beside the exe.
 		MessageBoxA(nullptr,
-			"Required DMA libraries were not found next to debug.exe.\n\n"
+			"Required DMA libraries were not found next to VeoxDMA.exe.\n\n"
 			"Place vmm.dll, leechcore.dll and FTD3XX.dll in the same folder "
-			"as debug.exe (the PURE\\New folder share already contains them).",
+			"as VeoxDMA.exe.",
 			"VeoxDMA - Missing Runtime",
 			MB_OK | MB_ICONERROR | MB_TOPMOST);
 		ExitProcess(1);
@@ -49,13 +49,13 @@ Memory::~Memory()
 
 int Memory::GetPID() const
 {
-	std::lock_guard<std::mutex> lock(this->modules_mutex);
-	return this->current_process.PID;
+	return current_pid.load(std::memory_order_acquire);
 }
 
 void Memory::ResetProcess()
 {
 	PROCESS_INITIALIZED = FALSE;
+	current_pid.store(0, std::memory_order_release);
 	{
 		std::lock_guard<std::mutex> lock(modules_mutex);
 		current_process = CurrentProcessInformation{};
@@ -113,7 +113,7 @@ bool Memory::DumpMemoryMap(bool debug)
 	}
 
 	auto temp_path = std::filesystem::temp_directory_path();
-	std::ofstream nFile(temp_path.string() + "\\mmap.txt");
+	std::ofstream nFile((temp_path / "mmap.txt").string());
 	nFile << sb.str();
 	nFile.close();
 
@@ -144,7 +144,6 @@ static bool MemoryMapIsFromThisBoot(const std::string& path)
 
 bool Memory::SetFPGA()
 {
-	bool result;
 	ULONG64 qwID = 0;
 	ULONG64 qwVersionMajor = 0;
 	ULONG64 qwVersionMinor = 0;
@@ -202,7 +201,7 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 			if (memMap)
 			{
 				auto temp_path = std::filesystem::temp_directory_path();
-				path = (temp_path.string() + "\\mmap.txt");
+				path = (temp_path / "mmap.txt").string();
 				bool dumped = false;
 				if (!std::filesystem::exists(path) || !MemoryMapIsFromThisBoot(path))
 					dumped = this->DumpMemoryMap(debug);
@@ -270,36 +269,46 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 		return true;
 	}
 
-	this->current_process.PID = GetPidFromName(process_name);
-	if (!this->current_process.PID)
+	const DWORD foundPid = GetPidFromName(process_name);
+	if (!foundPid)
 	{
 		LOG("[!] Could not get PID from name!\n");
 		return false;
 	}
-	this->current_process.process_name = process_name;
+	{
+		std::lock_guard<std::mutex> lock(modules_mutex);
+		this->current_process.PID = static_cast<int>(foundPid);
+		this->current_process.process_name = process_name;
+	}
+	current_pid.store(static_cast<int>(foundPid), std::memory_order_release);
 	if (!TargetProcess.FixCr3())
 		std::cout << "Failed to fix CR3" << std::endl;
 	else
 		std::cout << "CR3 fixed" << std::endl;
 
-	this->current_process.base_address = GetBaseAddress(process_name);
-	if (!this->current_process.base_address)
+	const size_t baseAddr = GetBaseAddress(process_name);
+	if (!baseAddr)
 	{
 		LOG("[!] Could not get base address!\n");
 		return false;
 	}
 
-	this->current_process.base_size = GetBaseSize(process_name);
-	if (!this->current_process.base_size)
+	const size_t baseSz = GetBaseSize(process_name);
+	if (!baseSz)
 	{
 		LOG("[!] Could not get base size!\n");
 		return false;
 	}
+	{
+		std::lock_guard<std::mutex> lock(modules_mutex);
+		this->current_process.base_address = baseAddr;
+		this->current_process.base_size = baseSz;
+	}
 
 	LOG("Process information of %s\n", process_name.c_str());
-	LOG("PID: %i\n", this->current_process.PID);
-	LOG("Base Address: 0x%p\n", this->current_process.base_address);
-	LOG("Base Size: 0x%p\n", this->current_process.base_size);
+	LOG("PID: %i\n", static_cast<int>(foundPid));
+	LOG("Base Address: 0x%p\n", (void*)baseAddr);
+	LOG("Base Size: 0x%p\n", (void*)baseSz);
 
 	PROCESS_INITIALIZED = TRUE;
 
@@ -344,7 +353,7 @@ std::vector<std::string> Memory::GetModuleList(std::string process_name)
 {
 	std::vector<std::string> list = { };
 	PVMMDLL_MAP_MODULE module_info;
-	if (!VMMDLL_Map_GetModuleU(this->vHandle, this->current_process.PID, &module_info, VMMDLL_MODULE_FLAG_NORMAL))
+	if (!VMMDLL_Map_GetModuleU(this->vHandle, this->GetPID(), &module_info, VMMDLL_MODULE_FLAG_NORMAL))
 	{
 		LOG("[!] Failed to get module list\n");
 		return list;
@@ -368,7 +377,7 @@ VMMDLL_PROCESS_INFORMATION Memory::GetProcessInformation()
 	info.magic = VMMDLL_PROCESS_INFORMATION_MAGIC;
 	info.wVersion = VMMDLL_PROCESS_INFORMATION_VERSION;
 
-	if (!VMMDLL_ProcessGetInformation(this->vHandle, this->current_process.PID, &info, &process_information))
+	if (!VMMDLL_ProcessGetInformation(this->vHandle, this->GetPID(), &info, &process_information))
 	{
 		LOG("[!] Failed to find process information\n");
 		return { };
@@ -407,7 +416,7 @@ size_t Memory::GetBaseSize(std::string module_name)
 	std::wstring str(module_name.begin(), module_name.end());
 
 	PVMMDLL_MAP_MODULEENTRY module_info = nullptr;
-	auto bResult = VMMDLL_Map_GetModuleFromNameW(this->vHandle, this->current_process.PID, (LPWSTR)str.c_str(), &module_info, VMMDLL_MODULE_FLAG_NORMAL);
+	auto bResult = VMMDLL_Map_GetModuleFromNameW(this->vHandle, this->GetPID(), (LPWSTR)str.c_str(), &module_info, VMMDLL_MODULE_FLAG_NORMAL);
 	if (bResult && module_info)
 	{
 		size_t cbSize = module_info->cbImageSize;
@@ -556,20 +565,21 @@ bool Memory::FixCr3()
 	VfsFileList.pfnAddDirectory = 0;
 	VfsFileList.pfnAddFile = cbAddFile; //dumb af callback who made this system
 
+	cbSize = 0;
 	result = VMMDLL_VfsListU(this->vHandle, (LPSTR)"\\misc\\procinfo\\", &VfsFileList);
-	if (!result)
+	if (!result || cbSize == 0 || cbSize > 16ull * 1024ull * 1024ull)
 		return false;
 
 	//read the data from the txt and parse it
-	const size_t buffer_size = cbSize;
-	std::unique_ptr<BYTE[]> bytes(new BYTE[buffer_size]);
+	const size_t buffer_size = static_cast<size_t>(cbSize);
+	std::unique_ptr<BYTE[]> bytes(new BYTE[buffer_size + 1]());
 	DWORD j = 0;
-	auto nt = VMMDLL_VfsReadW(this->vHandle, (LPWSTR)L"\\misc\\procinfo\\dtb.txt", bytes.get(), buffer_size - 1, &j, 0);
-	if (nt != VMMDLL_STATUS_SUCCESS)
+	auto nt = VMMDLL_VfsReadW(this->vHandle, (LPWSTR)L"\\misc\\procinfo\\dtb.txt", bytes.get(), static_cast<DWORD>(buffer_size), &j, 0);
+	if (nt != VMMDLL_STATUS_SUCCESS || j == 0)
 		return false;
 
 	std::vector<uint64_t> possible_dtbs;
-	std::string lines(reinterpret_cast<char*>(bytes.get()));
+	std::string lines(reinterpret_cast<char*>(bytes.get()), static_cast<size_t>(j));
 	std::istringstream iss(lines);
 	std::string line;
 
@@ -609,18 +619,26 @@ bool Memory::FixCr3()
 bool Memory::DumpMemory(uintptr_t address, std::string path)
 {
 	LOG("[!] Memory dumping currently does not rebuild the IAT table, imports will be missing from the dump.\n");
-	IMAGE_DOS_HEADER dos;
-	Read(address, &dos, sizeof(IMAGE_DOS_HEADER));
+	IMAGE_DOS_HEADER dos{};
+	if (!Read(address, &dos, sizeof(IMAGE_DOS_HEADER)))
+	{
+		LOG("[-] Failed to read DOS Header\n");
+		return false;
+	}
 
 	//Check if memory has a PE 
-	if (dos.e_magic != 0x5A4D) //Check if it starts with MZ
+	if (dos.e_magic != 0x5A4D || dos.e_lfanew < 0 || dos.e_lfanew > 0x10000) //Check if it starts with MZ
 	{
 		LOG("[-] Invalid PE Header\n");
 		return false;
 	}
 
-	IMAGE_NT_HEADERS64 nt;
-	Read(address + dos.e_lfanew, &nt, sizeof(IMAGE_NT_HEADERS64));
+	IMAGE_NT_HEADERS64 nt{};
+	if (!Read(address + static_cast<uintptr_t>(dos.e_lfanew), &nt, sizeof(IMAGE_NT_HEADERS64)))
+	{
+		LOG("[-] Failed to read NT Headers\n");
+		return false;
+	}
 
 	//Sanity check
 	if (nt.Signature != IMAGE_NT_SIGNATURE || nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
@@ -628,29 +646,34 @@ bool Memory::DumpMemory(uintptr_t address, std::string path)
 		LOG("[-] Failed signature check\n");
 		return false;
 	}
-	//Shouldn't change ever. so const 
 	const size_t target_size = nt.OptionalHeader.SizeOfImage;
-	//Crashes if we don't make it a ptr :(
-	auto target = std::unique_ptr<uint8_t[]>(new uint8_t[target_size]);
+	const size_t sectionTableOff = static_cast<size_t>(dos.e_lfanew)
+		+ FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader)
+		+ nt.FileHeader.SizeOfOptionalHeader;
+	const size_t sectionTableEnd = sectionTableOff
+		+ static_cast<size_t>(nt.FileHeader.NumberOfSections) * sizeof(IMAGE_SECTION_HEADER);
+	if (target_size == 0 || target_size > (512u << 20) || sectionTableEnd > target_size)
+	{
+		LOG("[-] Invalid PE image size or section table bounds\n");
+		return false;
+	}
+	auto target = std::unique_ptr<uint8_t[]>(new uint8_t[target_size]());
 
 	//Read whole modules memory
-	Read(address, target.get(), target_size);
-	auto nt_header = (PIMAGE_NT_HEADERS64)(target.get() + dos.e_lfanew);
-	auto sections = (PIMAGE_SECTION_HEADER)(target.get() + dos.e_lfanew + FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader) + nt.FileHeader.SizeOfOptionalHeader);
+	if (!Read(address, target.get(), target_size))
+	{
+		LOG("[-] Failed to read module image memory\n");
+		return false;
+	}
+	auto sections = reinterpret_cast<PIMAGE_SECTION_HEADER>(target.get() + sectionTableOff);
 
 	for (size_t i = 0; i < nt.FileHeader.NumberOfSections; i++, sections++)
 	{
 		//Rewrite the file offsets to the virtual addresses
-		LOG("[!] Rewriting file offsets at 0x%p size 0x%p\n", sections->VirtualAddress, sections->Misc.VirtualSize);
+		LOG("[!] Rewriting file offsets at 0x%p size 0x%p\n", (void*)(uintptr_t)sections->VirtualAddress, (void*)(uintptr_t)sections->Misc.VirtualSize);
 		sections->PointerToRawData = sections->VirtualAddress;
 		sections->SizeOfRawData = sections->Misc.VirtualSize;
 	}
-
-	//Find all modules used by this process
-	//auto descriptor = Read<IMAGE_IMPORT_DESCRIPTOR>(address + ntHeader->OptionalHeader.DataDirectory[1].VirtualAddress);
-
-	//int descriptor_count = 0;
-	//int thunk_count = 0;
 
 	// Dump file
 	const auto dumped_file = CreateFileW(std::wstring(path.begin(), path.end()).c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_COMPRESSED, NULL);
@@ -660,7 +683,8 @@ bool Memory::DumpMemory(uintptr_t address, std::string path)
 		return false;
 	}
 
-	if (!WriteFile(dumped_file, target.get(), static_cast<DWORD>(target_size), NULL, NULL))
+	DWORD bytesWritten = 0;
+	if (!WriteFile(dumped_file, target.get(), static_cast<DWORD>(target_size), &bytesWritten, NULL) || bytesWritten != target_size)
 	{
 		LOG("[!] Failed writing file: %i\n", GetLastError());
 		CloseHandle(dumped_file);
@@ -692,7 +716,7 @@ static const char* hexdigits =
 
 static uint8_t GetByte(const char* hex)
 {
-	return (uint8_t)((hexdigits[hex[0]] << 4) | (hexdigits[hex[1]]));
+	return (uint8_t)((hexdigits[static_cast<unsigned char>(hex[0])] << 4) | (hexdigits[static_cast<unsigned char>(hex[1])]));
 }
 
 namespace
@@ -741,7 +765,7 @@ uint64_t Memory::FindSignature(const char* signature, uint64_t range_start, uint
 		return 0;
 
 	if (PID == 0)
-		PID = this->current_process.PID;
+		PID = this->GetPID();
 
 	std::vector<SignatureToken> tokens;
 	if (!ParseSignature(signature, tokens))
@@ -822,7 +846,7 @@ bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
 {
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
 		return false;
-	if (!VMMDLL_MemWrite(this->vHandle, this->current_process.PID, address, (PBYTE)buffer, size))
+	if (!VMMDLL_MemWrite(this->vHandle, this->GetPID(), address, (PBYTE)buffer, size))
 	{
 		if (ShouldLogWriteFailure())
 			LOG("[!] Failed to write Memory at 0x%p (further failures suppressed)\n", address);
@@ -857,7 +881,7 @@ bool Memory::Read(uintptr_t address, void* buffer, size_t size) const
 	// current, and the reader still validates dictionary version/count and
 	// class identity before accepting a pass.
 	DWORD cbRead = 0;
-	if (!VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+	if (!VMMDLL_MemReadEx(this->vHandle, this->GetPID(), address,
 		(PBYTE)buffer, size, &cbRead, 0))
 		return false;
 	return cbRead == static_cast<DWORD>(size);
@@ -890,7 +914,7 @@ bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size) const
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
 	DWORD cbRead = 0;
-	if (!VMMDLL_MemReadEx(this->vHandle, this->current_process.PID, address,
+	if (!VMMDLL_MemReadEx(this->vHandle, this->GetPID(), address,
 		(PBYTE)buffer, size, &cbRead, kFreshReadFlags))
 		return false;
 	return cbRead == static_cast<DWORD>(size);
@@ -910,10 +934,11 @@ bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) co
 bool Memory::VirtToPhys(uintptr_t va, uint64_t& pa) const
 {
 	pa = 0;
-	if (!this->vHandle || !this->current_process.PID || !(va > 0x10000 && va < 0x7FFFFFFFFFFF))
+	const int pid = this->GetPID();
+	if (!this->vHandle || !pid || !(va > 0x10000 && va < 0x7FFFFFFFFFFF))
 		return false;
 	ULONG64 resolved = 0;
-	if (!VMMDLL_MemVirt2Phys(this->vHandle, this->current_process.PID, va, &resolved) || !resolved)
+	if (!VMMDLL_MemVirt2Phys(this->vHandle, pid, va, &resolved) || !resolved)
 		return false;
 	pa = static_cast<uint64_t>(resolved);
 	return true;
@@ -961,7 +986,7 @@ void Memory::RefreshProcessesFast() const
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()
 {
-	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, this->current_process.PID, kFreshReadFlags);
+	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, this->GetPID(), kFreshReadFlags);
 	if (!ScatterHandle)
 		LOG("[!] Failed to create scatter handle\n");
 	return ScatterHandle;
@@ -1002,19 +1027,19 @@ bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addre
 bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 {
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, this->current_process.PID, kFreshReadFlags);
+	VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
 	return ok;
 }
 bool Memory::ExecuteScatterRead(VMMDLL_SCATTER_HANDLE handle)
 {
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, this->current_process.PID, kFreshReadFlags);
+	VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
 	return ok;
 }
 bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
-		pid = this->current_process.PID;
+		pid = this->GetPID();
 
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
 	VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);
@@ -1024,7 +1049,7 @@ bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
-		pid = this->current_process.PID;
+		pid = this->GetPID();
 
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
 	VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);
@@ -1033,7 +1058,7 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached()
 {
-	VMMDLL_SCATTER_HANDLE h = VMMDLL_Scatter_Initialize(this->vHandle, this->current_process.PID, 0);
+	VMMDLL_SCATTER_HANDLE h = VMMDLL_Scatter_Initialize(this->vHandle, this->GetPID(), 0);
 	if (!h)
 		LOG("[!] Failed to create cached scatter handle\n");
 	return h;
@@ -1050,6 +1075,6 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached(int pid)
 bool Memory::ExecuteScatterReadCached(VMMDLL_SCATTER_HANDLE handle)
 {
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
-	VMMDLL_Scatter_Clear(handle, this->current_process.PID, 0);
+	VMMDLL_Scatter_Clear(handle, this->GetPID(), 0);
 	return ok;
 }

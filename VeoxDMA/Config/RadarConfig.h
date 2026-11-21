@@ -35,6 +35,13 @@ public:
 	int PopoutW = 650;
 	int PopoutH = 650;
 
+	// Web Radar (Localhost browser popout)
+	bool WebRadarEnabled = true;
+	int WebRadarPort = 8888;
+	bool AutoMapSelect = true;
+	bool WebRadarRotateWithPlayer = false;
+	bool WebRadarFollowPlayer = true;
+
 	float WorldMinX = -600.f;
 	float WorldMaxX = 600.f;
 	float WorldMinZ = -400.f;
@@ -78,6 +85,11 @@ public:
 		j[ConfigName][LIT("PopoutY")] = PopoutY;
 		j[ConfigName][LIT("PopoutW")] = PopoutW;
 		j[ConfigName][LIT("PopoutH")] = PopoutH;
+		j[ConfigName][LIT("WebRadarEnabled")] = WebRadarEnabled;
+		j[ConfigName][LIT("WebRadarPort")] = WebRadarPort;
+		j[ConfigName][LIT("AutoMapSelect")] = AutoMapSelect;
+		j[ConfigName][LIT("WebRadarRotateWithPlayer")] = WebRadarRotateWithPlayer;
+		j[ConfigName][LIT("WebRadarFollowPlayer")] = WebRadarFollowPlayer;
 		j[ConfigName][LIT("WorldMinX")] = WorldMinX;
 		j[ConfigName][LIT("WorldMaxX")] = WorldMaxX;
 		j[ConfigName][LIT("WorldMinZ")] = WorldMinZ;
@@ -122,6 +134,11 @@ public:
 		PopoutY = s.value(LIT("PopoutY"), PopoutY);
 		PopoutW = s.value(LIT("PopoutW"), PopoutW);
 		PopoutH = s.value(LIT("PopoutH"), PopoutH);
+		WebRadarEnabled = s.value(LIT("WebRadarEnabled"), WebRadarEnabled);
+		WebRadarPort = s.value(LIT("WebRadarPort"), WebRadarPort);
+		AutoMapSelect = s.value(LIT("AutoMapSelect"), AutoMapSelect);
+		WebRadarRotateWithPlayer = s.value(LIT("WebRadarRotateWithPlayer"), WebRadarRotateWithPlayer);
+		WebRadarFollowPlayer = s.value(LIT("WebRadarFollowPlayer"), WebRadarFollowPlayer);
 		WorldMinX = s.value(LIT("WorldMinX"), WorldMinX);
 		WorldMaxX = s.value(LIT("WorldMaxX"), WorldMaxX);
 		WorldMinZ = s.value(LIT("WorldMinZ"), WorldMinZ);

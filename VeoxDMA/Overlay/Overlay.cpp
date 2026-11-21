@@ -46,7 +46,7 @@ std::atomic<float> g_currentFps{ 0.f };
 std::vector<RECT> g_monitors;
 int g_appliedMonitor = -1;
 
-bool g_menuOpen = true;
+std::atomic<bool> g_menuOpen{ true };
 bool g_transparent = false;
 bool g_clickThrough = true;
 bool g_alwaysOnTop = true;
@@ -73,9 +73,10 @@ void CreateRenderTarget()
 {
 	if (!g_swapChain || !g_device) return;
 	ID3D11Texture2D* backBuffer = nullptr;
-	g_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-	if (!backBuffer) return;
-	g_device->CreateRenderTargetView(backBuffer, nullptr, &g_rtv);
+	if (FAILED(g_swapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) || !backBuffer)
+		return;
+	if (FAILED(g_device->CreateRenderTargetView(backBuffer, nullptr, &g_rtv)))
+		g_rtv = nullptr;
 	backBuffer->Release();
 }
 
@@ -288,7 +289,7 @@ void ApplyOverlayPerPixelTransparency(HWND hwnd, bool transparent)
 
 void SyncOverlayWindowChrome(HWND hwnd)
 {
-	const bool clickThrough = g_clickThrough && !g_menuOpen;
+	const bool clickThrough = g_clickThrough && !g_menuOpen.load(std::memory_order_relaxed);
 	const ChromeState wanted{ g_transparent, clickThrough, g_alwaysOnTop, true };
 	if (g_appliedChrome.valid
 		&& g_appliedChrome.transparent == wanted.transparent
@@ -366,15 +367,27 @@ void WaitForFrameCap()
 	}
 }
 
-bool KeyJustPressed(int vk)
+struct KeyEdgeState {
+	int lastVk = 0;
+	bool wasDown = false;
+};
+
+bool KeyJustPressed(int vk, KeyEdgeState& state)
 {
-	static bool previous[256] = {};
-	if (vk < 0 || vk > 255) return false;
+	if (vk <= 0 || vk > 255) {
+		state.lastVk = 0;
+		state.wasDown = false;
+		return false;
+	}
+	if (state.lastVk != vk) {
+		state.lastVk = vk;
+		state.wasDown = false;
+	}
 	const bool dmaDown = Keyboard::IsReady() && Keyboard::IsKeyDown(static_cast<uint32_t>(vk));
 	const bool hostDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
 	const bool down = dmaDown || hostDown;
-	const bool pressed = down && !previous[vk];
-	previous[vk] = down;
+	const bool pressed = down && !state.wasDown;
+	state.wasDown = down;
 	return pressed;
 }
 
@@ -512,15 +525,15 @@ void DrawDebugOverlay()
 
 namespace Overlay {
 
-bool MenuOpen() { return g_menuOpen; }
+bool MenuOpen() { return g_menuOpen.load(std::memory_order_acquire); }
 
 void SetMenuOpen(bool open)
 {
-	g_menuOpen = open;
+	g_menuOpen.store(open, std::memory_order_release);
 	g_appliedChrome.valid = false; // click-through depends on menu state
 }
 
-void ToggleMenu() { SetMenuOpen(!g_menuOpen); }
+void ToggleMenu() { SetMenuOpen(!g_menuOpen.load(std::memory_order_relaxed)); }
 
 bool PanicActive()
 {
@@ -631,8 +644,8 @@ static LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam
 			if (w > 0 && h > 0) {
 				if (g_context) g_context->OMSetRenderTargets(0, nullptr, nullptr);
 				CleanupRenderTarget();
-				g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_swapChainFlags);
-				CreateRenderTarget();
+				if (SUCCEEDED(g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_swapChainFlags)))
+					CreateRenderTarget();
 			}
 		}
 		return 0;
@@ -747,6 +760,13 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	g_paceTimer = CreateWaitableTimerExW(
 		nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
+	KeyEdgeState menuEdge{};
+	KeyEdgeState panicEdge{};
+	KeyEdgeState reattachEdge{};
+#ifdef _DEBUG
+	KeyEdgeState debugEdge{};
+#endif
+
 	MSG msg{};
 	while (msg.message != WM_QUIT)
 	{
@@ -767,7 +787,7 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		}
 
 		const int menuVk = GetMenuKeyVk();
-		if (KeyJustPressed(menuVk)) {
+		if (KeyJustPressed(menuVk, menuEdge)) {
 			if (ConfigInstance.Overlay.PanicMode) {
 				TogglePanic();
 				SetMenuOpen(true);
@@ -777,15 +797,15 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		}
 
 		const int panicVk = GetPanicKeyVk();
-		if (panicVk > 0 && KeyJustPressed(panicVk))
+		if (panicVk > 0 && KeyJustPressed(panicVk, panicEdge))
 			TogglePanic();
 
 		const int reattachVk = GetReattachKeyVk();
-		if (reattachVk > 0 && KeyJustPressed(reattachVk))
+		if (reattachVk > 0 && KeyJustPressed(reattachVk, reattachEdge))
 			RequestReattach();
 
 #ifdef _DEBUG
-		if (KeyJustPressed(VK_DELETE))
+		if (KeyJustPressed(VK_DELETE, debugEdge))
 			g_debugVisible = !g_debugVisible;
 #endif
 
@@ -819,7 +839,7 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 
 		ImGui::Render();
 
-		if (g_rtv && g_swapChain)
+		if (g_rtv && g_context && g_swapChain)
 		{
 			const D2D1::ColorF& bg = ConfigInstance.Overlay.BackgroundColour;
 			const float clear[4] = { bg.r, bg.g, bg.b, g_transparent ? 0.f : 1.f };
