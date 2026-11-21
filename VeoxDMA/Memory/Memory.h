@@ -63,7 +63,7 @@ public:
 	*/
 	bool Init(std::string process_name, bool memMap = true, bool debug = false);
 
-	int GetPID() const { return current_process.PID; }
+	int GetPID() const;
 	void ResetProcess();
 
 	/*This part here is things related to the process information such as Base daddy, Size ect.*/
@@ -302,14 +302,32 @@ public:
 	struct ScopedScatter {
 		VMMDLL_SCATTER_HANDLE handle = nullptr;
 		Memory* owner = nullptr;
-		ScopedScatter(Memory& mem) : owner(&mem) { handle = mem.CreateScatterHandle(); }
+		ScopedScatter(Memory& mem, bool cached = false) : owner(&mem) {
+			handle = cached ? mem.CreateScatterHandleCached() : mem.CreateScatterHandle();
+		}
+		ScopedScatter(Memory& mem, int pid, bool cached = false) : owner(&mem) {
+			handle = cached ? mem.CreateScatterHandleCached(pid) : mem.CreateScatterHandle(pid);
+		}
 		// Owning a handle is a unique responsibility: a copy would close it twice.
 		ScopedScatter(const ScopedScatter&) = delete;
 		ScopedScatter& operator=(const ScopedScatter&) = delete;
-		ScopedScatter(ScopedScatter&&) = delete;
-		ScopedScatter& operator=(ScopedScatter&&) = delete;
-		~ScopedScatter() { if (handle) owner->CloseScatterHandle(handle); }
-		operator VMMDLL_SCATTER_HANDLE() const { return handle; }
+		ScopedScatter(ScopedScatter&& other) noexcept : handle(other.handle), owner(other.owner) {
+			other.handle = nullptr;
+			other.owner = nullptr;
+		}
+		ScopedScatter& operator=(ScopedScatter&& other) noexcept {
+			if (this != &other) {
+				if (handle && owner) owner->CloseScatterHandle(handle);
+				handle = other.handle;
+				owner = other.owner;
+				other.handle = nullptr;
+				other.owner = nullptr;
+			}
+			return *this;
+		}
+		~ScopedScatter() { if (handle && owner) owner->CloseScatterHandle(handle); }
+		explicit operator bool() const noexcept { return handle != nullptr; }
+		operator VMMDLL_SCATTER_HANDLE() const noexcept { return handle; }
 	};
 
 	/*the FPGA handle*/

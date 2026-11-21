@@ -268,13 +268,12 @@ void AddDictionaryDescriptionScatter(std::uintptr_t world, std::uintptr_t dictio
     if (work.empty()) return;
 
     // Phase 1: scatter read description pointers
-    auto sc1 = TargetProcess.CreateScatterHandleCached();
+    Memory::ScopedScatter sc1(TargetProcess, /*cached=*/true);
     if (sc1) {
         for (auto& item : work) {
             TargetProcess.AddScatterReadRequest(sc1, item.model + descriptionOffset, &item.desc, sizeof(std::uintptr_t));
         }
         TargetProcess.ExecuteScatterReadCached(sc1);
-        TargetProcess.CloseScatterHandle(sc1);
     }
 
     // Phase 2: scatter read positions from valid description pointers
@@ -286,13 +285,12 @@ void AddDictionaryDescriptionScatter(std::uintptr_t world, std::uintptr_t dictio
     }
 
     if (!validDesc.empty()) {
-        auto sc2 = TargetProcess.CreateScatterHandleCached();
+        Memory::ScopedScatter sc2(TargetProcess, /*cached=*/true);
         if (sc2) {
             for (auto idx : validDesc) {
                 TargetProcess.AddScatterReadRequest(sc2, work[idx].desc + positionOffset, &work[idx].position, sizeof(Vector3));
             }
             TargetProcess.ExecuteScatterReadCached(sc2);
-            TargetProcess.CloseScatterHandle(sc2);
         }
     }
 
@@ -333,13 +331,12 @@ void AddDictionaryInlineScatter(std::uintptr_t world, std::uintptr_t dictionaryO
     }
     if (work.empty()) return;
 
-    auto sc = TargetProcess.CreateScatterHandleCached();
+    Memory::ScopedScatter sc(TargetProcess, /*cached=*/true);
     if (sc) {
         for (auto& item : work) {
             TargetProcess.AddScatterReadRequest(sc, item.model + positionOffset, &item.position, sizeof(Vector3));
         }
         TargetProcess.ExecuteScatterReadCached(sc);
-        TargetProcess.CloseScatterHandle(sc);
     }
 
     for (const auto& item : work) {

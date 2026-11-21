@@ -238,12 +238,11 @@ bool ReadMatricesAt(std::uintptr_t node, std::uintptr_t viewOff,
 
     Matrix4x4 view{};
     Matrix4x4 projection{};
-    auto scatter = TargetProcess.CreateScatterHandle();
+    Memory::ScopedScatter scatter(TargetProcess);
     if (!scatter) return false;
     TargetProcess.AddScatterReadRequest(scatter, node + viewOff, &view, sizeof(view));
     TargetProcess.AddScatterReadRequest(scatter, node + projOff, &projection, sizeof(projection));
     TargetProcess.ExecuteReadScatter(scatter);
-    TargetProcess.CloseScatterHandle(scatter);
 
     Vector3 position{};
     Vector3 forward{};

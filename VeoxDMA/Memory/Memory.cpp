@@ -46,11 +46,17 @@ Memory::~Memory()
 	PROCESS_INITIALIZED = false;
 }
 
+int Memory::GetPID() const
+{
+	std::lock_guard<std::mutex> lock(this->modules_mutex);
+	return this->current_process.PID;
+}
+
 void Memory::ResetProcess()
 {
 	PROCESS_INITIALIZED = FALSE;
-	current_process = CurrentProcessInformation{};
 	std::lock_guard<std::mutex> lock(modules_mutex);
+	current_process = CurrentProcessInformation{};
 	Modules.clear();
 }
 
@@ -384,21 +390,25 @@ size_t Memory::GetBaseAddress(std::string module_name)
 		return 0;
 	}
 
-	LOG("[+] Found Base Address for %s at 0x%p\n", module_name.c_str(), module_info->vaBase);
-	Modules[str] = module_info->vaBase;
-	return module_info->vaBase;
+	size_t vaBase = module_info->vaBase;
+	LOG("[+] Found Base Address for %s at 0x%p\n", module_name.c_str(), (void*)vaBase);
+	Modules[str] = vaBase;
+	VMMDLL_MemFree(module_info);
+	return vaBase;
 }
 
 size_t Memory::GetBaseSize(std::string module_name)
 {
 	std::wstring str(module_name.begin(), module_name.end());
 
-	PVMMDLL_MAP_MODULEENTRY module_info;
+	PVMMDLL_MAP_MODULEENTRY module_info = nullptr;
 	auto bResult = VMMDLL_Map_GetModuleFromNameW(this->vHandle, this->current_process.PID, (LPWSTR)str.c_str(), &module_info, VMMDLL_MODULE_FLAG_NORMAL);
-	if (bResult)
+	if (bResult && module_info)
 	{
-		LOG("[+] Found Base Size for %s at 0x%p\n", module_name.c_str(), module_info->cbImageSize);
-		return module_info->cbImageSize;
+		size_t cbSize = module_info->cbImageSize;
+		LOG("[+] Found Base Size for %s at 0x%p\n", module_name.c_str(), (void*)cbSize);
+		VMMDLL_MemFree(module_info);
+		return cbSize;
 	}
 	return 0;
 }
@@ -494,10 +504,13 @@ struct Info
 
 bool Memory::FixCr3()
 {
-	PVMMDLL_MAP_MODULEENTRY module_entry;
+	PVMMDLL_MAP_MODULEENTRY module_entry = nullptr;
 	bool result = VMMDLL_Map_GetModuleFromNameU(this->vHandle, this->current_process.PID, (LPSTR)this->current_process.process_name.c_str(), &module_entry, NULL);
 	if (result)
+	{
+		if (module_entry) VMMDLL_MemFree(module_entry);
 		return true; //Doesn't need to be patched lol
+	}
 
 	if (!VMMDLL_InitializePlugins(this->vHandle))
 	{
@@ -574,9 +587,11 @@ bool Memory::FixCr3()
 	{
 		auto dtb = possible_dtbs[i];
 		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_PROCESS_DTB | this->current_process.PID, dtb);
+		module_entry = nullptr;
 		result = VMMDLL_Map_GetModuleFromNameU(this->vHandle, this->current_process.PID, (LPSTR)this->current_process.process_name.c_str(), &module_entry, NULL);
 		if (result)
 		{
+			if (module_entry) VMMDLL_MemFree(module_entry);
 			LOG("[+] Patched DTB\n");
 			return true;
 		}

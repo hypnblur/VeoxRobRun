@@ -188,14 +188,21 @@ static std::string ReadId(std::uintptr_t stringObject)
 // static catalog objects that live for the whole game process.
 static std::string IdOf(std::uintptr_t object)
 {
+    static std::mutex mutex;
     static std::unordered_map<std::uintptr_t, std::string> cache;
     if (!Valid(object)) return {};
-    auto it = cache.find(object);
-    if (it != cache.end()) return it->second;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = cache.find(object);
+        if (it != cache.end()) return it->second;
+    }
     std::string id = Il2Cpp::ClassNameOf(object) == "String"
         ? ReadId(object) : ReadId(Ptr(object + off::IdentifiedId));
-    if (cache.size() > 8192) cache.clear();
-    if (!id.empty()) cache.emplace(object, id);
+    if (!id.empty()) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (cache.size() > 8192) cache.clear();
+        cache.emplace(object, id);
+    }
     return id;
 }
 
@@ -203,19 +210,27 @@ static std::string IdOf(std::uintptr_t object)
 // class; fallback when the field is not found.
 static std::uintptr_t FieldOffset(std::uintptr_t object, const char* name, std::uintptr_t fallback)
 {
+    static std::mutex mutex;
     static std::unordered_map<std::string, std::int32_t> cache;
     if (!Valid(object) || !name) return fallback;
     const std::uintptr_t klass = Il2Cpp::ClassOf(object);
     if (!klass) return fallback;
     const std::string key = std::to_string(klass) + ':' + name;
-    auto it = cache.find(key);
-    if (it == cache.end()) {
-        Il2Cpp::Field field{};
-        const bool found = Il2Cpp::FindField(klass, name, field, true) &&
-            field.offset > 0 && field.offset < 0x1000;
-        it = cache.emplace(key, found ? field.offset : -1).first;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = cache.find(key);
+        if (it != cache.end())
+            return it->second > 0 ? static_cast<std::uintptr_t>(it->second) : fallback;
     }
-    return it->second > 0 ? static_cast<std::uintptr_t>(it->second) : fallback;
+    Il2Cpp::Field field{};
+    const bool found = Il2Cpp::FindField(klass, name, field, true) &&
+        field.offset > 0 && field.offset < 0x1000;
+    const std::int32_t offVal = found ? field.offset : -1;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        cache[key] = offVal;
+    }
+    return offVal > 0 ? static_cast<std::uintptr_t>(offVal) : fallback;
 }
 
 // ---------------------------------------------------------------------------
