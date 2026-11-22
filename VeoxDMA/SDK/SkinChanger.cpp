@@ -789,6 +789,12 @@ static void Tick()
         }
     }
 
+    // Hold off during map/session transitions so skin swaps never write into
+    // objects being torn down or rebuilt.
+    if (snap->sessionChangedMs != 0 &&
+        (now < snap->sessionChangedMs || (now - snap->sessionChangedMs) < 2000))
+        return;
+
     State state;
     if (!ctx.valid || now - lastResolve >= 1000) {
         lastResolve = now;

@@ -3216,6 +3216,7 @@ static void UpdateInternal()
                 emptyBattleHits = 0;
                 if (gameModel <= 0x10000 && !IsClass(cachedGame, "Game"))
                     cachedGame = 0;
+                MarkSessionChanged();
             }
         } else {
             pendingBattle = 0;
@@ -3236,6 +3237,7 @@ static void UpdateInternal()
             cachedPlayerRotationInput = 0;
             worldRefreshStamp = 0;
             inventoryRefreshStamp = 0;
+            MarkSessionChanged();
             std::lock_guard<std::mutex> lock(g_worldMutex);
             g_worldState = std::make_shared<RobRunWorld::State>();
             g_plotState = std::make_shared<RobRunWorld::PlotState>();
@@ -3335,6 +3337,7 @@ static void UpdateInternal()
                         cachedLocationId = std::move(id);
                     }
                     if (mapChanged) {
+                        MarkSessionChanged();
                         MaybeRefreshDmaCaches("locationChanged", 0);
                         cachedViews.clear();
                         cachedViewOwner.clear();
@@ -4494,9 +4497,12 @@ static void UpdateInternal()
 
                 if (det.isKnockedOut && s.entityId == localEntityId &&
                     ConfigInstance.Aim.IgnoreKnock && s.knockout > 0x10000) {
-                    std::uintptr_t zero = 0;
-                    TargetProcess.Write(
-                        s.knockout + rr::KnockoutModel::Phase, zero);
+                    const std::uint64_t nowMs = GetTickCount64();
+                    if (sessionChangedMs == 0 || (nowMs >= sessionChangedMs && nowMs - sessionChangedMs >= 2000)) {
+                        std::uintptr_t zero = 0;
+                        TargetProcess.Write(
+                            s.knockout + rr::KnockoutModel::Phase, zero);
+                    }
                 }
 
                 // Weapon (uses cache — only reads strings on miss)

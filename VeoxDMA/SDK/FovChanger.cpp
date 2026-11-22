@@ -189,12 +189,21 @@ void Restore()
     RestoreLocked();
 }
 
+static std::uint64_t g_fovSessionGen = 0;
+
+static void ClearTargetsNoWrite()
+{
+    std::memset(g_fovTargets, 0, sizeof(g_fovTargets));
+    g_fovHolding.store(false, std::memory_order_release);
+}
+
 void Reset()
 {
     std::lock_guard<std::mutex> lock(g_fovMutex);
-    RestoreLocked();
-    std::memset(g_fovTargets, 0, sizeof(g_fovTargets));
-    g_fovHolding.store(false, std::memory_order_release);
+    // Reset is called on re-attach / shutdown — drop cached vcam pointers
+    // without blindly writing into potentially freed process/scene memory.
+    ClearTargetsNoWrite();
+    g_fovSessionGen = 0;
     g_fovModUntil = 0;
 }
 
@@ -210,7 +219,25 @@ void Tick()
     const float fovVal = std::clamp(ConfigInstance.Overlay.CameraFov, 20.0f, 160.0f);
 
     const auto snap = RobRunReader::GetSnapshot();
-    const std::uintptr_t views = snap ? snap->battleEntitiesUpdater : 0;
+    const std::uint64_t now = GetTickCount64();
+
+    // On map/session change, Unity frees the old Cinemachine vcams: drop cached
+    // pointers immediately without writing to them.
+    if (!snap || snap->sessionGeneration != g_fovSessionGen) {
+        ClearTargetsNoWrite();
+        if (snap) g_fovSessionGen = snap->sessionGeneration;
+        return;
+    }
+
+    // Block all FOV writes during stale snapshots, missing roots, or the 2s
+    // post-transition settle window.
+    if (snap->battleModel <= 0x10000 || snap->battleEntities <= 0x10000 ||
+        snap->cameraModel <= 0x10000 || snap->entities.empty() ||
+        snap->stampMs == 0 || now < snap->stampMs || (now - snap->stampMs) > 400 ||
+        (snap->sessionChangedMs != 0 && (now < snap->sessionChangedMs || (now - snap->sessionChangedMs) < 2000)))
+        return;
+
+    const std::uintptr_t views = snap->battleEntitiesUpdater;
 
     std::uintptr_t targets[kMaxFovTargets]{};
     int n = 0;
@@ -244,9 +271,8 @@ void Tick()
                             break;
                         }
                     }
-                } else if (IsValidPtr(t->addr) && t->original >= 1.f && t->original <= 179.f) {
-                    TargetProcess.Write(t->addr + rr::Fov::VcamLensFov, t->original);
                 }
+                // Never blindly write to t->addr when n == 0 (old vcam may already be freed).
                 t->used = false;
                 t->addr = 0;
                 t->original = 0.f;
