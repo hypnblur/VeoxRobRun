@@ -1568,7 +1568,9 @@ void TickTrigger()
         if (ent.isDead) continue;
         if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
         if (ShouldSkipByRole(ent, cfg)) continue;
-        if (cfg.TriggerVisibleOnly && !ent.visible) continue;
+        // When BVH is loaded, rely on the live per-bone IsCameraOccluded check below
+        // instead of pre-rejecting on a potentially stale snapshot ent.visible flag.
+        if (cfg.TriggerVisibleOnly && !bvhLoaded && !ent.visible) continue;
         if (haveLocalPos &&
             Distance(ent.position, snapshot->localPosition) > static_cast<float>(eff.triggerMaxDistance))
             continue;
@@ -1875,8 +1877,10 @@ void Tick()
         if (ent.isDead) continue;
         if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
         if (ShouldSkipByRole(ent, cfg)) continue;
-        // Visibility and wall occlusion gate
-        if (cfg.VisibleBonesOnly && !ent.visible) continue;
+        // When BVH is loaded, let the live per-bone IsCameraOccluded check below
+        // evaluate Head/Neck/Chest/Pelvis directly instead of pre-rejecting on a
+        // potentially stale snapshot ent.visible flag.
+        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) continue;
         if (haveLocalPosition &&
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 

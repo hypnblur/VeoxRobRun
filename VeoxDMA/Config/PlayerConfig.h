@@ -52,7 +52,7 @@ public:
 	bool HiddenPlayerEsp = true;
 	float HiddenAlpha = 0.35f;
 	float VisMaxDistance = 150.0f;
-	int VisRayCount = 6;
+	int VisRayCount = 8;
 	bool CarCabinSolid = false;
 	bool VisRing = true;
 	bool StatusRing = true;

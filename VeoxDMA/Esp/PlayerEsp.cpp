@@ -660,6 +660,14 @@ void DrawPlayers()
 		bool boxValid = false;
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
 
+		const bool livePartialBoneVis =
+			(pcfg.VisCheck || pcfg.WallCheck) &&
+			pcfg.VisRayCount >= 8 &&
+			RobRunReader::GetBvhStatus().loaded &&
+			(pcfg.VisMaxDistance <= 0.f || !haveLocalPosition || distF <= pcfg.VisMaxDistance);
+		const ImU32 visCol = Esp::D2DColorToImU32(pcfg.VisibleColour);
+		const ImU32 hidCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+
 		for (const auto& seg : ent.bones)
 		{
 			if (!IsValidBoneSegment(seg.a, seg.b, entPos))
@@ -671,13 +679,37 @@ void DrawPlayers()
 
 			if (pcfg.Skeleton)
 			{
-				ImU32 segCol = espCol;
-				if (pcfg.VisCheck || pcfg.WallCheck) {
-					segCol = seg.visible
-						? Esp::D2DColorToImU32(pcfg.VisibleColour)
-						: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+				if (livePartialBoneVis) {
+					const bool visA = !RobRunReader::IsCameraOccluded(seg.a);
+					const bool visB = !RobRunReader::IsCameraOccluded(seg.b);
+					if (visA == visB) {
+						dl->AddLine(a, b, visA ? visCol : hidCol, pcfg.SkeletonThickness);
+					} else {
+						// Bone straddles a corner/wall: binary-search 3 steps (12.5% precision)
+						// to split the bone right at the real 3D occlusion edge.
+						float tLo = 0.f, tHi = 1.f;
+						for (int step = 0; step < 3; ++step) {
+							const float tMid = (tLo + tHi) * 0.5f;
+							const Vector3 pMid(
+								seg.a.x + (seg.b.x - seg.a.x) * tMid,
+								seg.a.y + (seg.b.y - seg.a.y) * tMid,
+								seg.a.z + (seg.b.z - seg.a.z) * tMid);
+							const bool visMid = !RobRunReader::IsCameraOccluded(pMid);
+							if (visMid == visA) tLo = tMid;
+							else tHi = tMid;
+						}
+						const float tSplit = (tLo + tHi) * 0.5f;
+						const ImVec2 splitPt(a.x + (b.x - a.x) * tSplit, a.y + (b.y - a.y) * tSplit);
+						dl->AddLine(a, splitPt, visA ? visCol : hidCol, pcfg.SkeletonThickness);
+						dl->AddLine(splitPt, b, visB ? visCol : hidCol, pcfg.SkeletonThickness);
+					}
+				} else {
+					ImU32 segCol = espCol;
+					if (pcfg.VisCheck || pcfg.WallCheck) {
+						segCol = seg.visible ? visCol : hidCol;
+					}
+					dl->AddLine(a, b, segCol, pcfg.SkeletonThickness);
 				}
-				dl->AddLine(a, b, segCol, pcfg.SkeletonThickness);
 			}
 			minX = std::min(minX, std::min(a.x, b.x));
 			maxX = std::max(maxX, std::max(a.x, b.x));
@@ -705,9 +737,10 @@ void DrawPlayers()
 			{
 				ImU32 headCol = espCol;
 				if (pcfg.VisCheck || pcfg.WallCheck) {
-					headCol = ent.visible
-						? Esp::D2DColorToImU32(pcfg.VisibleColour)
-						: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+					const bool headVis = livePartialBoneVis
+						? !RobRunReader::IsCameraOccluded(center)
+						: ent.visible;
+					headCol = headVis ? visCol : hidCol;
 				}
 				dl->AddCircle(sc, sr, headCol, 0, 2.f);
 			}
@@ -1152,10 +1185,16 @@ void DrawBvhDebug()
 	const float maxDistSq = maxDist * maxDist;
 
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
-	const ImU32 col = IM_COL32(0, 255, 255, 80);
+	const ImU32 col = IM_COL32(0, 235, 255, 110);
+	int drawnTris = 0;
+	constexpr int kMaxDebugTris = 2500;
 
 	for (const auto& node : scene->nodes) {
 		if (!node.isLeaf()) continue;
+		if (drawnTris >= kMaxDebugTris) break;
+
+		// Skip flat ground/roof leaf slabs so only vertical walls/cover clutter the view.
+		if ((node.aabbMax.y - node.aabbMin.y) < 0.25f) continue;
 
 		const float cx = (node.aabbMin.x + node.aabbMax.x) * 0.5f;
 		const float cy = (node.aabbMin.y + node.aabbMax.y) * 0.5f;
@@ -1163,33 +1202,25 @@ void DrawBvhDebug()
 		const float dx = cx - cam.x, dy = cy - cam.y, dz = cz - cam.z;
 		if (dx*dx + dy*dy + dz*dz > maxDistSq) continue;
 
-		Vector3 corners[8] = {
-			{node.aabbMin.x, node.aabbMin.y, node.aabbMin.z},
-			{node.aabbMax.x, node.aabbMin.y, node.aabbMin.z},
-			{node.aabbMax.x, node.aabbMax.y, node.aabbMin.z},
-			{node.aabbMin.x, node.aabbMax.y, node.aabbMin.z},
-			{node.aabbMin.x, node.aabbMin.y, node.aabbMax.z},
-			{node.aabbMax.x, node.aabbMin.y, node.aabbMax.z},
-			{node.aabbMax.x, node.aabbMax.y, node.aabbMax.z},
-			{node.aabbMin.x, node.aabbMax.y, node.aabbMax.z},
-		};
+		const std::uint32_t start = node.triStart();
+		const std::uint32_t count = node.triCount();
+		for (std::uint32_t i = 0; i < count && drawnTris < kMaxDebugTris; ++i) {
+			const auto& t = scene->tris[start + i];
+			const auto e1 = t.v1 - t.v0;
+			const auto e2 = t.v2 - t.v0;
+			const auto n  = CollisionBVH::cross(e1, e2);
+			const float lenSq = n.x*n.x + n.y*n.y + n.z*n.z;
+			if (lenSq < 0.02f) continue; // skip tiny debris slivers
+			// Skip mostly-horizontal floor/ceiling triangles (|ny| >= 0.70)
+			if ((n.y * n.y) >= 0.49f * lenSq) continue;
 
-		Vector2 sc[8];
-		bool allOk = true;
-		for (int i = 0; i < 8; ++i) {
-			if (!RobRunReader::ProjectWorld(vp, corners[i], screenW, screenH, sc[i])) {
-				allOk = false; break;
-			}
+			Vector2 s0, s1, s2;
+			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v0.x, t.v0.y, t.v0.z), screenW, screenH, s0)) continue;
+			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v1.x, t.v1.y, t.v1.z), screenW, screenH, s1)) continue;
+			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v2.x, t.v2.y, t.v2.z), screenW, screenH, s2)) continue;
+
+			dl->AddTriangle(ImVec2(s0.x, s0.y), ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), col, 1.0f);
+			++drawnTris;
 		}
-		if (!allOk) continue;
-
-		static const int edges[12][2] = {
-			{0,1},{1,2},{2,3},{3,0},
-			{4,5},{5,6},{6,7},{7,4},
-			{0,4},{1,5},{2,6},{3,7},
-		};
-		for (const auto& e : edges)
-			dl->AddLine(ImVec2(sc[e[0]].x, sc[e[0]].y),
-			            ImVec2(sc[e[1]].x, sc[e[1]].y), col, 1.0f);
 	}
 }
