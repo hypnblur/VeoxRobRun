@@ -587,7 +587,19 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 	out.hasHighValueRing = highValueRing;
 	out.showDot = item.Has(LootFilter::RenderDot);
 	out.category = itemDef->category;
-	out.textColour = RarityColorU32(itemDef->rarity);
+	LootFilter::Rarity displayRarity = itemDef->rarity;
+	if (ent.rarity > 0) {
+		switch (ent.rarity) {
+		case 1: displayRarity = LootFilter::Rarity::Common; break;
+		case 2: displayRarity = LootFilter::Rarity::Uncommon; break;
+		case 3: displayRarity = LootFilter::Rarity::Rare; break;
+		case 4: displayRarity = LootFilter::Rarity::Epic; break;
+		case 5: displayRarity = LootFilter::Rarity::Legendary; break;
+		case 6: displayRarity = LootFilter::Rarity::Exotic; break;
+		default: break;
+		}
+	}
+	out.textColour = RarityColorU32(displayRarity);
 	out.icon.clear();
 	if (item.Has(LootFilter::RenderIcon)) {
 		// Vehicles label themselves with their exact model+paint id.

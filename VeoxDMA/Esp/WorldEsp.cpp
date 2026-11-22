@@ -549,7 +549,9 @@ void DrawWorldEntities()
 				case 2: nameRarity = LootFilter::Rarity::Uncommon; break;
 				case 3: nameRarity = LootFilter::Rarity::Rare; break;
 				case 4: nameRarity = LootFilter::Rarity::Epic; break;
-				default: nameRarity = LootFilter::Rarity::Legendary; break;  // 5 Legendary, 6 Exotic
+				case 5: nameRarity = LootFilter::Rarity::Legendary; break;
+				case 6: nameRarity = LootFilter::Rarity::Exotic; break;
+				default: nameRarity = LootFilter::Rarity::Legendary; break;
 				}
 			}
 			const ImU32 nameCol = filterOn ? RarityColorU32(nameRarity) : markerCol;
@@ -571,8 +573,21 @@ void DrawWorldEntities()
 				int amount = 0;
 				if (mode == 2)
 					amount = 0;                       // unlock price not known yet
-				else if (mode == 0 && entity.hasValue && entity.value > 0)
-					amount = entity.value;
+				else if (mode == 0 && entity.hasValue && entity.value > 0) {
+					const bool isCargo =
+						entity.kind == RobRunWorld::Kind::Cargo ||
+						entity.kind == RobRunWorld::Kind::CargoBush ||
+						entity.kind == RobRunWorld::Kind::CargoCrystal ||
+						entity.kind == RobRunWorld::Kind::CargoDrug ||
+						entity.kind == RobRunWorld::Kind::CargoCash ||
+						entity.kind == RobRunWorld::Kind::CargoExchange ||
+						entity.kind == RobRunWorld::Kind::CargoBox ||
+						entity.kind == RobRunWorld::Kind::CargoGoods;
+					const float bonus = isCargo
+						? LootFilterConfig::CargoRevenueBonus(lf.AuthorityLevel)
+						: LootFilterConfig::LootRevenueBonus(lf.AuthorityLevel);
+					amount = (int)std::lround((double)entity.value * (1.0 + (double)bonus));
+				}
 				else if (mode == 1 && filterOn && itemDef && itemDef->price > 0)
 					amount = (int)itemDef->price;
 				else if (mode == 0 && filterOn && itemDef && itemDef->price > 0)
