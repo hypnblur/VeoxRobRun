@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 // Render-thread aim loop. Tick() reads the published snapshot, picks the
 // closest valid target inside the configured FOV and emits one motion step per
@@ -33,9 +34,25 @@ struct DebugInfo {
 	float tgtPitchDeg = 0.f;
 	float distance = 0.f;
 	int leadMs = 0;
+	// Active smoothing, weapon profile, controller, and auto-fire telemetry
+	int smoothAlgorithm = 0;
+	int activeFov = 40;
+	int activeWeaponClass = -1;
+	std::string activeWeaponName;
+	bool profileOverrideActive = false;
+	bool controllerConnected = false;
+	const char* controllerSource = "-";
+	float controllerLt = 0.f;
+	float controllerRt = 0.f;
+	float controllerRx = 0.f;
+	float controllerRy = 0.f;
+	bool triggerEnabled = false;
+	bool triggerActive = false;
+	const char* triggerState = "off";
 };
 
 void Tick();
+void TickTrigger();
 void TickRecoilSpread();
 void Draw();
 void DrawDebug();
@@ -50,9 +67,14 @@ void SetDisplaySize(float width, float height);
 // lookup cannot drift apart.
 const char* const* KeyNames();
 int KeyCount();
+bool IsAlwaysKey(int keyIndex);
 // Returns true while the selected key index is held (same sources as the aim
-// activation key: DMA keyboard, aim device, host keyboard). Index 0 follows
-// KeyNames() ordering; "Always" is treated as held.
+// activation key: DMA keyboard, aim device, gamepad, host keyboard).
 bool IsKeyHeld(int keyIndex);
+
+// Weapon profile class names shared between AimConfig, AimController, and VeoxMenu.
+const char* const* WeaponClassNames();
+int WeaponClassCount();
+int ClassifyWeaponName(const std::string& weaponNameUtf8);
 
 } // namespace Aim
