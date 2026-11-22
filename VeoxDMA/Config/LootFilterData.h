@@ -605,6 +605,9 @@ inline constexpr std::array kItemCatalog = std::to_array<ItemDef>({
     { "sec_defense_block", "Defense Block", "", Category::Security, Rarity::Uncommon, RobRunWorld::Kind::DefenseBlock, "", 255, 75, 75, false, 0 },
     { "sec_location_alarm", "Location Security Alarm", "", Category::Security, Rarity::Common, RobRunWorld::Kind::LocationSecurityAlarm, "", 255, 75, 75, false, 0 },
     { "sec_alarm", "Security Alarm", "", Category::Security, Rarity::Common, RobRunWorld::Kind::SecurityAlarm, "", 255, 75, 75, false, 0 },
+    { "sec_panel", "Alarm Panel", "", Category::Security, Rarity::Common, RobRunWorld::Kind::SecurityPanel, "", 255, 75, 75, false, 0 },
+    { "sec_metal_detector", "Metal Detector", "", Category::Security, Rarity::Common, RobRunWorld::Kind::MetalDetector, "", 255, 75, 75, false, 0 },
+    { "random_loot_placement", "Loot Placement", "", Category::LootNodes, Rarity::Common, RobRunWorld::Kind::RandomLoot, "", 255, 190, 80, false, 0 },
 
 // === Tools ===
     { "car_police_radio_1", "Police Radio", "car_police_radio_1", Category::Tools, Rarity::Legendary, RobRunWorld::Kind::Loot, "car_police_radio_1", 200, 200, 210, false, 120000 },

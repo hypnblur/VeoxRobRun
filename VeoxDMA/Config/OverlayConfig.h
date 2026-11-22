@@ -76,6 +76,7 @@ public:
 	bool FovChanger = false;         // override Cinemachine virtual camera FOV
 	float CameraFov = 90.0f;         // target FOV in degrees (20.0 - 160.0)
 	D2D1::ColorF BackgroundColour = Colour(0, 0, 0);
+	D2D1::ColorF AccentColour = Colour(139, 92, 246);
 
 	// Saved screen placements. The menu and radar remember size as well as
 	// position; the looking-alert window auto-sizes to its text.
@@ -133,6 +134,7 @@ public:
 		j[ConfigName][LIT("RadarWindow")] = RadarWindow.ToJson();
 		j[ConfigName][LIT("AlertWindow")] = AlertWindow.ToJson();
 		ToJsonColour(&j, LIT("BackgroundColour"), &BackgroundColour);
+		ToJsonColour(&j, LIT("AccentColour"), &AccentColour);
 		return j;
 	}
 	void FromJson(const json& j)
@@ -174,5 +176,6 @@ public:
 		if (s.contains(LIT("AlertWindow")))
 			AlertWindow.FromJson(s[LIT("AlertWindow")]);
 		FromJsonColour(j, LIT("BackgroundColour"), &BackgroundColour);
+		FromJsonColour(j, LIT("AccentColour"), &AccentColour);
 	}
 };

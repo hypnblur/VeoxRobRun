@@ -312,6 +312,8 @@ void DrawWorldEntities()
 		}
 		if (itemDef && !itemCfg)
 			itemCfg = &lf.GetItem(itemDef->id);
+		if (lf.Enabled && itemCfg && !itemCfg->visible)
+			continue;
 
 		// Use 80-500 Hz live vehicle position from fastVehicles so moving cars
 		// and helicopters stay synced instead of lagging behind the 1 Hz world worker.
@@ -335,7 +337,7 @@ void DrawWorldEntities()
 		// With the filter on, the filter owns the range: the legacy ESP distance
 		// has no vote, and an unset filter range means a sane default, not zero.
 		int maxDist = lf.Enabled
-			? (lf.GlobalMaxDistance > 0 ? lf.GlobalMaxDistance : 250)
+			? (lf.GlobalMaxDistance > 0 ? lf.GlobalMaxDistance : 200)
 			: ConfigInstance.World.MaxDistance;
 		if (lf.Enabled) {
 			const int catMax = lf.ResolvedMaxDistance(itemDef ? itemDef->category : LootFilter::Category::Misc);

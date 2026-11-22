@@ -82,7 +82,7 @@ public:
 	float BaseDotSize = 3.5f;
 	int FontSize = 14;
 	int IconSize = 20;
-	int GlobalMaxDistance = 1000;
+	int GlobalMaxDistance = 200;
 
 	bool FilterByMinPrice = false;
 	int MinPrice = 0;
