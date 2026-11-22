@@ -1732,6 +1732,49 @@ static std::int64_t ReadTimestampData(std::uintptr_t tsWrapper)
     return RobRunMemory::ReadInt64(tsWrapper + 0x18);
 }
 
+static constexpr std::int64_t kMaxKnockdownRemainMs = 60000LL;
+static constexpr std::int64_t kMaxKnockoutRemainMs  = 300000LL;
+
+// Validates a KnockoutModel::Phase ReferenceData::Value pointer.
+// Rejects non-canonical garbage and non-knockout/idle/default/cuffing phase descriptions.
+static bool IsActiveKnockoutPhaseDesc(std::uintptr_t phaseDesc)
+{
+    if (phaseDesc <= 0x10000 || phaseDesc >= 0x00007FFFFFFFFFFFull)
+        return false;
+    static std::unordered_map<std::uintptr_t, bool> s_phaseValidCache;
+    if (s_phaseValidCache.size() > 256)
+        s_phaseValidCache.clear();
+    const auto it = s_phaseValidCache.find(phaseDesc);
+    if (it != s_phaseValidCache.end())
+        return it->second;
+
+    bool valid = true;
+    const std::uintptr_t nameStr = ReadPtr(phaseDesc + rr::Description::Name);
+    if (nameStr > 0x10000 && nameStr < 0x00007FFFFFFFFFFFull) {
+        std::wstring w;
+        if (RobRunMemory::ReadString(nameStr, w, 64)) {
+            std::string lower = RobRunMemory::WideToUtf8(w);
+            for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (lower.empty() ||
+                lower.find("none") != std::string::npos ||
+                lower.find("idle") != std::string::npos ||
+                lower.find("normal") != std::string::npos ||
+                lower.find("default") != std::string::npos ||
+                lower.find("stand") != std::string::npos ||
+                lower.find("cuffing") != std::string::npos) {
+                valid = false;
+            }
+        } else {
+            valid = false;
+        }
+    } else {
+        // Not a real Description object with a valid name string
+        valid = false;
+    }
+    s_phaseValidCache[phaseDesc] = valid;
+    return valid;
+}
+
 static void ReadReloadAndKnockdownState(std::uintptr_t characterModel,
     std::int64_t battleNowMs, EntityData& entity)
 {
@@ -4192,6 +4235,7 @@ static void UpdateInternal()
             std::uintptr_t koPhase{};
             std::uintptr_t koEndTsW{};
             std::uint8_t   koSurrendered{};
+            std::uint8_t   koHandcuffing{};
             std::uint8_t   koHandcuffed{};
             std::uintptr_t weaponCurrent{};
             // phase 3: third level + blocks
@@ -4306,6 +4350,7 @@ static void UpdateInternal()
                         TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::Phase, &s.koPhase, 8);
                         TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::EndTs, &s.koEndTsW, 8);
                         TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::IsSurrendered, &s.koSurrendered, 1);
+                        TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::IsHandcuffing, &s.koHandcuffing, 1);
                         TargetProcess.AddScatterReadRequest(sc, s.knockout + rr::KnockoutModel::IsHandcuffed, &s.koHandcuffed, 1);
                     }
                     if (s.itemInHands > 0x10000)
@@ -4480,20 +4525,31 @@ static void UpdateInternal()
                 if (!det.isReloading && s.bgReloadVal != 0)
                     det.isReloading = true;
 
-                // Knockdown
+                // Knockdown (bounded remaining window to reject INT64_MAX/garbage sentinels)
                 det.isKnockedDown = false;
                 if (battleNowMs > 0 && s.kdEndTs > kSentinelTs && s.kdEndTs > battleNowMs &&
+                    (s.kdEndTs - battleNowMs) <= kMaxKnockdownRemainMs &&
                     s.kdLeaveActive == 0)
                     det.isKnockedDown = true;
 
-                // Knockout
+                // Knockout (validate phase description, bound EndTs, and exclude active cuffing)
                 det.isKnockedOut = false;
-                if (s.koPhaseDesc > 0x10000)
-                    det.isKnockedOut = true;
-                else if (battleNowMs > 0 && s.koEndTs > kSentinelTs && s.koEndTs > battleNowMs)
-                    det.isKnockedOut = true;
+                if (s.koHandcuffing == 0) {
+                    if (IsActiveKnockoutPhaseDesc(s.koPhaseDesc))
+                        det.isKnockedOut = true;
+                    else if (battleNowMs > 0 && s.koEndTs > kSentinelTs && s.koEndTs > battleNowMs &&
+                        (s.koEndTs - battleNowMs) <= kMaxKnockoutRemainMs)
+                        det.isKnockedOut = true;
+                }
                 det.isSurrendered = s.koSurrendered != 0;
                 det.isHandcuffed = s.koHandcuffed != 0;
+
+                // A player actively sprinting, firing, reloading, or inside a vehicle
+                // cannot be knocked down or knocked out.
+                if (det.isSprinting || det.isFiring || det.isReloading || det.inVehicle) {
+                    det.isKnockedDown = false;
+                    det.isKnockedOut = false;
+                }
 
                 if (det.isKnockedOut && s.entityId == localEntityId &&
                     ConfigInstance.Aim.IgnoreKnock && s.knockout > 0x10000) {
@@ -4955,6 +5011,18 @@ static void UpdateInternal()
             } else {
                 entity.bones = rig.bones;
                 entity.bonePoints = rig.points;
+            }
+            // Cross-check knocked state against live skeleton posture: a character
+            // standing upright (head >= 1.35 m above feet) and not surrendered/cuffed
+            // is not lying knocked down/out (guards against stale/police KnockoutModel state).
+            if ((entity.isKnockedDown || entity.isKnockedOut) &&
+                !entity.isSurrendered && !entity.isHandcuffed &&
+                entity.bonePoints.valid && entity.bonePoints.hasHead) {
+                const float headH = entity.bonePoints.head.y - entity.position.y;
+                if (std::isfinite(headH) && headH >= 1.35f && headH <= 2.25f) {
+                    entity.isKnockedDown = false;
+                    entity.isKnockedOut = false;
+                }
             }
             } catch (...) {
                 static int catchCount = 0;

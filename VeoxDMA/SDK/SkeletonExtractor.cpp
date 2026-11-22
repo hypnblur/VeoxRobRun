@@ -154,8 +154,8 @@ static bool TryLoadHierarchyFromTransform(Snapshot& m, U nativeTransform, bool w
     const U parents = m.ptr(hierarchy, 0x20);
     const U pointers = m.ptr(hierarchy, 0x30);
     std::int32_t count = 0;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
             return false;
     }
 
@@ -1526,7 +1526,7 @@ bool ValidateHierarchy(const RigLayout& layout, const Read& read)
     std::int32_t currentCount = 0;
     if (!read(currentHierarchy + 0x38, &currentCount, sizeof(currentCount)))
         return false;
-    if (currentCount < 2 || currentCount > 512)
+    if (currentCount < 2 || currentCount > 2048)
         return false;
     // Tolerate count drift: the hierarchy is valid as long as every
     // selected bone index is still within the current count.
@@ -1674,8 +1674,8 @@ bool ResolveRigTarget(U view, const Read& read, RigTarget& out)
     U matrices = m.ptr(hierarchy, 0x18);
     std::int32_t count = 0;
     if (matrices <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
             return false;
     }
 
@@ -1714,8 +1714,8 @@ bool RootWorldPosition(U view, const Read& read, Vec& out)
     U parents = m.ptr(hierarchy, 0x20);
     std::int32_t count = 0;
     if (matrices <= 0x10000 || parents <= 0x10000) return false;
-    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 512) {
-        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 512)
+    if (!m.get(hierarchy + 0x38, count) || count < 2 || count > 2048) {
+        if (!m.get(hierarchy + 0x10, count) || count < 2 || count > 2048)
             return false;
     }
 

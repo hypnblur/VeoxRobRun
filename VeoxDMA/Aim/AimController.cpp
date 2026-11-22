@@ -553,15 +553,21 @@ bool Finite(const Vector3& v)
 // fallbacks so the aim filter and the overlay never disagree about a target.
 // The teammate filter is party based: the reader resolves the local party's
 // member ids and marks each entity, so same-role strangers stay targetable.
-bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 {
     const std::string role = RobRunReader::RoleLabel(ent.role, ent.roleName);
-    if (cfg.ExpIgnorePolice && role == "Police Officer") return true;
-    if (cfg.ExpIgnoreCriminal && role == "Criminal") return true;
-    if (cfg.ExpIgnoreCivilian && role == "Civilian") return true;
-    if (cfg.ExpIgnoreTeammates && (ent.isPartyMember || ent.isClanMate)) return true;
-    if (cfg.IsTrusted(ent.publicId)) return true;
-    return false;
+    if (cfg.ExpIgnorePolice && role == "Police Officer") return "role:police";
+    if (cfg.ExpIgnoreCriminal && role == "Criminal") return "role:criminal";
+    if (cfg.ExpIgnoreCivilian && role == "Civilian") return "role:civilian";
+    if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return "team:party";
+    if (cfg.ExpIgnoreTeammates && ent.isClanMate) return "team:clan";
+    if (cfg.IsTrusted(ent.publicId)) return "trusted";
+    return nullptr;
+}
+
+bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+{
+    return RoleSkipReason(ent, cfg) != nullptr;
 }
 
 Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
@@ -574,10 +580,10 @@ Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
         Vector3 point{};
         bool have = false;
         switch (bone) {
-        case 0: point = points.head;   have = true; break;
-        case 1: point = points.neck;   have = true; break;
-        case 2: point = points.chest;  have = true; break;
-        case 3: point = points.pelvis; have = true; break;
+        case 0: point = points.head;   have = points.hasHead;   break;
+        case 1: point = points.neck;   have = points.hasNeck;   break;
+        case 2: point = points.chest;  have = points.hasChest;  break;
+        case 3: point = points.pelvis; have = points.hasPelvis; break;
         default: break;
         }
         // A stale or mis-resolved rig layout can point a bone at the world
@@ -983,6 +989,16 @@ int ClassifyWeaponName(const std::string& weaponNameUtf8)
 }
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
+struct RejectedDebug {
+    int entityId = -1;
+    float screenDist = 1.0e9f;
+    std::string role;
+    const char* reason = "none";
+    bool rigValid = false;
+    bool hasHead = false;
+};
+static RejectedDebug g_lastRejected{};
+
 static std::mutex g_debugMutex;
 static std::mutex g_workerLifecycleMutex;
 static std::atomic<bool> g_aimWorkerStop{ false };
@@ -1767,8 +1783,14 @@ void Tick()
         g_lastVerdict = "-";
     };
 
+    auto clearLastRejected = []() {
+        std::lock_guard<std::mutex> lk(g_debugMutex);
+        g_lastRejected = RejectedDebug{};
+    };
+
     if (!cfg.Enabled) {
         dbg.reason = "aim disabled";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1776,6 +1798,7 @@ void Tick()
     }
     if (ConfigInstance.Overlay.PanicMode) {
         dbg.reason = "panic active";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1783,6 +1806,7 @@ void Tick()
     }
     if (Overlay::MenuOpen()) {
         dbg.reason = "menu open";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1811,6 +1835,7 @@ void Tick()
     dbg.keySource = keySource;
     if (!dbg.held) {
         dbg.reason = "aim key not held";
+        clearLastRejected();
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
@@ -1820,6 +1845,7 @@ void Tick()
 
     if (!snapshot || snapshot->entities.empty()) {
         dbg.reason = "no entities";
+        clearLastRejected();
         stopAiming();
         return;
     }
@@ -1901,17 +1927,36 @@ void Tick()
     // history rather than letting the map grow for the whole session.
     if (g_motion.size() > 512) g_motion.clear();
 
+    RejectedDebug closestRejected{};
+    auto noteRejected = [&](const RobRunReader::EntityData& e, const char* why) {
+        Vector2 sc{};
+        const Vector3 probe = Vector3(e.position.x, e.position.y + 1.25f, e.position.z);
+        if (!RobRunReader::ProjectWorld(viewProjection, probe, width, height, sc)) return;
+        const float d = std::hypot(sc.x - centerX, sc.y - centerY);
+        if (d < closestRejected.screenDist) {
+            closestRejected.entityId = e.entityId;
+            closestRejected.screenDist = d;
+            closestRejected.role = RobRunReader::RoleLabel(e.role, e.roleName);
+            closestRejected.reason = why;
+            closestRejected.rigValid = e.bonePoints.valid;
+            closestRejected.hasHead = e.bonePoints.hasHead;
+        }
+    };
+
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
-        if (ent.isDead) continue;
-        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
-        if (ShouldSkipByRole(ent, cfg)) continue;
+        if (ent.isDead) { noteRejected(ent, "dead"); continue; }
+        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) {
+            noteRejected(ent, ent.isKnockedDown ? "knocked(kd)" : "knocked(ko)");
+            continue;
+        }
+        if (const char* roleWhy = RoleSkipReason(ent, cfg)) { noteRejected(ent, roleWhy); continue; }
         // When BVH is loaded, let the live per-bone IsCameraOccluded check below
         // evaluate Head/Neck/Chest/Pelvis directly instead of pre-rejecting on a
         // potentially stale snapshot ent.visible flag.
-        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) continue;
+        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) { noteRejected(ent, "vis(no-bvh)"); continue; }
         if (haveLocalPosition &&
-            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
+            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) { noteRejected(ent, "max-dist"); continue; }
 
         int activeBone = eff.targetBone;
         Vector3 point{};
@@ -1935,7 +1980,7 @@ void Tick()
                 }
             }
             if (!bestBoneFound) {
-                if (cfg.VisibleBonesOnly && bvhLoaded) continue;
+                if (cfg.VisibleBonesOnly && bvhLoaded) { noteRejected(ent, "vis(all-bones)"); continue; }
                 point = BonePoint(ent, 2);
             }
         } else {
@@ -1962,7 +2007,7 @@ void Tick()
                             break;
                         }
                     }
-                    if (!altFound) continue;
+                    if (!altFound) { noteRejected(ent, "vis(all-bones)"); continue; }
                 }
             }
         }
@@ -2004,7 +2049,7 @@ void Tick()
         // Hard lock: the sticky target keeps its pick even when it leaves the
         // FOV ring, mirroring the reference's locked-target behaviour.
         const bool isLocked = cfg.HardLock && ent.entityId == g_lastTarget;
-        if (!isLocked && distance > radiusPixels) continue;
+        if (!isLocked && distance > radiusPixels) { noteRejected(ent, "outside-fov"); continue; }
         ++dbg.candidates;
 
         if (isLocked) {
@@ -2036,7 +2081,24 @@ void Tick()
         }
     }
 
+    // Publish closest rejected target for Aim Debug HUD diagnostics (Issue #11)
+    {
+        std::lock_guard<std::mutex> lk(g_debugMutex);
+        g_lastRejected = closestRejected;
+    }
+
     if (!found) {
+        if (closestRejected.entityId >= 0) {
+            static std::uint64_t s_lastRejLogMs = 0;
+            if (nowMs - s_lastRejLogMs >= 1500) {
+                s_lastRejLogMs = nowMs;
+                VeoxDiag("[AimSkip] id=%d role='%s' why=%s px=%.0f rig=%d head=%d",
+                    closestRejected.entityId,
+                    closestRejected.role.empty() ? "?" : closestRejected.role.c_str(),
+                    closestRejected.reason, closestRejected.screenDist,
+                    closestRejected.rigValid ? 1 : 0, closestRejected.hasHead ? 1 : 0);
+            }
+        }
         dbg.reason = "no target in FOV";
         stopAiming();
         resetSmoothing();
@@ -2708,7 +2770,7 @@ void DrawDebug()
     const char* profName = (d.activeWeaponClass >= 0 && d.activeWeaponClass < kWeaponClassCount)
         ? kWeaponClassNames[d.activeWeaponClass] : "Default";
 
-    char lines[10][160];
+    char lines[11][160];
     std::snprintf(lines[0], sizeof(lines[0]), "Aim: %s  Curve: %s  FOV: %d deg",
         d.enabled ? "on" : "off", curveName, d.activeFov);
     std::snprintf(lines[1], sizeof(lines[1]), "Menu: %s  Key: %s (%s)",
@@ -2749,9 +2811,24 @@ void DrawDebug()
                 cam.nativeEnabled ? "not found" : "off", pose);
     }
 
+    {
+        RejectedDebug rej{};
+        {
+            std::lock_guard<std::mutex> lk(g_debugMutex);
+            rej = g_lastRejected;
+        }
+        if (rej.entityId >= 0)
+            std::snprintf(lines[10], sizeof(lines[10]),
+                "Skip: id=%d [%s] why=%s px=%.0f rig=%d head=%d",
+                rej.entityId, rej.role.empty() ? "?" : rej.role.c_str(),
+                rej.reason, rej.screenDist, rej.rigValid ? 1 : 0, rej.hasHead ? 1 : 0);
+        else
+            std::snprintf(lines[10], sizeof(lines[10]), "Skip: none");
+    }
+
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 origin(12.f, 12.f);
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 11; ++i) {
         dl->AddText(ImVec2(origin.x + 1.f, origin.y + i * 15.f + 1.f),
             IM_COL32(36, 38, 44, 220), lines[i]);
         dl->AddText(ImVec2(origin.x, origin.y + i * 15.f),
