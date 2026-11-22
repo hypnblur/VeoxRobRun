@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Radar.h"
+#include "MapSpriteData.h"
 #include "EspDraw.h"
 #include "IconSprites.h"
 #include "ConfigInstance.h"
@@ -28,6 +29,170 @@ std::filesystem::path g_mapsDir;
 std::atomic<int> g_pendingMapIndex{ -1 };
 std::mutex g_radarStateMutex;
 bool g_comInitialized = false;
+
+enum class MapSpriteSlot : int {
+	Weapon = 0,
+	Armor,
+	Valuable,
+	Cash,
+	Safe,
+	Cargo,
+	Medicine,
+	Key,
+	Generic,
+	DroppedBag,
+	Car,
+	PoliceCar,
+	Helicopter,
+	PlayerArrow,
+	COUNT
+};
+struct MapSpritePair {
+	ID3D11ShaderResourceView* base = nullptr; // full silhouette (drawn with untinted fuser-safe charcoal)
+	ID3D11ShaderResourceView* fill = nullptr; // interior fill (drawn with dynamic role/rarity tint)
+};
+MapSpritePair g_mapIconSRVs[static_cast<int>(MapSpriteSlot::COUNT)] = {};
+
+ID3D11ShaderResourceView* DecodeEmbeddedPng(const std::uint8_t* pngData, std::size_t pngSize, ID3D11Device* device)
+{
+	if (!pngData || !pngSize || !device) return nullptr;
+	IWICImagingFactory* factory = nullptr;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) || !factory)
+		return nullptr;
+
+	HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, pngSize);
+	if (!hMem) { factory->Release(); return nullptr; }
+	void* pMem = GlobalLock(hMem);
+	if (!pMem) { GlobalFree(hMem); factory->Release(); return nullptr; }
+	std::memcpy(pMem, pngData, pngSize);
+	GlobalUnlock(hMem);
+
+	IStream* stream = nullptr;
+	if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &stream)) || !stream) {
+		GlobalFree(hMem);
+		factory->Release();
+		return nullptr;
+	}
+
+	IWICBitmapDecoder* decoder = nullptr;
+	if (FAILED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &decoder)) || !decoder) {
+		stream->Release(); factory->Release(); return nullptr;
+	}
+	IWICBitmapFrameDecode* frame = nullptr;
+	if (FAILED(decoder->GetFrame(0, &frame)) || !frame) {
+		decoder->Release(); stream->Release(); factory->Release(); return nullptr;
+	}
+	IWICFormatConverter* conv = nullptr;
+	if (FAILED(factory->CreateFormatConverter(&conv)) || !conv) {
+		frame->Release(); decoder->Release(); stream->Release(); factory->Release(); return nullptr;
+	}
+	if (FAILED(conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+		conv->Release(); frame->Release(); decoder->Release(); stream->Release(); factory->Release(); return nullptr;
+	}
+	UINT w = 0, h = 0;
+	if (FAILED(conv->GetSize(&w, &h)) || w == 0 || h == 0 || w > 1024 || h > 1024) {
+		conv->Release(); frame->Release(); decoder->Release(); stream->Release(); factory->Release(); return nullptr;
+	}
+	std::vector<BYTE> pixels(static_cast<std::size_t>(w) * h * 4);
+	const HRESULT copyHr = conv->CopyPixels(nullptr, w * 4, static_cast<UINT>(pixels.size()), pixels.data());
+	conv->Release(); frame->Release(); decoder->Release(); stream->Release(); factory->Release();
+	if (FAILED(copyHr)) return nullptr;
+
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = w;
+	desc.Height = h;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_IMMUTABLE;
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+	D3D11_SUBRESOURCE_DATA init{};
+	init.pSysMem = pixels.data();
+	init.SysMemPitch = w * 4;
+
+	ID3D11Texture2D* tex = nullptr;
+	if (FAILED(device->CreateTexture2D(&desc, &init, &tex)) || !tex) return nullptr;
+	ID3D11ShaderResourceView* srv = nullptr;
+	device->CreateShaderResourceView(tex, nullptr, &srv);
+	tex->Release();
+	return srv;
+}
+
+void ReleaseMapSprites()
+{
+	for (auto& sp : g_mapIconSRVs) {
+		if (sp.base) { sp.base->Release(); sp.base = nullptr; }
+		if (sp.fill) { sp.fill->Release(); sp.fill = nullptr; }
+	}
+}
+
+void InitMapSprites(ID3D11Device* device)
+{
+	ReleaseMapSprites();
+	if (!device) return;
+	auto load = [&](MapSpriteSlot slot,
+		const std::uint8_t* baseData, std::size_t baseSz,
+		const std::uint8_t* fillData, std::size_t fillSz) {
+		auto& dst = g_mapIconSRVs[static_cast<int>(slot)];
+		dst.base = DecodeEmbeddedPng(baseData, baseSz, device);
+		dst.fill = DecodeEmbeddedPng(fillData, fillSz, device);
+	};
+	load(MapSpriteSlot::Weapon,      MapSpriteData::kMapPngWeaponBase,      sizeof(MapSpriteData::kMapPngWeaponBase),      MapSpriteData::kMapPngWeaponFill,      sizeof(MapSpriteData::kMapPngWeaponFill));
+	load(MapSpriteSlot::Armor,       MapSpriteData::kMapPngArmorBase,       sizeof(MapSpriteData::kMapPngArmorBase),       MapSpriteData::kMapPngArmorFill,       sizeof(MapSpriteData::kMapPngArmorFill));
+	load(MapSpriteSlot::Valuable,    MapSpriteData::kMapPngValuableBase,    sizeof(MapSpriteData::kMapPngValuableBase),    MapSpriteData::kMapPngValuableFill,    sizeof(MapSpriteData::kMapPngValuableFill));
+	load(MapSpriteSlot::Cash,        MapSpriteData::kMapPngCashBase,        sizeof(MapSpriteData::kMapPngCashBase),        MapSpriteData::kMapPngCashFill,        sizeof(MapSpriteData::kMapPngCashFill));
+	load(MapSpriteSlot::Safe,        MapSpriteData::kMapPngSafeBase,        sizeof(MapSpriteData::kMapPngSafeBase),        MapSpriteData::kMapPngSafeFill,        sizeof(MapSpriteData::kMapPngSafeFill));
+	load(MapSpriteSlot::Cargo,       MapSpriteData::kMapPngCargoBase,       sizeof(MapSpriteData::kMapPngCargoBase),       MapSpriteData::kMapPngCargoFill,       sizeof(MapSpriteData::kMapPngCargoFill));
+	load(MapSpriteSlot::Medicine,    MapSpriteData::kMapPngMedicineBase,    sizeof(MapSpriteData::kMapPngMedicineBase),    MapSpriteData::kMapPngMedicineFill,    sizeof(MapSpriteData::kMapPngMedicineFill));
+	load(MapSpriteSlot::Key,         MapSpriteData::kMapPngKeyBase,         sizeof(MapSpriteData::kMapPngKeyBase),         MapSpriteData::kMapPngKeyFill,         sizeof(MapSpriteData::kMapPngKeyFill));
+	load(MapSpriteSlot::Generic,     MapSpriteData::kMapPngGenericLootBase, sizeof(MapSpriteData::kMapPngGenericLootBase), MapSpriteData::kMapPngGenericLootFill, sizeof(MapSpriteData::kMapPngGenericLootFill));
+	load(MapSpriteSlot::DroppedBag,  MapSpriteData::kMapPngDroppedBagBase,  sizeof(MapSpriteData::kMapPngDroppedBagBase),  MapSpriteData::kMapPngDroppedBagFill,  sizeof(MapSpriteData::kMapPngDroppedBagFill));
+	load(MapSpriteSlot::Car,         MapSpriteData::kMapPngCarBase,         sizeof(MapSpriteData::kMapPngCarBase),         MapSpriteData::kMapPngCarFill,         sizeof(MapSpriteData::kMapPngCarFill));
+	load(MapSpriteSlot::PoliceCar,   MapSpriteData::kMapPngPoliceCarBase,   sizeof(MapSpriteData::kMapPngPoliceCarBase),   MapSpriteData::kMapPngPoliceCarFill,   sizeof(MapSpriteData::kMapPngPoliceCarFill));
+	load(MapSpriteSlot::Helicopter,  MapSpriteData::kMapPngHelicopterBase,  sizeof(MapSpriteData::kMapPngHelicopterBase),  MapSpriteData::kMapPngHelicopterFill,  sizeof(MapSpriteData::kMapPngHelicopterFill));
+	load(MapSpriteSlot::PlayerArrow, MapSpriteData::kMapPngPlayerArrowBase, sizeof(MapSpriteData::kMapPngPlayerArrowBase), MapSpriteData::kMapPngPlayerArrowFill, sizeof(MapSpriteData::kMapPngPlayerArrowFill));
+}
+
+bool DrawMapSprite(ImDrawList* dl, MapSpriteSlot slot, const ImVec2& c, float half, ImU32 fillCol)
+{
+	const int idx = static_cast<int>(slot);
+	if (idx < 0 || idx >= static_cast<int>(MapSpriteSlot::COUNT)) return false;
+	const auto& sp = g_mapIconSRVs[idx];
+	if (!sp.base || !sp.fill) return false;
+	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
+	const ImU32 outlineCol = IM_COL32(28, 30, 36, std::min(255, alpha + 25));
+	const ImVec2 p0(c.x - half, c.y - half);
+	const ImVec2 p1(c.x + half, c.y + half);
+	dl->AddImage(reinterpret_cast<ImTextureID>(sp.base), p0, p1, ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), outlineCol);
+	dl->AddImage(reinterpret_cast<ImTextureID>(sp.fill), p0, p1, ImVec2(0.f, 0.f), ImVec2(1.f, 1.f), fillCol);
+	return true;
+}
+
+bool DrawMapSpriteRotated(ImDrawList* dl, MapSpriteSlot slot, const ImVec2& c, float half, float relYaw, ImU32 fillCol)
+{
+	const int idx = static_cast<int>(slot);
+	if (idx < 0 || idx >= static_cast<int>(MapSpriteSlot::COUNT)) return false;
+	const auto& sp = g_mapIconSRVs[idx];
+	if (!sp.base || !sp.fill) return false;
+	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
+	const ImU32 outlineCol = IM_COL32(28, 30, 36, std::min(255, alpha + 25));
+
+	// Sprite points UP at relYaw = 0 (fwd = (sin, -cos), right = (cos, sin))
+	const float cs = std::cos(relYaw);
+	const float sn = std::sin(relYaw);
+	auto rot = [&](float lx, float ly) -> ImVec2 {
+		return ImVec2(c.x + lx * cs - ly * sn, c.y + lx * sn + ly * cs);
+	};
+	const ImVec2 p1 = rot(-half, -half); // top-left
+	const ImVec2 p2 = rot( half, -half); // top-right
+	const ImVec2 p3 = rot( half,  half); // bottom-right
+	const ImVec2 p4 = rot(-half,  half); // bottom-left
+	const ImVec2 uv1(0.f, 0.f), uv2(1.f, 0.f), uv3(1.f, 1.f), uv4(0.f, 1.f);
+	dl->AddImageQuad(reinterpret_cast<ImTextureID>(sp.base), p1, p2, p3, p4, uv1, uv2, uv3, uv4, outlineCol);
+	dl->AddImageQuad(reinterpret_cast<ImTextureID>(sp.fill), p1, p2, p3, p4, uv1, uv2, uv3, uv4, fillCol);
+	return true;
+}
 
 bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 {
@@ -199,6 +364,8 @@ void Init()
 {
 	HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 	g_comInitialized = (hr == S_OK || hr == S_FALSE);
+
+	InitMapSprites(Overlay::GetDevice());
 
 	wchar_t exePath[MAX_PATH] = {};
 	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -1243,6 +1410,9 @@ void DrawHeliIcon(ImDrawList* dl, const ImVec2& c, float scale, ImU32 fillCol)
 // Smooth rounded-corner, flat-notched player arrow matching Rob Run's native green player arrow.
 void DrawPlayerArrow(ImDrawList* dl, const ImVec2& c, float relYaw, float radius, ImU32 fillCol)
 {
+	if (DrawMapSpriteRotated(dl, MapSpriteSlot::PlayerArrow, c, radius * 1.15f, relYaw, fillCol))
+		return;
+
 	const int alpha = static_cast<int>((fillCol >> IM_COL32_A_SHIFT) & 0xFF);
 	const ImU32 outline = IM_COL32(26, 28, 32, std::min(255, alpha + 25));
 
@@ -1376,6 +1546,21 @@ enum class MapItemIcon {
 
 void DrawMapCategoryIcon(ImDrawList* dl, const ImVec2& c, float scale, MapItemIcon icon, ImU32 col)
 {
+	MapSpriteSlot slot = MapSpriteSlot::Generic;
+	switch (icon) {
+	case MapItemIcon::Weapon:   slot = MapSpriteSlot::Weapon; break;
+	case MapItemIcon::Armor:    slot = MapSpriteSlot::Armor; break;
+	case MapItemIcon::Valuable: slot = MapSpriteSlot::Valuable; break;
+	case MapItemIcon::Cash:     slot = MapSpriteSlot::Cash; break;
+	case MapItemIcon::Safe:     slot = MapSpriteSlot::Safe; break;
+	case MapItemIcon::Cargo:    slot = MapSpriteSlot::Cargo; break;
+	case MapItemIcon::Medicine: slot = MapSpriteSlot::Medicine; break;
+	case MapItemIcon::Key:      slot = MapSpriteSlot::Key; break;
+	case MapItemIcon::Generic:  slot = MapSpriteSlot::Generic; break;
+	}
+	if (DrawMapSprite(dl, slot, c, 7.8f * scale, col))
+		return;
+
 	const ImU32 outline = IM_COL32(26, 28, 32, 245);
 	const ImU32 inner   = IM_COL32(26, 28, 32, 210);
 	const float s = 3.8f * scale;
@@ -1591,10 +1776,17 @@ void DrawInGameMapOverlay()
 	const float cosR = std::cos(rotRad);
 	const float sinR = std::sin(rotRad);
 
-	const float clipMinX = std::clamp(minX, 0.f, display.x);
-	const float clipMinY = std::clamp(minY, 0.f, display.y);
-	const float clipMaxX = std::clamp(maxX, 0.f, display.x);
-	const float clipMaxY = std::clamp(maxY, 0.f, display.y);
+	// For the minimap, the Unity RectTransform includes the outer dark HUD frame
+	// (top FPS/PING/LOSS bar + side/bottom borders). Inset the clip rect to the
+	// actual visible map square while keeping cx/cy/rectW/rectH intact for projection.
+	const float insetL = isFull ? 0.f : (rectW * 0.083f);
+	const float insetR = isFull ? 0.f : (rectW * 0.083f);
+	const float insetT = isFull ? 0.f : (rectH * 0.105f);
+	const float insetB = isFull ? 0.f : (rectH * 0.090f);
+	const float clipMinX = std::clamp(minX + insetL, 0.f, display.x);
+	const float clipMinY = std::clamp(minY + insetT, 0.f, display.y);
+	const float clipMaxX = std::clamp(maxX - insetR, 0.f, display.x);
+	const float clipMaxY = std::clamp(maxY - insetB, 0.f, display.y);
 	if (clipMaxX - clipMinX < 20.f || clipMaxY - clipMinY < 20.f)
 		return;
 
@@ -1642,15 +1834,17 @@ void DrawInGameMapOverlay()
 			ImVec2 pt{};
 			if (cfg.InGameMapDroppedBags && we.kind == RobRunWorld::Kind::DroppedBag) {
 				if (!worldToMap(we.position, pt)) continue;
-				const float r = 4.2f * scale;
-				dl->AddQuadFilled(
-					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
-					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
-					IM_COL32(255, 200, 50, 240));
-				dl->AddQuad(
-					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
-					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
-					IM_COL32(26, 28, 32, 240), 1.4f);
+				if (!DrawMapSprite(dl, MapSpriteSlot::DroppedBag, pt, 8.2f * scale, IM_COL32(255, 200, 50, 250))) {
+					const float r = 4.2f * scale;
+					dl->AddQuadFilled(
+						ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
+						ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
+						IM_COL32(255, 200, 50, 240));
+					dl->AddQuad(
+						ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
+						ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
+						IM_COL32(26, 28, 32, 240), 1.4f);
+				}
 				continue;
 			}
 
@@ -1792,6 +1986,7 @@ void DrawInGameMapOverlay()
 	struct VehicleOccupantInfo {
 		bool occupied = false;
 		bool localOccupied = false;
+		bool isPolice = false;
 		int priority = 0;
 		ImU32 color = IM_COL32(215, 220, 228, 220);
 		Vector3 driverPos{};
@@ -1868,6 +2063,7 @@ void DrawInGameMapOverlay()
 					if (!occ.occupied || prio > occ.priority) {
 						occ.occupied = true;
 						occ.priority = prio;
+						occ.isPolice = (RobRunReader::RoleLabel(ent.role, ent.roleName) == "Police Officer");
 						occ.color = GetInGameMapRoleColor(ent.role, ent.roleName, isTeammate);
 						if (std::isfinite(ent.position.x) && std::isfinite(ent.position.z)) {
 							occ.driverPos = ent.position;
@@ -1988,11 +2184,20 @@ void DrawInGameMapOverlay()
 				vehCol = muteRoleColor(baseRole);
 			}
 
-			const float vehScale = (occ.occupied || activeRemoteVeh) ? scale : (scale * 0.90f);
+			const bool isPoliceVeh =
+				(occ.occupied && occ.isPolice) ||
+				(!occ.occupied && remembered && RobRunReader::RoleLabel(remembered->role, remembered->roleName) == "Police Officer") ||
+				(!occ.occupied && !remembered && !mv.ownerRoleName.empty() && RobRunReader::RoleLabel(0, mv.ownerRoleName) == "Police Officer");
+
+			const float vehScale = scale * 0.90f;
 			if (mv.kind == RobRunWorld::Kind::Helicopter) {
-				DrawHeliIcon(dl, pt, vehScale, vehCol);
+				if (!DrawMapSprite(dl, MapSpriteSlot::Helicopter, pt, 12.0f * vehScale, vehCol))
+					DrawHeliIcon(dl, pt, vehScale, vehCol);
 			} else {
-				DrawCarIcon(dl, pt, vehScale, vehCol);
+				const MapSpriteSlot carSlot = isPoliceVeh ? MapSpriteSlot::PoliceCar : MapSpriteSlot::Car;
+				const float carHalf = (isPoliceVeh ? 11.6f : 11.2f) * vehScale;
+				if (!DrawMapSprite(dl, carSlot, pt, carHalf, vehCol))
+					DrawCarIcon(dl, pt, vehScale, vehCol);
 			}
 
 			// Show occupant/owner name(s) on the fullscreen ('M') map above the car/heli icon.
@@ -2008,7 +2213,7 @@ void DrawInGameMapOverlay()
 				}
 				if (!label.empty()) {
 					const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, label.c_str());
-					const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 8.f * vehScale - sz.y - 2.f);
+					const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - 11.0f * vehScale - sz.y - 2.f);
 					dl->AddRectFilled(
 						ImVec2(textPos.x - 5.f, textPos.y - 2.f),
 						ImVec2(textPos.x + sz.x + 5.f, textPos.y + sz.y + 2.f),
@@ -2091,6 +2296,7 @@ void DrawInGameMapOverlay()
 
 void Shutdown()
 {
+	ReleaseMapSprites();
 	if (g_mapSRV) { g_mapSRV->Release(); g_mapSRV = nullptr; }
 	if (g_comInitialized) {
 		CoUninitialize();
