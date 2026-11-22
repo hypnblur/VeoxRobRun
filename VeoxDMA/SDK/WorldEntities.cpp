@@ -25,6 +25,12 @@ void Init(std::uintptr_t gameAssemblyBase)
     Il2Cpp::Init(gameAssemblyBase);
 }
 
+static bool IsPaintingId(std::string_view id)
+{
+    return id.starts_with("original_picture_") || id.starts_with("trash_picture_") ||
+        id.starts_with("picture_tube_") || id.starts_with("picture_fake_");
+}
+
 const char* KindName(Kind kind)
 {
     switch (kind) {
@@ -240,9 +246,9 @@ bool IsKnownItemId(const std::string& id)
     return s_ids.count(key) > 0;
 }
 
-// Func<int>: the delegate closes over the value, so the number sits in the
-// target object. Many of these are constant returns, which is what makes a
-// price readable at all - the game never stores prices as plain fields.
+// Func<int>: InventoryItemDescription.<>c__DisplayClass327_0 holds <>4__this at
+// +0x10 and `int basePrice` at +0x18. Check +0x18 first so we never mistake the
+// low 32 bits of the <>4__this pointer for a price.
 bool ReadFuncInt(std::uintptr_t obj, std::uintptr_t funcOffset, int& out)
 {
     if (obj <= 0x10000) return false;
@@ -250,26 +256,165 @@ bool ReadFuncInt(std::uintptr_t obj, std::uintptr_t funcOffset, int& out)
     if (fn <= 0x10000) return false;
     const std::uintptr_t target = RobRunMemory::ReadPtr(fn + 0x20);   // delegate target, not method_ptr
     if (target <= 0x10000) return false;
-    for (const std::uintptr_t off : { (std::uintptr_t)0x10, (std::uintptr_t)0x18 }) {
+    for (const std::uintptr_t off : { (std::uintptr_t)0x18, (std::uintptr_t)0x10 }) {
         const int value = RobRunMemory::ReadInt32(target + off);
         if (value > 0 && value < 100000000) { out = value; return true; }
     }
     return false;
 }
 
-// InventoryItemDescription carries BasePriceFunc (0x78) and SellPriceFunc (0x88).
+// InventoryItemDescription carries BasePriceFunc (0x78) and
+// SellPriceModifierFunc (0x80 -> InventoryItemSellPriceModifier -> float
+// Modifier at +0x20). Note that SellPriceFunc (0x88) shares the same closure
+// as BasePriceFunc (holding only basePrice, not the multiplied sell price),
+// so the real sell price is round(basePrice * modifier).
 bool ReadItemPrices(std::uintptr_t itemDesc, int& basePrice, int& sellPrice)
 {
     basePrice = 0;
     sellPrice = 0;
     if (itemDesc <= 0x10000) return false;
     const bool haveBase = ReadFuncInt(itemDesc, rr::InventoryItemDescriptionModel::BasePriceFunc, basePrice);
-    const bool haveSell = ReadFuncInt(itemDesc, rr::InventoryItemDescriptionModel::SellPriceFunc, sellPrice);
-    return haveBase || haveSell;
+    if (!haveBase || basePrice <= 0) return false;
+
+    const std::uintptr_t modObj = ReadFuncTarget(
+        itemDesc, rr::InventoryItemDescriptionModel::SellPriceModifierFunc);
+    if (modObj > 0x10000) {
+        const float mod = RobRunMemory::ReadFloat(
+            modObj + rr::InventoryItemSellPriceModifierModel::Modifier);
+        if (std::isfinite(mod) && mod >= 0.f && mod <= 10.f) {
+            sellPrice = static_cast<int>(std::lround(
+                static_cast<double>(basePrice) * static_cast<double>(mod)));
+            return true;
+        }
+    }
+    sellPrice = basePrice;
+    return true;
+}
+
+struct LiveItemInfo {
+    int basePrice = 0;
+    int sellPrice = 0;
+    int rarity = 0;
+};
+
+static std::unordered_map<std::string, LiveItemInfo> g_liveItems;
+static std::uint64_t g_livePricesLastTryMs = 0;
+
+void EnsureLiveItemPrices()
+{
+    if (!g_liveItems.empty()) return;
+    const std::uint64_t now = GetTickCount64();
+    if (g_livePricesLastTryMs != 0 && (now - g_livePricesLastTryMs) < 5000) return;
+    g_livePricesLastTryMs = now;
+
+    const std::uintptr_t klass = Il2Cpp::FindClassByName("InventoryItemDescriptions");
+    if (klass <= 0x10000) return;
+    const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
+    if (statics <= 0x10000) return;
+
+    const std::uintptr_t enumObj = RobRunMemory::ReadPtr(statics + 0x0);
+    if (enumObj <= 0x10000) return;
+    const std::uintptr_t listObj = RobRunMemory::ReadPtr(enumObj + 0x10); // ReadOnlyEnum<T>._items
+    if (listObj <= 0x10000) return;
+
+    const std::uintptr_t arr = RobRunMemory::ReadPtr(listObj + rr::List::items);
+    const std::int32_t count = RobRunMemory::ReadInt32(listObj + rr::List::count);
+    if (arr <= 0x10000 || count <= 0 || count > 4096) return;
+
+    std::unordered_map<std::string, LiveItemInfo> loaded;
+    loaded.reserve(static_cast<std::size_t>(count));
+    for (std::int32_t i = 0; i < count; ++i) {
+        const std::uintptr_t itemDesc = RobRunMemory::ReadPtr(
+            arr + rr::Array::vector + static_cast<std::uintptr_t>(i) * rr::Array::stride);
+        if (itemDesc <= 0x10000) continue;
+        std::string id = ReadIdentifiedId(itemDesc);
+        if (id.empty()) continue;
+        std::transform(id.begin(), id.end(), id.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        int basePrice = 0, sellPrice = 0;
+        ReadItemPrices(itemDesc, basePrice, sellPrice);
+        const int rarity = RobRunMemory::ReadInt32(
+            itemDesc + rr::InventoryItemDescriptionModel::Rarity);
+        if (basePrice > 0 || sellPrice > 0 || (rarity > 0 && rarity <= 6)) {
+            loaded[id] = { basePrice, sellPrice, (rarity > 0 && rarity <= 6) ? rarity : 0 };
+        }
+    }
+    if (!loaded.empty())
+        g_liveItems = std::move(loaded);
+}
+
+bool LookupLiveItemInfo(const std::string& label, LiveItemInfo& outInfo)
+{
+    if (label.empty() || g_liveItems.empty()) return false;
+    std::string key = label;
+    std::transform(key.begin(), key.end(), key.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    auto it = g_liveItems.find(key);
+    if (it != g_liveItems.end()) {
+        outInfo = it->second;
+        return true;
+    }
+    return false;
+}
+
+// Resolve a typed description delegate without executing it in the game.
+// Handles both direct closures (<>c__DisplayClass3_0) and indexed registry
+// closures (<>c__DisplayClass5_0`1 capturing Enum<T> at +0x10 and index at +0x18).
+std::uintptr_t ResolveDescriptionDelegate(std::uintptr_t func, const char* directClosure,
+    const char* captureName)
+{
+    if (!Il2Cpp::IsClass(func, "Func`1")) return 0;
+
+    constexpr std::uintptr_t delegateTarget = 0x20;
+    const auto target = RobRunMemory::ReadPtr(func + delegateTarget);
+    const std::string targetClass = Il2Cpp::ClassNameOf(target);
+
+    if (targetClass == directClosure) {
+        Il2Cpp::Field capture{};
+        if (!Il2Cpp::FindField(Il2Cpp::ClassOf(target), captureName, capture) ||
+            capture.offset != 0x10)
+            return 0;
+        return RobRunMemory::ReadPtr(target + capture.offset);
+    }
+    if (targetClass != "<>c__DisplayClass5_0`1") return 0;
+
+    constexpr std::uintptr_t capturedEnum = 0x10;
+    constexpr std::uintptr_t capturedIndex = 0x18;
+    constexpr std::uintptr_t enumItems = 0x10;
+    const auto registry = RobRunMemory::ReadPtr(target + capturedEnum);
+    if (!Il2Cpp::IsClass(registry, "Enum`1")) return 0;
+    const auto list = RobRunMemory::ReadPtr(registry + enumItems);
+    if (!Il2Cpp::IsClass(list, "List`1")) return 0;
+
+    std::int32_t index = -1;
+    std::int32_t count = 0;
+    if (!RobRunMemory::ReadBytes(target + capturedIndex, &index, sizeof(index)) ||
+        !RobRunMemory::ReadBytes(list + rr::List::count, &count, sizeof(count)) ||
+        index < 0 || index >= count)
+        return 0;
+
+    const auto array = RobRunMemory::ReadPtr(list + rr::List::items);
+    std::uint64_t length = 0;
+    if (array <= 0x10000 ||
+        !RobRunMemory::ReadBytes(array + rr::Array::max_length, &length, sizeof(length)) ||
+        static_cast<std::uint64_t>(count) > length)
+        return 0;
+
+    return RobRunMemory::ReadPtr(array + rr::Array::vector +
+        static_cast<std::uintptr_t>(index) * rr::Array::stride);
 }
 
 std::uintptr_t ResolveInventoryItemDescription(std::uintptr_t lootObjectItem)
 {
+    if (lootObjectItem <= 0x10000) return 0;
+    if (Il2Cpp::IsClass(lootObjectItem, "LootObjectItemDescription")) {
+        const auto func = RobRunMemory::ReadPtr(
+            lootObjectItem + rr::LootObjectItemDescriptionModel::ItemDescriptionFunc);
+        const auto item = ResolveDescriptionDelegate(func, "<>c__DisplayClass3_0", "itemDescription");
+        if (Il2Cpp::IsClassOrDerived(item, "InventoryItemDescription"))
+            return item;
+    }
     return ReadFuncTarget(lootObjectItem,
         rr::LootObjectItemDescriptionModel::ItemDescriptionFunc);
 }
@@ -842,6 +987,8 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
     // DroppedBag below would duplicate every bag and double the DMA traffic,
     // so the DroppedBag pass is the only reader for this offset.
 
+    EnsureLiveItemPrices();
+
     const std::size_t staticLootStart = out.entities.size();
     AddDictionaryDescriptionScatter(world, rr::WorldEntitiesModel::StaticLootObjects, Kind::StaticLoot,
         rr::StaticLootObjectModel::Description, 0x30, out, out.loots);
@@ -867,10 +1014,33 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                 const std::uintptr_t func = RobRunMemory::ReadPtr(
                     desc + rr::StaticLootObjectDescription::LootItemFunc);
                 if (func <= 0x10000) continue;
+                const std::uintptr_t selectedLoot = ResolveDescriptionDelegate(
+                    func, "<>c__DisplayClass35_0", "lootObjectItemDescription");
+                const std::string selectedId = Il2Cpp::IsClass(selectedLoot, "LootObjectItemDescription")
+                    ? ReadIdentifiedId(selectedLoot) : std::string{};
                 const std::uintptr_t target = RobRunMemory::ReadPtr(func + 0x20);
-                if (target <= 0x10000) continue;
-                const std::uintptr_t lootObjectItem = RobRunMemory::ReadPtr(target + 0x10);
+                const std::uintptr_t lootObjectItem = selectedId.empty() && target > 0x10000
+                    ? RobRunMemory::ReadPtr(target + 0x10) : selectedLoot;
                 if (lootObjectItem <= 0x10000) continue;
+
+                const std::string lootId = ReadIdentifiedId(lootObjectItem);
+                if (IsPaintingId(lootId)) {
+                    auto& entity = out.entities[it->second];
+                    entity.label = lootId;
+                    const std::uintptr_t invDesc = ResolveInventoryItemDescription(lootObjectItem);
+                    if (invDesc > 0x10000) {
+                        const int r = RobRunMemory::ReadInt32(
+                            invDesc + rr::InventoryItemDescriptionModel::Rarity);
+                        if (r > 0 && r <= 6)
+                            entity.rarity = r;
+                        int basePrice = 0, sellPrice = 0;
+                        if (ReadItemPrices(invDesc, basePrice, sellPrice) && sellPrice > 0) {
+                            entity.value = sellPrice;
+                            entity.hasValue = true;
+                        }
+                    }
+                    continue;
+                }
 
                 // Second hop: the loot object names the pickup, the inventory
                 // item behind it names the actual tiered item.
@@ -916,6 +1086,15 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                     out.entities[it->second].value = sellPrice;
                     out.entities[it->second].hasValue = true;
                 }
+                LiveItemInfo regInfo{};
+                if (LookupLiveItemInfo(out.entities[it->second].label, regInfo)) {
+                    if (!out.entities[it->second].hasValue && regInfo.sellPrice > 0) {
+                        out.entities[it->second].value = regInfo.sellPrice;
+                        out.entities[it->second].hasValue = true;
+                    }
+                    if (out.entities[it->second].rarity == 0 && regInfo.rarity > 0)
+                        out.entities[it->second].rarity = regInfo.rarity;
+                }
 
                 // One sample, so the shipped sell price can be compared with the
                 // database's number without guessing which one is the buy price.
@@ -953,8 +1132,37 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
                     wrapper + rr::ReferenceData::Value, &value, sizeof(value));
                 if (valueRead && Il2Cpp::IsClass(value, "LootObjectItemDescription")) {
                     const std::string lootId = ReadIdentifiedId(value);
-                    if (LooksLikeId(lootId)) entity.label = lootId;
+                    std::uintptr_t invDesc = ResolveInventoryItemDescription(value);
+                    const std::string invId = invDesc > 0x10000 ? ReadIdentifiedId(invDesc) : std::string{};
+                    if (IsKnownItemId(invId))
+                        entity.label = invId;
+                    else if (LooksLikeId(lootId))
+                        entity.label = lootId;
+                    else if (LooksLikeId(invId))
+                        entity.label = invId;
 
+                    bool priced = false;
+                    if (invDesc > 0x10000) {
+                        int basePrice = 0, sellPrice = 0;
+                        if (ReadItemPrices(invDesc, basePrice, sellPrice) && sellPrice > 0) {
+                            entity.value = sellPrice;
+                            entity.hasValue = true;
+                            priced = true;
+                        }
+                        const int r = RobRunMemory::ReadInt32(
+                            invDesc + rr::InventoryItemDescriptionModel::Rarity);
+                        if (r > 0 && r <= 6)
+                            entity.rarity = r;
+                    }
+                    LiveItemInfo regInfo{};
+                    if (LookupLiveItemInfo(entity.label, regInfo)) {
+                        if (!priced && regInfo.sellPrice > 0) {
+                            entity.value = regInfo.sellPrice;
+                            entity.hasValue = true;
+                        }
+                        if (entity.rarity == 0 && regInfo.rarity > 0)
+                            entity.rarity = regInfo.rarity;
+                    }
                 }
 
                 if constexpr (kProbes) {
