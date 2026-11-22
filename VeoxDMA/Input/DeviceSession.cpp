@@ -224,7 +224,9 @@ struct DeviceSession::Impl {
                 if (in.error) {
                     motion[i].Observe(in.target, in.observation, in.value);
                     v = AimMotion::ApplyVariation(motion[i].variation, motion[i].target,
-                        motion[i].remaining, AimMotion::Step(motion[i].remaining, in.settings, dt),
+                        motion[i].remaining,
+                        AimMotion::StepWithCurve(motion[i].curve, motion[i].target,
+                            motion[i].remaining, in.settings, dt),
                         in.settings);
                 } else if (in.rate) { v.x *= dt; v.y *= dt; }
                 if (stick) { v.x *= in.stickScale; v.y *= in.stickScale; stickCommands[i] = v; }

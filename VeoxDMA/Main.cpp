@@ -240,7 +240,7 @@ static void TickOverlay()
 	static bool battleKeyWasHeld = false;
 	if (!Overlay::MenuOpen()) {
 		const int key = ConfigInstance.Overlay.BattleModeKey;
-		const bool held = key >= 0 && key < Aim::KeyCount() - 1 && Aim::IsKeyHeld(key);
+		const bool held = key >= 0 && key < Aim::KeyCount() && !Aim::IsAlwaysKey(key) && Aim::IsKeyHeld(key);
 		if (held && !battleKeyWasHeld) {
 			ConfigInstance.Overlay.BattleMode = !ConfigInstance.Overlay.BattleMode;
 			Overlay::Notify(ConfigInstance.Overlay.BattleMode
