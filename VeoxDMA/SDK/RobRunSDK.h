@@ -153,6 +153,7 @@ inline constexpr std::uintptr_t WorldEntitiesModelAlt    = 0x60;
 
 inline constexpr std::uintptr_t CharacterSlotsModel = 0x248;
 inline constexpr std::uintptr_t CharacterSlotsModelLegacy = 0x4D0;
+inline constexpr std::uintptr_t InventoryDialogModel       = 0x178;
 inline constexpr std::uintptr_t ProlongedInteractionDialog = 0x188;
 inline constexpr std::uintptr_t CoinsModel                 = 0x4A8;
 inline constexpr std::uintptr_t CryptoCoinsModel           = 0x4B0;
@@ -1204,6 +1205,43 @@ inline constexpr std::uintptr_t EndTs   = 0x28; // float
 namespace AutoLootAfterBreakModel {
 inline constexpr std::uintptr_t AutoLootEntityId = 0x10; // int
 inline constexpr std::uintptr_t AutoLootEndTs    = 0x28; // float
+}
+
+namespace InventoryDialogModel {
+inline constexpr std::uintptr_t CurrentInventoryModel = 0x18;
+}
+
+namespace CurrentInventoryModel {
+inline constexpr std::uintptr_t Type                 = 0x10; // InventoryDialogType (int32)
+inline constexpr std::uintptr_t RevealContainerModel = 0x18; // IRevealContainerModel
+}
+
+namespace ScreensUpdater {
+inline constexpr std::uintptr_t DisposeModels = 0x20; // Dictionary<IScreenModel, ValueTuple<IUpdater, IDisposable>>
+inline constexpr std::uintptr_t EntryStride   = 0x20; // hash(4), next(4), key(8), updater(8), disposable(8)
+inline constexpr std::uintptr_t EntryKey      = 0x08;
+inline constexpr std::uintptr_t EntryUpdater  = 0x10;
+}
+
+namespace InventoryCellsRevealUpdater {
+inline constexpr std::uintptr_t Updaters             = 0x20; // List<IUpdater>
+inline constexpr std::uintptr_t RevealContainerModel = 0x28; // IRevealContainerModel
+inline constexpr std::uintptr_t ViewDescriptions     = 0x30; // InventoryRevealViewDescriptions
+inline constexpr std::uintptr_t IsActive             = 0x40; // bool
+}
+
+namespace InventoryCellsRevealSlotUpdater {
+inline constexpr std::uintptr_t Model                      = 0x20; // IRevealContainerModel
+inline constexpr std::uintptr_t ViewDescriptions           = 0x28; // InventoryRevealViewDescriptions
+inline constexpr std::uintptr_t State                      = 0x80; // int32: 0=Close, 1=Scan, 2=Preview, 3=Open
+inline constexpr std::uintptr_t ScanDuration               = 0x84; // float
+inline constexpr std::uintptr_t ShineDurationHasValue      = 0x88; // bool (Nullable<float>.hasValue)
+inline constexpr std::uintptr_t ShineDurationValue         = 0x8C; // float (Nullable<float>.value)
+inline constexpr std::uintptr_t IconRevealDurationHasValue = 0x90; // bool (Nullable<float>.hasValue)
+inline constexpr std::uintptr_t IconRevealDurationValue    = 0x94; // float (Nullable<float>.value)
+inline constexpr std::uintptr_t ScanEndTime                = 0x98; // float
+inline constexpr std::uintptr_t ShineEndTime               = 0x9C; // float
+inline constexpr std::uintptr_t IconRevealEndTime          = 0xA0; // float
 }
 
 namespace InventoryRevealViewDescriptions {

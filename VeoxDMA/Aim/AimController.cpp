@@ -1002,191 +1002,165 @@ DebugInfo GetDebug()
     return g_debug;
 }
 
-static void TickInstantLoot()
+namespace {
+
+// Small positive reveal duration (5 ms). Never 0.0f: zero is rejected / divides
+// by zero in the reveal state machine and causes slots to stay unrevealed.
+constexpr float kFastRevealDurationSec = 0.005f;
+
+struct SavedFloatField {
+    std::uintptr_t addr = 0;
+    float original = 0.f;
+};
+
+struct InstantLootState {
+    std::uint64_t sessionGen = 0;
+    std::uintptr_t battleModel = 0;
+    std::uintptr_t revealDescs = 0;
+    std::uint64_t lastCheckMs = 0;
+    bool patched = false;
+    std::vector<SavedFloatField> savedFields;
+};
+
+InstantLootState g_instantLoot;
+
+bool IsReasonableDuration(float v)
 {
-    struct SavedRevealDesc {
-        std::uintptr_t desc = 0;
-        float shineDur = 0.f;
-        float iconDur = 0.f;
-    };
-    static std::uintptr_t s_revealDescs = 0;
-    static std::uint64_t s_revealSessionGen = 0;
-    static std::uint64_t s_revealStamp = 0;
-    static bool s_revealPatched = false;
-    static float s_savedScanTime = 0.f;
-    static std::vector<SavedRevealDesc> s_savedDescs;
+    return std::isfinite(v) && v > kFastRevealDurationSec && v <= 60.f;
+}
 
-    const auto restoreReveal = [&] {
-        if (!s_revealPatched || s_revealDescs <= 0x10000) return;
-        namespace rv = rr::InventoryRevealViewDescriptions;
-        if (s_savedScanTime > 0.f)
-            TargetProcess.Write(s_revealDescs + rv::TimeToOneCellBorder, s_savedScanTime);
-        for (const auto& entry : s_savedDescs) {
-            if (entry.desc <= 0x10000) continue;
-            TargetProcess.Write(entry.desc + rv::ShineView + rv::ShineDuration, entry.shineDur);
-            TargetProcess.Write(entry.desc + rv::IconView + rv::IconDuration, entry.iconDur);
+void RestoreInstantLoot()
+{
+    if (!g_instantLoot.patched) return;
+    if (g_instantLoot.revealDescs > 0x10000 &&
+        Il2Cpp::IsClass(g_instantLoot.revealDescs, "InventoryRevealViewDescriptions") &&
+        !g_instantLoot.savedFields.empty()) {
+        for (const auto& entry : g_instantLoot.savedFields) {
+            float cur = 0.f;
+            if (RobRunMemory::ReadBytesFresh(entry.addr, &cur, sizeof(cur)) &&
+                std::isfinite(cur) && cur >= 0.f && cur <= 0.05f) {
+                TargetProcess.Write(entry.addr, entry.original);
+            }
         }
-        s_revealPatched = false;
-    };
-
-    const auto snap = RobRunReader::GetSnapshot();
-    if (snap && snap->sessionGeneration != s_revealSessionGen) {
-        s_revealSessionGen = snap->sessionGeneration;
-        s_revealDescs = 0;
-        s_revealPatched = false;
-        s_savedDescs.clear();
-        s_revealStamp = 0;
     }
+    g_instantLoot.savedFields.clear();
+    g_instantLoot.patched = false;
+}
 
-    if (!ConfigInstance.World.InstantLoot) {
-        restoreReveal();
+void PatchRevealDescriptions(std::uintptr_t revealDescs)
+{
+    if (revealDescs <= 0x10000 ||
+        !Il2Cpp::IsClass(revealDescs, "InventoryRevealViewDescriptions")) {
         return;
     }
-    if (!snap || snap->battleModel <= 0x10000) return;
 
-    const auto bm = snap->battleModel;
+    if (g_instantLoot.patched && g_instantLoot.revealDescs == revealDescs)
+        return;
+    if (g_instantLoot.patched)
+        RestoreInstantLoot();
 
-    // 1. DelayedUseActionModel (BattleModel + 0x610): uncached read so -norefresh
-    //    cannot hide the active hold-to-use timer. Collapse EndTs to StartTs.
-    const std::uintptr_t delayed = RobRunMemory::ReadPtr(
-        bm + rr::BattleModel::DelayedUseAction);
-    if (delayed > 0x10000) {
-        struct DelayedBlock {
-            float startTs;
-            std::uint32_t pad;
-            std::uintptr_t action;
-            float endTs;
-        } blk{};
-        if (RobRunMemory::ReadBytesFresh(
-                delayed + rr::DelayedUseActionModel::StartTs, &blk,
-                offsetof(DelayedBlock, endTs) + sizeof(blk.endTs))) {
-            if (blk.action > 0x10000 && std::isfinite(blk.startTs) && std::isfinite(blk.endTs) &&
-                blk.startTs > 0.f && blk.endTs > blk.startTs) {
-                TargetProcess.Write(delayed + rr::DelayedUseActionModel::EndTs, blk.startTs);
-            }
-        }
+    namespace rv = rr::InventoryRevealViewDescriptions;
+    std::vector<SavedFloatField> toPatch;
+
+    const std::uintptr_t scanAddr = revealDescs + rv::TimeToOneCellBorder;
+    float scanOrig = 0.f;
+    if (RobRunMemory::ReadBytesFresh(scanAddr, &scanOrig, sizeof(scanOrig)) &&
+        IsReasonableDuration(scanOrig)) {
+        toPatch.push_back({ scanAddr, scanOrig });
     }
 
-    // 2. ProlongedInteractionDialogModel (BattleModel + 0x188): uncached read
-    //    and pin Progress (float at +0x18) to 1.0 while moving.
-    const std::uintptr_t dialog = RobRunMemory::ReadPtr(
-        bm + rr::BattleModel::ProlongedInteractionDialog);
-    if (dialog > 0x10000) {
-        float progress = 0.f;
-        if (RobRunMemory::ReadBytesFresh(
-                dialog + rr::ProlongedInteractionDialogModel::Progress, &progress, sizeof(progress)) &&
-            std::isfinite(progress) && progress > 0.005f && progress < 0.995f) {
-            const float done = 1.0f;
-            TargetProcess.Write(
-                dialog + rr::ProlongedInteractionDialogModel::Progress, done);
-        }
-    }
-
-    // 3. Local BattleCharacterModel.ProlongedInteractionModel (+0x340):
-    //    _endTs (+0x18) is TimestampData : LongData : BasePrimitiveData<long>
-    //    with int64 _value at +0x18. PredictFinishProlongedInteractionSystem
-    //    completes when now >= EndTs, so collapse any active future EndTs to 1.
-    if (snap->localCharacter > 0x10000) {
-        const std::uintptr_t piModel = RobRunMemory::ReadPtr(
-            snap->localCharacter + rr::BattleCharacterModel::ProlongedInteraction);
-        if (piModel > 0x10000) {
-            const std::uintptr_t endTsData = RobRunMemory::ReadPtr(
-                piModel + rr::ProlongedInteractionModel::EndTs);
-            if (endTsData > 0x10000) {
-                std::int64_t endTsVal = 0;
-                if (RobRunMemory::ReadBytesFresh(
-                        endTsData + rr::ProlongedInteractionModel::DataValue,
-                        &endTsVal, sizeof(endTsVal)) &&
-                    endTsVal > 1) {
-                    const std::int64_t immediate = 1;
-                    TargetProcess.Write(
-                        endTsData + rr::ProlongedInteractionModel::DataValue, immediate);
-                }
-            }
-        }
-    }
-
-    // 4. Patch InventoryRevealViewDescriptions so container slots reveal instantly
-    //    without scan/shine/icon animation delays.
-    //    Chain (from dump.cs):
-    //      BattleEntitiesUpdater (+0x68) -> BattleScreenContent (+0x540)
-    //      -> InventoryRevealViewDescriptions:
-    //           +0x58 TimeToOneCellBorder (float)
-    //           +0x18 List<Pair> _list -> Pair[i] (stride 0x18) -> +0x10 RevealViewDescription*
-    //               +0x40 ShineSettings.Duration (float)
-    //               +0x68 IconRevealSettings.Duration (float)
-    {
-        const std::uint64_t now = GetTickCount64();
-        if (s_revealPatched && (now - s_revealStamp) < 3000) return;
-        if (!s_revealPatched && (now - s_revealStamp) < 500) return;
-        s_revealStamp = now;
-
-        if (s_revealDescs <= 0x10000 && snap->battleEntitiesUpdater > 0x10000) {
-            const std::uintptr_t screenContent = RobRunMemory::ReadPtr(
-                snap->battleEntitiesUpdater + rr::BattleEntitiesUpdater::_battleScreenContent);
-            if (screenContent > 0x10000) {
-                const std::uintptr_t candidate = RobRunMemory::ReadPtr(
-                    screenContent + rr::BattleScreenContent::RevealViewDescriptions);
-                if (candidate > 0x10000 &&
-                    Il2Cpp::IsClass(candidate, "InventoryRevealViewDescriptions")) {
-                    s_revealDescs = candidate;
-                }
-            }
-        }
-        if (s_revealDescs <= 0x10000) return;
-
-        namespace rv = rr::InventoryRevealViewDescriptions;
-        const std::uintptr_t list = RobRunMemory::ReadPtr(s_revealDescs + rv::List);
-        if (list <= 0x10000) { s_revealDescs = 0; s_revealPatched = false; return; }
-        const std::uintptr_t items = RobRunMemory::ReadPtr(list + rr::List::items);
-        const int count = RobRunMemory::ReadInt32(list + rr::List::count);
-        if (items <= 0x10000 || count <= 0 || count > 64) {
-            s_revealDescs = 0;
-            s_revealPatched = false;
-            return;
-        }
-
-        if (!s_revealPatched) {
-            float origScan = 0.f;
-            if (RobRunMemory::ReadBytesFresh(
-                    s_revealDescs + rv::TimeToOneCellBorder, &origScan, sizeof(origScan)) &&
-                std::isfinite(origScan) && origScan > 0.001f) {
-                s_savedScanTime = origScan;
-            }
-            s_savedDescs.clear();
-        }
-
-        const float nearZero = 0.0001f;
-        const float zero = 0.0f;
-        TargetProcess.Write(s_revealDescs + rv::TimeToOneCellBorder, nearZero);
-
-        int patchedCount = 0;
-        for (int i = 0; i < count; ++i) {
-            const std::uintptr_t pair = items + rr::Array::vector + static_cast<std::uintptr_t>(i) * rv::Stride;
+    const std::uintptr_t list = RobRunMemory::ReadPtr(revealDescs + rv::List);
+    const std::uintptr_t items = RobRunMemory::ReadPtr(list + rr::List::items);
+    const std::int32_t count = RobRunMemory::ReadInt32(list + rr::List::count);
+    if (items > 0x10000 && count > 0 && count <= 64) {
+        for (std::int32_t i = 0; i < count; ++i) {
+            const std::uintptr_t pair = items + rr::Array::vector +
+                static_cast<std::uintptr_t>(i) * rv::Stride;
             const std::uintptr_t desc = RobRunMemory::ReadPtr(pair + rv::PairDesc);
             if (desc <= 0x10000) continue;
 
-            if (!s_revealPatched) {
-                SavedRevealDesc saved{};
-                saved.desc = desc;
-                RobRunMemory::ReadBytesFresh(desc + rv::ShineView + rv::ShineDuration,
-                    &saved.shineDur, sizeof(saved.shineDur));
-                RobRunMemory::ReadBytesFresh(desc + rv::IconView + rv::IconDuration,
-                    &saved.iconDur, sizeof(saved.iconDur));
-                s_savedDescs.push_back(saved);
+            const std::uintptr_t shineAddr = desc + rv::ShineView + rv::ShineDuration;
+            float shineOrig = 0.f;
+            if (RobRunMemory::ReadBytesFresh(shineAddr, &shineOrig, sizeof(shineOrig)) &&
+                IsReasonableDuration(shineOrig)) {
+                toPatch.push_back({ shineAddr, shineOrig });
             }
 
-            TargetProcess.Write(desc + rv::ShineView + rv::ShineDuration, zero);
-            TargetProcess.Write(desc + rv::IconView + rv::IconDuration, zero);
-            ++patchedCount;
-        }
-
-        if (!s_revealPatched && patchedCount > 0) {
-            s_revealPatched = true;
-            std::printf("[InstantLoot] Patched InventoryRevealViewDescriptions @ 0x%llX (%d rarities, origScan=%.3fs)\n",
-                static_cast<unsigned long long>(s_revealDescs), patchedCount, s_savedScanTime);
+            const std::uintptr_t iconAddr = desc + rv::IconView + rv::IconDuration;
+            float iconOrig = 0.f;
+            if (RobRunMemory::ReadBytesFresh(iconAddr, &iconOrig, sizeof(iconOrig)) &&
+                IsReasonableDuration(iconOrig)) {
+                toPatch.push_back({ iconAddr, iconOrig });
+            }
         }
     }
+
+    if (toPatch.empty()) return;
+
+    const float fast = kFastRevealDurationSec;
+    for (const auto& entry : toPatch) {
+        TargetProcess.Write(entry.addr, fast);
+    }
+
+    g_instantLoot.revealDescs = revealDescs;
+    g_instantLoot.savedFields = std::move(toPatch);
+    g_instantLoot.patched = true;
+}
+
+} // namespace
+
+static void TickInstantLoot()
+{
+    const auto snap = RobRunReader::GetSnapshot();
+    if (!snap || snap->battleModel <= 0x10000 || snap->battleEntitiesUpdater <= 0x10000) {
+        // Not in a match / menu / process exited: drop cached pointers without
+        // writing to potentially unloaded memory.
+        g_instantLoot = {};
+        return;
+    }
+
+    const std::uintptr_t bm = snap->battleModel;
+    if (snap->sessionGeneration != g_instantLoot.sessionGen ||
+        bm != g_instantLoot.battleModel) {
+        // Match or map switched: drop stale references cleanly.
+        g_instantLoot = {};
+        g_instantLoot.sessionGen = snap->sessionGeneration;
+        g_instantLoot.battleModel = bm;
+    }
+
+    if (!ConfigInstance.World.InstantLoot) {
+        RestoreInstantLoot();
+        return;
+    }
+
+    // Throttle validation/re-check to avoid unnecessary DMA traffic.
+    // InventoryRevealViewDescriptions is used exclusively by container/crate/
+    // car/body loot reveal (never alarm hacks, doors, driving, or other timed
+    // actions). Keeping it patched while in-match ensures frame 0 of opening
+    // any container already sees 5 ms so even the first item reveals instantly.
+    const std::uint64_t nowMs = GetTickCount64();
+    if (g_instantLoot.patched) {
+        if (nowMs - g_instantLoot.lastCheckMs < 2000) return;
+        g_instantLoot.lastCheckMs = nowMs;
+        if (!Il2Cpp::IsClass(g_instantLoot.revealDescs, "InventoryRevealViewDescriptions")) {
+            g_instantLoot.revealDescs = 0;
+            g_instantLoot.savedFields.clear();
+            g_instantLoot.patched = false;
+        }
+        return;
+    }
+
+    if (nowMs - g_instantLoot.lastCheckMs < 250) return;
+    g_instantLoot.lastCheckMs = nowMs;
+
+    const std::uintptr_t screenContent = RobRunMemory::ReadPtr(
+        snap->battleEntitiesUpdater + rr::BattleEntitiesUpdater::_battleScreenContent);
+    if (screenContent <= 0x10000) return;
+
+    const std::uintptr_t revealDescs = RobRunMemory::ReadPtr(
+        screenContent + rr::BattleScreenContent::RevealViewDescriptions);
+    if (revealDescs > 0x10000)
+        PatchRevealDescriptions(revealDescs);
 }
 
 static void TickInstantUnlock()
@@ -1327,6 +1301,7 @@ void StopAimWorker()
 {
     std::lock_guard<std::mutex> lock(g_workerLifecycleMutex);
     StopAimWorkerLocked();
+    RestoreInstantLoot();
     FovChanger::Restore();
 }
 
