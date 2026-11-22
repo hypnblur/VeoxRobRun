@@ -1039,7 +1039,7 @@ void DrawVisuals()
 			ToggleRow("Money & Value HUD", &ConfigInstance.Player.ExpMoneyHud);
 			ToggleRow("Battle Mode", &ConfigInstance.Overlay.BattleMode);
 			ComboRow("Battle Mode Key", &ConfigInstance.Overlay.BattleModeKey, Aim::KeyNames(), Aim::KeyCount());
-			if (ConfigInstance.Overlay.BattleModeKey == Aim::KeyCount() - 1)
+			if (Aim::IsAlwaysKey(ConfigInstance.Overlay.BattleModeKey))
 				Note("Choose a specific key to toggle battle mode.");
 			Note("When Battle Mode is on, only player ESP is shown.");
 			EndCard();
@@ -2166,23 +2166,33 @@ void DrawAim()
 	static const int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
 	static const char* baudLabels[] = { "115200", "921600", "1500000", "2000000", "3000000", "4000000" };
 
-	// Four rows of two cards, paired by natural height so no card is left with
-	// a large empty area under its controls.
+	static int selectedWeaponProfile = 0;
+
+	// Five paired rows + Live State card, paired by natural height so no card
+	// is left with a large empty area under its controls.
 	if (!g_singleColumn)
 	{
 		const float r1 = ImMax(CardNaturalHeight("AIMBOT"), CardNaturalHeight("MEMORY AIM"));
 		const float r2 = ImMax(CardNaturalHeight("AIM TUNING"), CardNaturalHeight("AIM VISUALS"));
-		const float r3 = ImMax(CardNaturalHeight("WEAPON"), CardNaturalHeight("DEVICE"));
-		const float r4 = ImMax(CardNaturalHeight("PREDICTION"), CardNaturalHeight("LIVE STATE"));
+		const float r3 = ImMax(CardNaturalHeight("TRIGGERBOT"), CardNaturalHeight("WEAPON PROFILES"));
+		const float r4 = ImMax(CardNaturalHeight("CONTROLLER & INPUT"), CardNaturalHeight("DEVICE"));
+		const float r5 = ImMax(CardNaturalHeight("WEAPON"), CardNaturalHeight("PREDICTION"));
 		ForceCardHeight("AIMBOT", r1);
 		ForceCardHeight("MEMORY AIM", r1);
 		ForceCardHeight("AIM TUNING", r2);
 		ForceCardHeight("AIM VISUALS", r2);
-		ForceCardHeight("WEAPON", r3);
-		ForceCardHeight("DEVICE", r3);
-		ForceCardHeight("PREDICTION", r4);
-		ForceCardHeight("LIVE STATE", r4);
+		ForceCardHeight("TRIGGERBOT", r3);
+		ForceCardHeight("WEAPON PROFILES", r3);
+		ForceCardHeight("CONTROLLER & INPUT", r4);
+		ForceCardHeight("DEVICE", r4);
+		ForceCardHeight("WEAPON", r5);
+		ForceCardHeight("PREDICTION", r5);
 	}
+
+	static const char* kBones[] = { "Head", "Neck", "Chest", "Pelvis", "Closest" };
+	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier" };
+	static const char* kTriggerBones[] = { "Head", "Neck", "Chest", "Pelvis", "Any / Closest" };
+	static const char* kControllerSlots[] = { "Auto (0-3)", "Pad 1", "Pad 2", "Pad 3", "Pad 4" };
 
 	ImGui::BeginGroup();
 	{
@@ -2193,23 +2203,70 @@ void DrawAim()
 		ComboRow("Aim Type", &ConfigInstance.Aim.AimType, aimTypes, IM_ARRAYSIZE(aimTypes),
 			150.f, ConfigInstance.Aim.AimType == 0);
 
-		static const char* bones[] = { "Head", "Neck", "Chest", "Pelvis" };
-		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, bones, IM_ARRAYSIZE(bones));
+		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, kBones, IM_ARRAYSIZE(kBones));
 
 		static const char* priorities[] = { "Crosshair FOV", "3D Distance", "Lowest Health" };
 		ComboRow("Target Priority", &ConfigInstance.Aim.TargetPriority, priorities, IM_ARRAYSIZE(priorities));
 
-		ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
+		if (ConfigInstance.Aim.TargetBone != 4)
+			ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
 
 		ComboRow("Aim Key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(), Aim::KeyCount());
 		EndCard();
 
 		BeginCard("AIM TUNING", kCardW);
 		SliderIntRow("FOV", &ConfigInstance.Aim.Fov, 5, 180, " deg");
+		ComboRow("Smoothing Curve", &ConfigInstance.Aim.SmoothAlgorithm, kSmoothAlgos, IM_ARRAYSIZE(kSmoothAlgos));
 		SliderIntRow("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
+		if (ConfigInstance.Aim.SmoothAlgorithm == 2)
+			SliderFloatRow("Bezier Arc", &ConfigInstance.Aim.BezierBend, 0.0f, 1.0f);
+		if (ConfigInstance.Aim.SmoothAlgorithm == 1 || ConfigInstance.Aim.SmoothAlgorithm == 2)
+			SliderFloatRow("Curve Speed", &ConfigInstance.Aim.BezierSpeed, 0.25f, 3.0f, "x");
 		if (ConfigInstance.Aim.AimType == 1)
 			SliderFloatRow("Hardware Strength", &ConfigInstance.Aim.HardwareGain, 0.25f, 5.f, "x");
 		SliderIntRow("Max Distance", &ConfigInstance.Aim.MaxDistance, 10, 1000, "m");
+		EndCard();
+
+		BeginCard("TRIGGERBOT", kCardW);
+		ToggleRow("Enable Triggerbot", &ConfigInstance.Aim.TriggerEnabled);
+		ComboRow("Trigger Key", &ConfigInstance.Aim.TriggerKey, Aim::KeyNames(), Aim::KeyCount());
+		ComboRow("Trigger Bone", &ConfigInstance.Aim.TriggerBone, kTriggerBones, IM_ARRAYSIZE(kTriggerBones));
+		if (SliderIntRow("Min Delay", &ConfigInstance.Aim.TriggerMinDelayMs, 0, 500, " ms")) {
+			if (ConfigInstance.Aim.TriggerMaxDelayMs < ConfigInstance.Aim.TriggerMinDelayMs)
+				ConfigInstance.Aim.TriggerMaxDelayMs = ConfigInstance.Aim.TriggerMinDelayMs;
+		}
+		if (SliderIntRow("Max Delay", &ConfigInstance.Aim.TriggerMaxDelayMs, 0, 500, " ms")) {
+			if (ConfigInstance.Aim.TriggerMinDelayMs > ConfigInstance.Aim.TriggerMaxDelayMs)
+				ConfigInstance.Aim.TriggerMinDelayMs = ConfigInstance.Aim.TriggerMaxDelayMs;
+		}
+		SliderIntRow("Burst Hold", &ConfigInstance.Aim.TriggerBurstMs, 10, 250, " ms");
+		SliderIntRow("Shot Cooldown", &ConfigInstance.Aim.TriggerCooldownMs, 0, 500, " ms");
+		SliderFloatRow("Hitbox Scale", &ConfigInstance.Aim.TriggerHitboxScale, 0.25f, 2.0f, "x");
+		SliderIntRow("Max Range", &ConfigInstance.Aim.TriggerMaxDistance, 5, 500, "m");
+		ToggleRow("Visible Only", &ConfigInstance.Aim.TriggerVisibleOnly);
+		Note("Uses connected hardware device left-click/RT when ready, or host input fallback.");
+		EndCard();
+
+		BeginCard("CONTROLLER & INPUT", kCardW);
+		ToggleRow("Enable Gamepad Input", &ConfigInstance.Aim.ControllerEnabled);
+		ComboRow("Host Pad Slot", &ConfigInstance.Aim.ControllerSlot, kControllerSlots, IM_ARRAYSIZE(kControllerSlots));
+		ToggleRow("Dual Gamepad Key", &ConfigInstance.Aim.ControllerSecondaryEnable);
+		if (ConfigInstance.Aim.ControllerSecondaryEnable)
+			ComboRow("Gamepad Aim Key", &ConfigInstance.Aim.ControllerAimKey, Aim::KeyNames(), Aim::KeyCount());
+		SliderFloatRow("Trigger Threshold", &ConfigInstance.Aim.ControllerTriggerThreshold, 0.05f, 0.95f);
+		SliderFloatRow("Stick Deadzone", &ConfigInstance.Aim.ControllerStickDeadzone, 0.0f, 0.80f);
+		ToggleRow("Require Stick Move", &ConfigInstance.Aim.ControllerRequireStick);
+		SliderFloatRow("Stick Output Scale", &ConfigInstance.Aim.ControllerStickScale, 10.f, 500.f);
+		{
+			const Aim::DebugInfo padInfo = Aim::GetDebug();
+			if (padInfo.controllerConnected) {
+				Note("Pad: %s | LT %.2f RT %.2f | RS (%.2f, %.2f)",
+					padInfo.controllerSource, padInfo.controllerLt, padInfo.controllerRt,
+					padInfo.controllerRx, padInfo.controllerRy);
+			} else {
+				Note("No gamepad detected (supports Makcu/Ferrum controller & host XInput).");
+			}
+		}
 		EndCard();
 
 		BeginCard("WEAPON", kCardW);
@@ -2221,15 +2278,25 @@ void DrawAim()
 		Note("No Recoil and No Spread zero weapon vectors over DMA. Dynamic Recoil applies pattern compensation.");
 		EndCard();
 
-		BeginCard("PREDICTION", kCardW);
-		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
-		if (ConfigInstance.Aim.Prediction)
+		BeginCard("LIVE STATE", kCardW);
 		{
-			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
-			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
+			const Aim::DebugInfo info = Aim::GetDebug();
+			const char* curveLabel = (info.smoothAlgorithm >= 0 && info.smoothAlgorithm < 3)
+				? kSmoothAlgos[info.smoothAlgorithm] : "EMA";
+			const char* clsLabel = (info.activeWeaponClass >= 0 && info.activeWeaponClass < Aim::WeaponClassCount())
+				? Aim::WeaponClassNames()[info.activeWeaponClass] : "Default";
+			Note("%s | Curve: %s | FOV: %d deg", info.reason, curveLabel, info.activeFov);
+			Note("Key %s (%s) | %s", info.held ? "held" : "up", info.keySource,
+				info.deviceReady ? "device ready" : "device idle");
+			Note("Weapon: %s (%s%s) | Trigger: %s",
+				info.activeWeaponName.empty() ? "None" : info.activeWeaponName.c_str(),
+				clsLabel, info.profileOverrideActive ? " override" : "", info.triggerState);
+			Note("Candidates %d / %d | target %d", info.candidates, info.entities, info.target);
+			if (info.writeMode)
+				Note("Write %s (%s) | yaw %.1f pitch %.1f | %.0fm",
+					info.writeOk ? "ok" : "fail", info.writeState, info.tgtYawDeg,
+					info.tgtPitchDeg, info.distance);
 		}
-		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
-		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, "ms");
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -2273,6 +2340,68 @@ void DrawAim()
 		}
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
 		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
+		EndCard();
+
+		BeginCard("WEAPON PROFILES", kCardW);
+		ToggleRow("Enable Weapon Profiles", &ConfigInstance.Aim.WeaponProfilesEnabled);
+		selectedWeaponProfile = std::clamp(selectedWeaponProfile, 0, Aim::WeaponClassCount() - 1);
+		ComboRow("Weapon Class", &selectedWeaponProfile, Aim::WeaponClassNames(), Aim::WeaponClassCount());
+		{
+			const Aim::DebugInfo wInfo = Aim::GetDebug();
+			const char* detectedCls = (wInfo.activeWeaponClass >= 0 && wInfo.activeWeaponClass < Aim::WeaponClassCount())
+				? Aim::WeaponClassNames()[wInfo.activeWeaponClass] : "None";
+			Note("Equipped: %s (Class: %s)",
+				wInfo.activeWeaponName.empty() ? "-" : wInfo.activeWeaponName.c_str(), detectedCls);
+		}
+		{
+			ImGui::PushID(selectedWeaponProfile);
+			WeaponProfile& wp = ConfigInstance.Aim.WeaponProfiles[static_cast<std::size_t>(selectedWeaponProfile)];
+			ToggleRow("Override Active", &wp.Enabled);
+			if (wp.Enabled) {
+				static const char* kProfileBones[] = { "Inherit", "Head", "Neck", "Chest", "Pelvis", "Closest" };
+				int boneUi = std::clamp(wp.TargetBone + 1, 0, 5);
+				if (ComboRow("Profile Bone", &boneUi, kProfileBones, IM_ARRAYSIZE(kProfileBones)))
+					wp.TargetBone = boneUi - 1;
+
+				static const char* kProfileCurves[] = { "Inherit", "EMA", "Linear", "Bezier" };
+				int curveUi = std::clamp(wp.SmoothAlgorithmOverride + 1, 0, 3);
+				if (ComboRow("Profile Curve", &curveUi, kProfileCurves, IM_ARRAYSIZE(kProfileCurves)))
+					wp.SmoothAlgorithmOverride = curveUi - 1;
+
+				SliderIntRow("FOV Override (0=Inh)", &wp.FovOverride, 0, 180, " deg");
+				if (wp.FovOverride > 0 && wp.FovOverride < 5) wp.FovOverride = 5;
+				SliderIntRow("Smooth (0=Inh)", &wp.SmoothnessOverride, 0, 100);
+
+				SectionLabel("PROFILE TRIGGER");
+				ToggleRow("Allow Trigger", &wp.TriggerEnabled);
+
+				std::vector<const char*> trigKeyItems;
+				trigKeyItems.reserve(static_cast<std::size_t>(Aim::KeyCount()) + 1);
+				trigKeyItems.push_back("Inherit");
+				const char* const* baseKeys = Aim::KeyNames();
+				for (int i = 0; i < Aim::KeyCount(); ++i)
+					trigKeyItems.push_back(baseKeys[i]);
+				int trigKeyUi = std::clamp(wp.TriggerKeyOverride + 1, 0, Aim::KeyCount());
+				if (ComboRow("Trigger Key", &trigKeyUi, trigKeyItems.data(), static_cast<int>(trigKeyItems.size())))
+					wp.TriggerKeyOverride = trigKeyUi - 1;
+
+				if (SliderIntRow("Min Delay (-1=Inh)", &wp.TriggerMinDelayMs, -1, 500, " ms")) {
+					if (wp.TriggerMaxDelayMs >= 0 && wp.TriggerMinDelayMs >= 0 &&
+						wp.TriggerMaxDelayMs < wp.TriggerMinDelayMs)
+						wp.TriggerMaxDelayMs = wp.TriggerMinDelayMs;
+				}
+				if (SliderIntRow("Max Delay (-1=Inh)", &wp.TriggerMaxDelayMs, -1, 500, " ms")) {
+					if (wp.TriggerMinDelayMs >= 0 && wp.TriggerMaxDelayMs >= 0 &&
+						wp.TriggerMinDelayMs > wp.TriggerMaxDelayMs)
+						wp.TriggerMinDelayMs = wp.TriggerMaxDelayMs;
+				}
+				SliderFloatRow("Hitbox (0=Inh)", &wp.TriggerHitboxScale, 0.f, 2.0f, "x");
+				SliderIntRow("Range (0=Inh)", &wp.TriggerMaxDistance, 0, 500, "m");
+				if (ButtonRow("", "Reset Profile", 130.f))
+					wp = WeaponProfile{};
+			}
+			ImGui::PopID();
+		}
 		EndCard();
 
 		BeginCard("DEVICE", kCardW);
@@ -2371,18 +2500,15 @@ void DrawAim()
 		if (status.retryInMs > 0) Note("Retrying in %u ms", status.retryInMs);
 		EndCard();
 
-		BeginCard("LIVE STATE", kCardW);
+		BeginCard("PREDICTION", kCardW);
+		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
+		if (ConfigInstance.Aim.Prediction)
 		{
-			const Aim::DebugInfo info = Aim::GetDebug();
-			Note("%s", info.reason);
-			Note("Key %s (%s) | %s", info.held ? "held" : "up", info.keySource,
-				info.deviceReady ? "device ready" : "device idle");
-			Note("Candidates %d / %d | target %d", info.candidates, info.entities, info.target);
-			if (info.writeMode)
-				Note("Write %s (%s) | yaw %.1f pitch %.1f | %.0fm",
-					info.writeOk ? "ok" : "fail", info.writeState, info.tgtYawDeg,
-					info.tgtPitchDeg, info.distance);
+			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
+			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
 		}
+		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
+		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, "ms");
 		EndCard();
 	}
 	ImGui::EndGroup();
