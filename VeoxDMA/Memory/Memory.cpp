@@ -61,8 +61,8 @@ void Memory::ResetProcess()
 		current_process = CurrentProcessInformation{};
 		Modules.clear();
 	}
-	RefreshAllCaches();
-	RefreshProcessesFast();
+	if (this->vHandle)
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_ALL, 1);
 }
 
 bool Memory::DumpMemoryMap(bool debug)
@@ -980,8 +980,12 @@ void Memory::RefreshAllCaches() const
 
 void Memory::RefreshProcessesFast() const
 {
+	// Under -norefresh, FREQ_FAST/FREQ_MEDIUM alone can re-parse stale cached
+	// kernel process-list pages unless MEM + TLB caches are flushed too.
+	// REFRESH_ALL flushes memory, TLB, and process lists together. Only called
+	// during attach/reattach or when the reader has no live updating entities.
 	if (this->vHandle)
-		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_FREQ_FAST, 1);
+		VMMDLL_ConfigSet(this->vHandle, VMMDLL_OPT_REFRESH_ALL, 1);
 }
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()

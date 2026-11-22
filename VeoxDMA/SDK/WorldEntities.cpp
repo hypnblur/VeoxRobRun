@@ -20,9 +20,12 @@ inline constexpr bool kReadInventories = false;
 
 namespace RobRunWorld {
 
+namespace { void ResetLiveItemCache(); }
+
 void Init(std::uintptr_t gameAssemblyBase)
 {
     Il2Cpp::Init(gameAssemblyBase);
+    ResetLiveItemCache();
 }
 
 static bool IsPaintingId(std::string_view id)
@@ -299,6 +302,12 @@ struct LiveItemInfo {
 
 static std::unordered_map<std::string, LiveItemInfo> g_liveItems;
 static std::uint64_t g_livePricesLastTryMs = 0;
+
+void ResetLiveItemCache()
+{
+    g_liveItems.clear();
+    g_livePricesLastTryMs = 0;
+}
 
 void EnsureLiveItemPrices()
 {
