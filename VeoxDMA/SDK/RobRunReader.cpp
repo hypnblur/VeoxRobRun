@@ -5479,17 +5479,10 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
 
     const NativeCameraSnapshot native = LoadNativeCamera();
     if (native.valid) {
-        // Keep the rendered camera's view and vertical FOV, but rebuild the
-        // horizontal scale for the overlay surface. When the overlay and
-        // the game render target share an aspect (borderless fullscreen)
-        // this is bit-for-bit the matrix the game used.
-        Matrix4x4 projection = native.projection;
-        const float aspect =
-            static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
-        const float yScale = projection.matrix[1][1];
-        if (std::isfinite(yScale) && yScale > 0.01f && aspect > 0.01f)
-            projection.matrix[0][0] = yScale / aspect;
-        Matrix4x4 combined = native.view * projection;
+        // Use the game camera's actual projection matrix untouched so NDC [-1, +1]
+        // maps linearly to the full overlay surface on BOTH native aspect ratios
+        // AND stretched resolutions (e.g. 2560x1440 stretched onto a 3440x1440 display).
+        Matrix4x4 combined = native.view * native.projection;
         bool valid = true;
         for (int r = 0; r < 4; ++r) {
             for (int c = 0; c < 4; ++c) {
@@ -5506,19 +5499,30 @@ bool GetViewProjection(Matrix4x4& out, int screenWidth, int screenHeight)
         }
     }
 
+    const auto snapshot = GetSnapshot();
     RobRunCamera::CameraState camera;
     {
         std::lock_guard<std::mutex> lock(g_freshCameraMutex);
         camera = g_freshCamera;
     }
     if (!camera.valid) {
-        const auto snapshot = GetSnapshot();
         if (!snapshot) return false;
         camera = snapshot->camera;
     }
     if (!camera.valid) return false;
 
-    const float aspect = static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
+    // Prefer the game's actual UI/render aspect ratio (e.g. 2560x1440 -> 1.778)
+    // over the overlay display aspect (e.g. 3440x1440 -> 2.389) so stretched
+    // resolutions stay horizontally aligned when using the managed camera path.
+    float aspect = static_cast<float>(screenWidth) / static_cast<float>(screenHeight);
+    if (snapshot && snapshot->inGameMap.valid) {
+        const auto& mv = snapshot->inGameMap.minimap;
+        if (mv.rectValid && mv.uiScreenW > 100.f && mv.uiScreenH > 100.f) {
+            const float gameAspect = mv.uiScreenW / mv.uiScreenH;
+            if (std::isfinite(gameAspect) && gameAspect >= 1.0f && gameAspect <= 4.0f)
+                aspect = gameAspect;
+        }
+    }
     return RobRunCamera::BuildViewProjection(camera, aspect, out);
 }
 
