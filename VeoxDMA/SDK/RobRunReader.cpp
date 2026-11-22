@@ -145,23 +145,36 @@ static bool MaybeRefreshDmaCaches(const char* reason, std::uint64_t cooldownMs)
 
 static void ClearEntityCaches();
 
-// Periodically verify that ROB RUN.exe is still alive with the same PID when
-// root pointers are missing. If the user restarted the game without restarting
-// VeoxDMA, this triggers a clean re-attach automatically.
+// Periodically verify that ROB RUN.exe is still alive with the same PID,
+// independent of whether cached root pointers are non-zero. Under MemProcFS
+// -norefresh, freed physical pages can remain readable via stale page tables
+// after the game exits/restarts, so root pointers may stay non-zero even when
+// the old process is gone.
 static std::uintptr_t ReadPtrFresh(std::uintptr_t address)
 {
     std::uintptr_t value = 0;
     return RobRunMemory::ReadBytesFresh(address, &value, sizeof(value)) ? value : 0;
 }
 
-static bool CheckGameProcessAlive()
+static std::uint64_t g_lastPidCheckMs = 0;
+static std::uint64_t g_lastLiveChangeMs = 0;
+static std::uint64_t g_lastLiveHash = 0;
+static std::atomic<bool> g_reattachSignaled{ false };
+
+static void ResetProcessWatchdog()
 {
-    static std::uint64_t s_lastCheckMs = 0;
-    static std::atomic<bool> s_reattachSignaled{ false };
+    g_lastPidCheckMs = 0;
+    g_lastLiveChangeMs = 0;
+    g_lastLiveHash = 0;
+    g_reattachSignaled.store(false, std::memory_order_release);
+}
+
+static bool CheckGameProcessAlive(bool force = false)
+{
     const std::uint64_t now = GetTickCount64();
-    if (s_lastCheckMs != 0 && now >= s_lastCheckMs && (now - s_lastCheckMs) < 2000)
+    if (!force && g_lastPidCheckMs != 0 && now >= g_lastPidCheckMs && (now - g_lastPidCheckMs) < 3000)
         return true;
-    s_lastCheckMs = now;
+    g_lastPidCheckMs = now;
 
     const int attachedPid = TargetProcess.GetPID();
     if (attachedPid <= 0)
@@ -170,8 +183,10 @@ static bool CheckGameProcessAlive()
     TargetProcess.RefreshProcessesFast();
     const DWORD livePid = TargetProcess.GetPidFromName("ROB RUN.exe");
     if (livePid == 0 || static_cast<int>(livePid) != attachedPid) {
-        if (!s_reattachSignaled.exchange(true, std::memory_order_acq_rel)) {
+        if (!g_reattachSignaled.exchange(true, std::memory_order_acq_rel)) {
             DLOG("ProcessWatchdog: ROB RUN.exe PID changed (%d -> %lu), requesting re-attach",
+                 attachedPid, static_cast<unsigned long>(livePid));
+            VeoxDiag("watchdog: ROB RUN.exe pid %d -> %lu, auto re-attaching",
                  attachedPid, static_cast<unsigned long>(livePid));
             std::printf("[Reader] ROB RUN.exe restarted/closed (pid %d -> %lu) — auto re-attaching...\n",
                 attachedPid, static_cast<unsigned long>(livePid));
@@ -179,7 +194,7 @@ static bool CheckGameProcessAlive()
         }
         return false;
     }
-    s_reattachSignaled.store(false, std::memory_order_release);
+    g_reattachSignaled.store(false, std::memory_order_release);
     return true;
 }
 
@@ -962,6 +977,8 @@ void Shutdown()
         g_freshCamera = RobRunCamera::CameraState{};
     }
     PublishNativeCamera(NativeCameraSnapshot{});
+    ClearEntityCaches();
+    ResetProcessWatchdog();
     gaBase = 0;
     upBase = 0;
 }
@@ -970,6 +987,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
 {
     DLOG("RobRunReader::Init(ga=0x%llx, up=0x%llx)", (unsigned long long)gameAssemblyBase, (unsigned long long)unityPlayerBase);
     Shutdown();
+    ClearEntityCaches();
+    ResetProcessWatchdog();
     DLOG("RobRunReader::Init: Shutdown done");
 
     gaBase = gameAssemblyBase;
@@ -3134,7 +3153,7 @@ static void UpdateInternal()
                     std::printf("[Reader] Sustained GOM failure (%d attempts) — flushing DMA caches & retrying CR3 fix...\n",
                         gameResolveFails);
                     gameResolveFails = 0;
-                    if (!CheckGameProcessAlive())
+                    if (!CheckGameProcessAlive(true))
                         return;
                     MaybeRefreshDmaCaches("gomResolveFail", 2000);
                     TargetProcess.FixCr3();
@@ -5204,6 +5223,47 @@ static void UpdateInternal()
             HideDefaultCrosshair(cachedGame);
         else
             RestoreDefaultCrosshair();
+    }
+
+    // Detect a dead/restarted game even if cached root pointers stayed non-zero
+    // under -norefresh, WITHOUT calling RefreshProcessesFast() during active
+    // gameplay (VMMDLL_OPT_REFRESH_FREQ_FAST stalls the DMA bus and causes
+    // visible render/camera stutters).
+    {
+        const std::uint64_t nowMs = GetTickCount64();
+        if (entities.empty()) {
+            CheckGameProcessAlive();
+        } else {
+            auto mixU32 = [](std::uint64_t h, std::uint32_t v) -> std::uint64_t {
+                return (h ^ v) * 1099511628211ULL;
+            };
+            auto fbits = [](float f) -> std::uint32_t {
+                std::uint32_t u = 0;
+                std::memcpy(&u, &f, sizeof(u));
+                return u;
+            };
+            std::uint64_t h = 14695981039346656037ULL;
+            h = mixU32(h, static_cast<std::uint32_t>(entities.size()));
+            h = mixU32(h, fbits(cameraState.position.x));
+            h = mixU32(h, fbits(cameraState.position.y));
+            h = mixU32(h, fbits(cameraState.position.z));
+            h = mixU32(h, fbits(cameraState.forward.x));
+            h = mixU32(h, fbits(cameraState.forward.y));
+            h = mixU32(h, fbits(cameraState.forward.z));
+            for (const auto& e : entities) {
+                h = mixU32(h, fbits(e.position.x));
+                h = mixU32(h, fbits(e.position.y));
+                h = mixU32(h, fbits(e.position.z));
+            }
+            if (h != g_lastLiveHash || g_lastLiveChangeMs == 0) {
+                g_lastLiveHash = h;
+                g_lastLiveChangeMs = nowMs;
+            } else if (nowMs >= g_lastLiveChangeMs && (nowMs - g_lastLiveChangeMs) >= 5000) {
+                // Camera and all entity positions have been bit-for-bit frozen
+                // for 5s+: verify the game process is still alive.
+                CheckGameProcessAlive();
+            }
+        }
     }
 
     // A root change here means this pass rebuilt the scene identity. Bump the

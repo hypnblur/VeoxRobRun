@@ -170,7 +170,10 @@ static bool AttachGame()
 	size_t unityBase = TargetProcess.GetBaseAddress("UnityPlayer.dll");
 	if (!gaBase || !unityBase)
 	{
-		SetAttachStatus("Failed to find game modules.");
+		SetAttachStatus("Waiting for game modules...");
+		// Reset process state so the next retry refreshes MemProcFS process
+		// and module lists instead of short-circuiting on PROCESS_INITIALIZED.
+		TargetProcess.ResetProcess();
 		return false;
 	}
 

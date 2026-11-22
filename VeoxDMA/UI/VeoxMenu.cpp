@@ -25,6 +25,7 @@ static std::wstring PickConfigPath(bool save)
 #include "ConfigFile.h"
 #include "RobRunReader.h"
 #include "RobRunMemory.h"
+#include "Memory.h"
 #include "Il2Cpp.h"
 #include "SkinChanger.h"
 #include "DeviceSession.h"
@@ -3306,14 +3307,24 @@ void DrawSettings(bool attached, const std::string& statusText)
 		EndCard();
 
 		BeginCard("STATUS", kCardW);
-		Note("%s", attached ? "DMA connected" : "DMA disconnected");
-		Note("%s", statusText.c_str());
-		Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
 		{
+			const bool dmaReady = (TargetProcess.vHandle != nullptr);
+			const int gamePid = attached ? TargetProcess.GetPID() : 0;
 			const auto snapshot = RobRunReader::GetSnapshot();
-			if (snapshot)
-				Note("%zu entities | %u skeletons | %u read failures", snapshot->entities.size(),
-					snapshot->skeletonCount, snapshot->failureCount);
+			const bool hasLiveSnap = attached && snapshot && snapshot->battleEntities != 0 && !snapshot->entities.empty();
+			Note("DMA: %s", dmaReady ? "Connected" : "Offline");
+			if (attached && gamePid > 0)
+				Note("Game: Attached (PID %d)", gamePid);
+			else
+				Note("Game: %s", statusText.c_str());
+			if (hasLiveSnap)
+				Note("Match: Active (%zu entities | %u skeletons | %u failures)",
+					snapshot->entities.size(), snapshot->skeletonCount, snapshot->failureCount);
+			else if (attached)
+				Note("Match: Waiting for entities (menu / loading)");
+			else
+				Note("Match: Not attached");
+			Note("Overlay %.0f FPS", ImGui::GetIO().Framerate);
 		}
 		if (ButtonRow("", "Re-attach", 130.f, true))
 			RequestReattach();
@@ -3616,17 +3627,29 @@ void DrawSidebar(const ImVec2& pos, bool attached)
 
 	// footer status
 	const auto snapshot = RobRunReader::GetSnapshot();
+	const bool dmaReady = (TargetProcess.vHandle != nullptr);
+	const int gamePid = attached ? TargetProcess.GetPID() : 0;
+	const bool hasLiveSnap = attached && snapshot && snapshot->battleEntities != 0 && !snapshot->entities.empty();
+	const ImVec4 kAmber = ImVec4(245 / 255.f, 196 / 255.f, 68 / 255.f, 1.f);
+	const ImVec4 statusDotCol = !dmaReady ? kRed : (!attached ? kAmber : (hasLiveSnap ? kGreen : kAmber));
+	const ImVec4 statusTxtCol = !dmaReady ? kRed : (hasLiveSnap ? kTextDim : kAmber);
+	const char* statusLabel = !dmaReady ? "DMA OFFLINE"
+		: (!attached ? "WAITING FOR GAME"
+		: (hasLiveSnap ? "IN MATCH" : "ATTACHED (MENU)"));
+
 	const float footerY = pos.y + kH - footerH;
 	dl->AddLine(ImVec2(pos.x + 14.f, footerY), ImVec2(pos.x + kSide - 14.f, footerY), C(kStroke), 1.f);
 
 	const ImVec2 dot(pos.x + 20.f, footerY + 18.f);
-	dl->AddCircleFilled(dot, 4.f, C(attached ? kGreen : kRed));
+	dl->AddCircleFilled(dot, 4.f, C(statusDotCol));
 	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
-		ImVec2(pos.x + 32.f, footerY + 11.f), C(attached ? kTextDim : kRed),
-		attached ? "DMA CONNECTED" : "DMA OFFLINE");
+		ImVec2(pos.x + 32.f, footerY + 11.f), C(statusTxtCol), statusLabel);
 
 	char line[64];
-	std::snprintf(line, sizeof(line), "%.0f FPS", ImGui::GetIO().Framerate);
+	if (attached && gamePid > 0)
+		std::snprintf(line, sizeof(line), "%.0f FPS  PID %d", ImGui::GetIO().Framerate, gamePid);
+	else
+		std::snprintf(line, sizeof(line), "%.0f FPS", ImGui::GetIO().Framerate);
 	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
 		ImVec2(pos.x + 20.f, footerY + 34.f), C(kTextFaint), line);
 
