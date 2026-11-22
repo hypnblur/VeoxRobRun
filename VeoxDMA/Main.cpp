@@ -94,12 +94,46 @@ static void Diag(const char* fmt, ...)
 static void SeTranslator(unsigned int code, EXCEPTION_POINTERS* info)
 {
 	char text[512];
-	snprintf(text, sizeof(text), "FAULT code=0x%08X addr=%p stage=%s",
+	snprintf(text, sizeof(text), "FAULT code=0x%08X addr=%p stage=%s tid=%lu",
 		code,
 		(info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionAddress : nullptr,
-		g_stage.load());
+		g_stage.load(),
+		GetCurrentThreadId());
 	Diag("%s", text);
 	throw std::runtime_error(text);
+}
+
+static LONG WINAPI UnhandledCrashFilter(EXCEPTION_POINTERS* info)
+{
+	const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
+	void* addr = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionAddress : nullptr;
+	HMODULE mod = nullptr;
+	char modName[MAX_PATH] = "unknown";
+	std::uintptr_t rva = 0;
+	if (addr && GetModuleHandleExA(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		reinterpret_cast<LPCSTR>(addr), &mod) && mod)
+	{
+		GetModuleFileNameA(mod, modName, MAX_PATH);
+		rva = reinterpret_cast<std::uintptr_t>(addr) - reinterpret_cast<std::uintptr_t>(mod);
+	}
+	char text[768];
+	snprintf(text, sizeof(text),
+		"UNHANDLED CRASH!\ncode=0x%08lX\naddr=%p\nmodule=%s +0x%llX\nstage=%s\ntid=%lu",
+		code, addr, modName, (unsigned long long)rva, g_stage.load(), GetCurrentThreadId());
+	Diag("%s", text);
+	MessageBoxA(nullptr, text, "VeoxDMA - Crash Info", MB_OK | MB_ICONERROR | MB_TOPMOST);
+	return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static void TerminateHandler()
+{
+	char text[512];
+	snprintf(text, sizeof(text), "STD::TERMINATE! stage=%s tid=%lu",
+		g_stage.load(), GetCurrentThreadId());
+	Diag("%s", text);
+	MessageBoxA(nullptr, text, "VeoxDMA - Terminate Info", MB_OK | MB_ICONERROR | MB_TOPMOST);
+	ExitProcess(3);
 }
 
 static std::mutex g_statusMutex;
@@ -234,21 +268,31 @@ static void TickOverlay()
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
 
 	// Battle mode suppresses world ESP/radar/money HUD so only player ESP is
-	// shown. Toggle on the rising edge of the selected key ("Always" is not a
-	// toggle key). Ignore while the menu is open to avoid accidental toggles
-	// when changing the binding.
+	// shown. Supports Hold (0: active only while key is held) and Toggle (1:
+	// flips on rising edge). Ignore while the menu is open to avoid accidental
+	// triggers when changing the binding.
 	static bool battleKeyWasHeld = false;
 	if (!Overlay::MenuOpen()) {
 		const int key = ConfigInstance.Overlay.BattleModeKey;
-		const bool held = key >= 0 && key < Aim::KeyCount() && !Aim::IsAlwaysKey(key) && Aim::IsKeyHeld(key);
-		if (held && !battleKeyWasHeld) {
-			ConfigInstance.Overlay.BattleMode = !ConfigInstance.Overlay.BattleMode;
-			Overlay::Notify(ConfigInstance.Overlay.BattleMode
-				? "Battle Mode: ON (player ESP only)"
-				: "Battle Mode: OFF", 0xFF8CDC64u, 2.f);
+		const bool validKey = key >= 0 && key < Aim::KeyCount() && !Aim::IsAlwaysKey(key);
+		const bool held = validKey && Aim::IsKeyHeld(key);
+		if (ConfigInstance.Overlay.BattleModeBehavior == 0) {
+			// Hold mode: active strictly while BattleModeKey is held
+			if (validKey)
+				ConfigInstance.Overlay.BattleMode = held;
+		} else {
+			// Toggle mode: flip on rising edge
+			if (held && !battleKeyWasHeld) {
+				ConfigInstance.Overlay.BattleMode = !ConfigInstance.Overlay.BattleMode;
+				Overlay::Notify(ConfigInstance.Overlay.BattleMode
+					? "Battle Mode: ON (player ESP only)"
+					: "Battle Mode: OFF", 0xFF8CDC64u, 2.f);
+			}
 		}
 		battleKeyWasHeld = held;
 	} else {
+		if (ConfigInstance.Overlay.BattleModeBehavior == 0 && battleKeyWasHeld)
+			ConfigInstance.Overlay.BattleMode = false;
 		battleKeyWasHeld = false;
 	}
 
@@ -284,6 +328,8 @@ static BOOL WINAPI ConsoleCtrlHandler(DWORD ctrlType)
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 {
 	g_hInstance = hInstance;
+	SetUnhandledExceptionFilter(UnhandledCrashFilter);
+	std::set_terminate(TerminateHandler);
 	_set_se_translator(SeTranslator);
 	AllocConsole();
 	FILE* fDummy;

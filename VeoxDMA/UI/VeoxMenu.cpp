@@ -1039,8 +1039,10 @@ void DrawVisuals()
 			ToggleRow("Money & Value HUD", &ConfigInstance.Player.ExpMoneyHud);
 			ToggleRow("Battle Mode", &ConfigInstance.Overlay.BattleMode);
 			ComboRow("Battle Mode Key", &ConfigInstance.Overlay.BattleModeKey, Aim::KeyNames(), Aim::KeyCount());
+			static const char* kBattleModeActions[] = { "Hold", "Toggle" };
+			ComboRow("Battle Mode Action", &ConfigInstance.Overlay.BattleModeBehavior, kBattleModeActions, IM_ARRAYSIZE(kBattleModeActions));
 			if (Aim::IsAlwaysKey(ConfigInstance.Overlay.BattleModeKey))
-				Note("Choose a specific key to toggle battle mode.");
+				Note("Choose a specific key to activate battle mode.");
 			Note("When Battle Mode is on, only player ESP is shown.");
 			EndCard();
 		}
@@ -1299,7 +1301,13 @@ void DrawRadar()
 		ToggleRow("Vehicle Icons", &ConfigInstance.Radar.InGameMapVehicles);
 		ToggleRow("Player Names (Full Map)", &ConfigInstance.Radar.InGameMapPlayerNames);
 		ToggleRow("Dropped Bags", &ConfigInstance.Radar.InGameMapDroppedBags);
-		ToggleRow("Valuables & Cargo", &ConfigInstance.Radar.InGameMapValuables);
+		static const char* kMapRarities[] = { "All", "Uncommon+", "Rare+", "Epic+", "Legendary+", "Mythical" };
+		ToggleRow("Valuables & Loot", &ConfigInstance.Radar.InGameMapValuables);
+		if (ConfigInstance.Radar.InGameMapValuables)
+			ComboRow("Min Loot Rarity", &ConfigInstance.Radar.InGameMapMinRarity, kMapRarities, IM_ARRAYSIZE(kMapRarities));
+		ToggleRow("Cargo", &ConfigInstance.Radar.InGameMapCargo);
+		if (ConfigInstance.Radar.InGameMapCargo)
+			ComboRow("Min Cargo Rarity", &ConfigInstance.Radar.InGameMapCargoMinRarity, kMapRarities, IM_ARRAYSIZE(kMapRarities));
 		SliderFloatRow("Icon Scale", &ConfigInstance.Radar.InGameMapScale, 0.5f, 2.0f, "x");
 		if (const auto snap = RobRunReader::GetSnapshot()) {
 			if (snap->inGameMap.valid) {

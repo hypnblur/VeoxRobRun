@@ -267,12 +267,29 @@ void DrawWorldEntities()
 		}
 	}
 
+	// Find the vehicle currently occupied by the local player so we don't draw a
+	// 3D car icon/price directly on top of our own vehicle while driving.
+	int localVehicleId = -1;
+	for (const auto& pe : snapshot->entities) {
+		if (pe.entityId == snapshot->localEntityId) {
+			if (pe.inVehicle && pe.vehicleId > 0)
+				localVehicleId = pe.vehicleId;
+			break;
+		}
+	}
+
 	for (const auto& entity : snapshot->world->entities)
 	{
 		const auto& lf = ConfigInstance.LootFilter;
 		const LootFilter::ItemDef* itemDef = nullptr;
 		const ItemSettings* itemCfg = nullptr;
 
+		const bool isVehicleEntity =
+			entity.kind == RobRunWorld::Kind::Car ||
+			entity.kind == RobRunWorld::Kind::Helicopter ||
+			entity.kind == RobRunWorld::Kind::Vehicle;
+		if (isVehicleEntity && localVehicleId > 0 && entity.id == localVehicleId)
+			continue;
 
 		if (lf.Enabled) {
 			itemDef = lf.FindItemForEntity(entity.kind, entity.label);
@@ -296,9 +313,22 @@ void DrawWorldEntities()
 		if (itemDef && !itemCfg)
 			itemCfg = &lf.GetItem(itemDef->id);
 
-		const float dx = entity.position.x - localPos.x;
-		const float dy = entity.position.y - localPos.y;
-		const float dz = entity.position.z - localPos.z;
+		// Use 80-500 Hz live vehicle position from fastVehicles so moving cars
+		// and helicopters stay synced instead of lagging behind the 1 Hz world worker.
+		Vector3 entityPos = entity.position;
+		if (isVehicleEntity && !snapshot->fastVehicles.empty()) {
+			for (const auto& fv : snapshot->fastVehicles) {
+				if (fv.id == entity.id) {
+					if (std::isfinite(fv.position.x) && std::isfinite(fv.position.y) && std::isfinite(fv.position.z))
+						entityPos = fv.position;
+					break;
+				}
+			}
+		}
+
+		const float dx = entityPos.x - localPos.x;
+		const float dy = entityPos.y - localPos.y;
+		const float dz = entityPos.z - localPos.z;
 		const float distSq = dx * dx + dy * dy + dz * dz;
 		const bool hasItemRange = itemCfg && !itemCfg->useGlobalDistance && itemCfg->maxDistance > 0;
 
@@ -358,7 +388,7 @@ void DrawWorldEntities()
 
 		Vector2 screen;
 		if (!RobRunReader::ProjectWorld(
-			viewProjection, entity.position, screenW, screenH, screen))
+			viewProjection, entityPos, screenW, screenH, screen))
 			continue;
 
 		// Skip off-screen world items before allocating/measuring text or
