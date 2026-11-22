@@ -980,7 +980,12 @@ bool ColorRow(const char* label, D2D1::ColorF& colour)
 	return DrawColourPopup(popup, label, colour, swatch);
 }
 
-// Single-line inline slider: [Label]   [readout]  [====o------]
+// Inline click-to-edit state for slider numeric readouts
+static ImGuiID g_editingSliderId = 0;
+static char g_sliderEditBuf[32] = "";
+static bool g_sliderEditFocus = false;
+
+// Single-line inline slider: [Label]   [clickable readout]  [====o------]
 bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix = "",
 	const char* zeroText = nullptr)
 {
@@ -1008,6 +1013,7 @@ bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix 
 	t = ImClamp(t, 0.f, 1.f);
 	if (held)
 	{
+		if (g_editingSliderId == id) g_editingSliderId = 0;
 		const float mx = ImGui::GetIO().MousePos.x;
 		t = ImClamp((mx - tmin.x) / ImMax(trackW, 1.f), 0.f, 1.f);
 		const int nv = lo + (int)std::lround(t * (float)(hi - lo));
@@ -1028,8 +1034,69 @@ bool SliderIntRow(const char* label, int* v, int lo, int hi, const char* suffix 
 		std::snprintf(buf, sizeof(buf), "%s", zeroText);
 	else
 		std::snprintf(buf, sizeof(buf), "%d%s", *v, suffix);
-	TextRight(font::inter_medium_small, tmin.x - 10.f,
-		RowTextY(p.y, kRow, font::inter_medium_small), C(hov || held ? kText : kTextDim), buf);
+
+	const float textW = TextW(font::inter_medium_small, buf);
+	const float pillW = ImClamp(textW + 14.f, 52.f, 78.f);
+	const float padY = 3.f;
+	const float pillH = font::inter_medium_small->FontSize + padY * 2.f;
+	const ImRect valRect(
+		ImVec2(tmin.x - 8.f - pillW, std::floor(cy - pillH * 0.5f)),
+		ImVec2(tmin.x - 8.f, std::floor(cy - pillH * 0.5f) + pillH));
+
+	if (g_editingSliderId == id)
+	{
+		const ImVec2 savedCursor = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(valRect.Min);
+		ImGui::PushFont(font::inter_medium_small);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.f, padY));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, kElevated);
+		ImGui::PushStyleColor(ImGuiCol_Border, kAccent);
+		ImGui::SetNextItemWidth(pillW);
+		if (g_sliderEditFocus) {
+			ImGui::SetKeyboardFocusHere();
+			g_sliderEditFocus = false;
+		}
+		char inputId[48];
+		std::snprintf(inputId, sizeof(inputId), "##sedit_%u", (unsigned)id);
+		const bool enter = ImGui::InputText(inputId, g_sliderEditBuf, sizeof(g_sliderEditBuf),
+			ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+		const bool esc = ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape);
+		const bool commit = enter || ImGui::IsItemDeactivatedAfterEdit();
+		const bool done = commit || esc || ImGui::IsItemDeactivated();
+		ImGui::PopStyleColor(2);
+		ImGui::PopStyleVar(2);
+		ImGui::PopFont();
+		ImGui::SetCursorScreenPos(savedCursor);
+
+		if (commit && !esc) {
+			char* endp = nullptr;
+			const long parsed = std::strtol(g_sliderEditBuf, &endp, 10);
+			if (endp != g_sliderEditBuf) {
+				const int nv = ImClamp((int)parsed, lo, hi);
+				if (nv != *v) { *v = nv; changed = true; g_dirty = true; }
+				t = ImClamp((float)(*v - lo) / (float)ImMax(hi - lo, 1), 0.f, 1.f);
+			}
+		}
+		if (done) g_editingSliderId = 0;
+	}
+	else
+	{
+		const bool valHov = !held && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+			&& valRect.Contains(ImGui::GetIO().MousePos);
+		if (valHov) {
+			ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+			dl->AddRectFilled(valRect.Min, valRect.Max, C(kElevated), 4.f);
+			dl->AddRect(valRect.Min, valRect.Max, C(kAccent, 0.55f), 4.f);
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+				g_editingSliderId = id;
+				std::snprintf(g_sliderEditBuf, sizeof(g_sliderEditBuf), "%d", *v);
+				g_sliderEditFocus = true;
+			}
+		}
+		TextRight(font::inter_medium_small, valRect.Max.x - 6.f,
+			valRect.Min.y + padY, C(hov || held || valHov ? kText : kTextDim), buf);
+	}
 
 	dl->AddRectFilled(tmin, tmax, C(kTrack), 2.f);
 	dl->AddRectFilled(tmin, ImVec2(tmin.x + trackW * t, tmax.y), C(kAccent), 2.f);
@@ -1064,6 +1131,7 @@ bool SliderFloatRow(const char* label, float* v, float lo, float hi, const char*
 	float t = ImClamp((*v - lo) / ImMax(hi - lo, 0.0001f), 0.f, 1.f);
 	if (held)
 	{
+		if (g_editingSliderId == id) g_editingSliderId = 0;
 		const float mx = ImGui::GetIO().MousePos.x;
 		t = ImClamp((mx - tmin.x) / ImMax(trackW, 1.f), 0.f, 1.f);
 		const float nv = lo + t * (hi - lo);
@@ -1084,8 +1152,69 @@ bool SliderFloatRow(const char* label, float* v, float lo, float hi, const char*
 		std::snprintf(buf, sizeof(buf), "%s", zeroText);
 	else
 		std::snprintf(buf, sizeof(buf), "%.2f%s", *v, suffix);
-	TextRight(font::inter_medium_small, tmin.x - 10.f,
-		RowTextY(p.y, kRow, font::inter_medium_small), C(hov || held ? kText : kTextDim), buf);
+
+	const float textW = TextW(font::inter_medium_small, buf);
+	const float pillW = ImClamp(textW + 14.f, 52.f, 78.f);
+	const float padY = 3.f;
+	const float pillH = font::inter_medium_small->FontSize + padY * 2.f;
+	const ImRect valRect(
+		ImVec2(tmin.x - 8.f - pillW, std::floor(cy - pillH * 0.5f)),
+		ImVec2(tmin.x - 8.f, std::floor(cy - pillH * 0.5f) + pillH));
+
+	if (g_editingSliderId == id)
+	{
+		const ImVec2 savedCursor = ImGui::GetCursorScreenPos();
+		ImGui::SetCursorScreenPos(valRect.Min);
+		ImGui::PushFont(font::inter_medium_small);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.f, padY));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.f);
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, kElevated);
+		ImGui::PushStyleColor(ImGuiCol_Border, kAccent);
+		ImGui::SetNextItemWidth(pillW);
+		if (g_sliderEditFocus) {
+			ImGui::SetKeyboardFocusHere();
+			g_sliderEditFocus = false;
+		}
+		char inputId[48];
+		std::snprintf(inputId, sizeof(inputId), "##sfedit_%u", (unsigned)id);
+		const bool enter = ImGui::InputText(inputId, g_sliderEditBuf, sizeof(g_sliderEditBuf),
+			ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+		const bool esc = ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape);
+		const bool commit = enter || ImGui::IsItemDeactivatedAfterEdit();
+		const bool done = commit || esc || ImGui::IsItemDeactivated();
+		ImGui::PopStyleColor(2);
+		ImGui::PopStyleVar(2);
+		ImGui::PopFont();
+		ImGui::SetCursorScreenPos(savedCursor);
+
+		if (commit && !esc) {
+			char* endp = nullptr;
+			const float parsed = std::strtof(g_sliderEditBuf, &endp);
+			if (endp != g_sliderEditBuf && std::isfinite(parsed)) {
+				const float nv = ImClamp(parsed, lo, hi);
+				if (std::fabs(nv - *v) > 0.0001f) { *v = nv; changed = true; g_dirty = true; }
+				t = ImClamp((*v - lo) / ImMax(hi - lo, 0.0001f), 0.f, 1.f);
+			}
+		}
+		if (done) g_editingSliderId = 0;
+	}
+	else
+	{
+		const bool valHov = !held && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem)
+			&& valRect.Contains(ImGui::GetIO().MousePos);
+		if (valHov) {
+			ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+			dl->AddRectFilled(valRect.Min, valRect.Max, C(kElevated), 4.f);
+			dl->AddRect(valRect.Min, valRect.Max, C(kAccent, 0.55f), 4.f);
+			if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+				g_editingSliderId = id;
+				std::snprintf(g_sliderEditBuf, sizeof(g_sliderEditBuf), "%.2f", *v);
+				g_sliderEditFocus = true;
+			}
+		}
+		TextRight(font::inter_medium_small, valRect.Max.x - 6.f,
+			valRect.Min.y + padY, C(hov || held || valHov ? kText : kTextDim), buf);
+	}
 
 	dl->AddRectFilled(tmin, tmax, C(kTrack), 2.f);
 	dl->AddRectFilled(tmin, ImVec2(tmin.x + trackW * t, tmax.y), C(kAccent), 2.f);
