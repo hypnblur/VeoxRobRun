@@ -7,6 +7,9 @@ namespace Base::AimMotion {
 struct Vec2 { float x = 0, y = 0; };
 struct Settings {
     int smoothX = 4, smoothY = 4;
+    int smoothAlgorithm = 0; // 0 = EMA, 1 = Linear, 2 = Bezier
+    float bezierBend = 0.35f; // 0.0 .. 1.0 lateral curve arc for Bezier
+    float bezierSpeed = 1.0f; // 0.25 .. 3.0 speed multiplier for Linear / Bezier
     int pathVariation = 0, speedVariation = 0;
     int pathRandom = 0;
     float curveBend1 = 0.f, curveBend2 = 0.f;
@@ -43,6 +46,100 @@ inline Vec2 Step(Vec2 error, const Settings& s, float dt) {
     const float limit = (std::max)(0.f, s.maxCountsPerSecond) * (std::min)(dt, 0.05f);
     if (length > limit && length > 0) { out.x *= limit / length; out.y *= limit / length; }
     return out;
+}
+struct CurveState {
+    std::uint64_t target = 0;
+    int algorithm = -1;
+    float initialDist = 0.f;
+    float t = 0.f;
+    float bendSign = 1.f;
+    Vec2 normal{};
+    void Reset() { *this = {}; }
+};
+inline Vec2 StepWithCurve(CurveState& curve, std::uint64_t target, Vec2 error,
+    const Settings& s, float dt) {
+    if (s.smoothAlgorithm == 0) {
+        curve.Reset();
+        return Step(error, s, dt);
+    }
+    if (!Finite(error) || !std::isfinite(dt) || dt <= 0
+        || !std::isfinite(s.countsPerPixelX) || !std::isfinite(s.countsPerPixelY)
+        || s.countsPerPixelX <= 0 || s.countsPerPixelY <= 0) {
+        curve.Reset();
+        return {};
+    }
+    const float dist = std::hypot(error.x, error.y);
+    if (dist <= s.deadzonePixels) {
+        curve.Reset();
+        return {};
+    }
+    const float clampedDt = (std::min)(dt, 0.05f);
+    const float speedMul = std::clamp(std::isfinite(s.bezierSpeed) ? s.bezierSpeed : 1.f, 0.25f, 3.f);
+    const float smooth = float(std::clamp(s.smoothX, 1, 100));
+    const float effectiveRespMs = (s.responseMs > 0.f && std::isfinite(s.responseMs))
+        ? s.responseMs
+        : (12.f + 8.f * (1.f + ((smooth - 1.f) / 99.f) * 9.f));
+
+    if (s.smoothAlgorithm == 1) {
+        // Linear: constant pixel velocity toward the target, clamped to exact arrival.
+        // Faster responseMs produces a higher linear speed; speedMul fine-tunes pace.
+        const float pxPerSec = (14000.f / (std::max)(8.f, effectiveRespMs)) * speedMul;
+        const float stepPx = (std::min)(dist, pxPerSec * clampedDt);
+        Vec2 out{
+            (error.x / dist) * stepPx * s.countsPerPixelX,
+            (error.y / dist) * stepPx * s.countsPerPixelY
+        };
+        const float outLen = std::hypot(out.x, out.y);
+        const float limit = (std::max)(0.f, s.maxCountsPerSecond) * clampedDt;
+        if (outLen > limit && outLen > 0.f) { out.x *= limit / outLen; out.y *= limit / outLen; }
+        return out;
+    }
+
+    // Bezier (algorithm == 2): cubic Bezier ease-in-out trajectory with lateral arc.
+    if (curve.target != target || curve.algorithm != s.smoothAlgorithm ||
+        curve.initialDist <= 0.f || dist > curve.initialDist * 1.45f) {
+        curve.Reset();
+        curve.target = target;
+        curve.algorithm = s.smoothAlgorithm;
+        curve.initialDist = dist;
+        curve.t = 0.f;
+        curve.bendSign = ((target ^ (target >> 3)) & 1ull) ? 1.f : -1.f;
+        curve.normal = { -error.y / dist, error.x / dist };
+    }
+
+    // Travel duration in seconds derived from responseMs and speed multiplier.
+    const float durationSec = std::clamp((effectiveRespMs * 0.0045f) / speedMul, 0.035f, 0.90f);
+    const float prevT = curve.t;
+    curve.t = (std::min)(1.f, curve.t + clampedDt / durationSec);
+
+    auto cubicProgress = [](float u) -> float {
+        // Smooth cubic Bezier S-curve P0=0, P1=0.15, P2=0.85, P3=1 -> gentle launch & settle
+        const float inv = 1.f - u;
+        return 3.f * inv * inv * u * 0.15f + 3.f * inv * u * u * 0.85f + u * u * u;
+    };
+    const float pPrev = cubicProgress(prevT);
+    const float pCur = cubicProgress(curve.t);
+    const float remFrac = (std::max)(1e-3f, 1.f - pPrev);
+    float stepFrac = (curve.t >= 0.999f)
+        ? (std::min)(1.f, 1.f - std::exp(-clampedDt * 1000.f / (std::max)(6.f, effectiveRespMs * 0.6f)))
+        : std::clamp((pCur - pPrev) / remFrac, 0.f, 1.f);
+
+    // Cubic Bezier lateral arc: 3*(1-t)^2*t*b1 + 3*(1-t)*t^2*b2 -> peaks mid-flight, 0 at endpoints.
+    const float bend = std::clamp(std::isfinite(s.bezierBend) ? s.bezierBend : 0.35f, 0.f, 1.f);
+    const float inv = 1.f - curve.t;
+    const float arc = 3.f * inv * inv * curve.t * 1.0f + 3.f * inv * curve.t * curve.t * 0.65f;
+    float nx = -error.y / dist, ny = error.x / dist;
+    if (curve.normal.x * nx + curve.normal.y * ny < 0.f) { nx = -nx; ny = -ny; }
+    const float lateralPx = curve.bendSign * bend * 0.35f * dist * arc * (1.f - curve.t);
+
+    Vec2 stepVec{
+        (error.x * stepFrac + nx * lateralPx * stepFrac) * s.countsPerPixelX,
+        (error.y * stepFrac + ny * lateralPx * stepFrac) * s.countsPerPixelY
+    };
+    const float outLen = std::hypot(stepVec.x, stepVec.y);
+    const float limit = (std::max)(0.f, s.maxCountsPerSecond) * clampedDt;
+    if (outLen > limit && outLen > 0.f) { stepVec.x *= limit / outLen; stepVec.y *= limit / outLen; }
+    return stepVec;
 }
 inline constexpr float kPathBendScale = 0.40f;
 inline float PathDeviation(float initialError, int percent) {
@@ -206,6 +303,7 @@ struct Quantizer {
 struct Controller {
     std::uint64_t target = 0, observation = 0;
     Vec2 remaining{};
+    CurveState curve;
     Variation variation;
     Quantizer quantizer;
     void Reset() { *this = {}; }
@@ -218,7 +316,7 @@ struct Controller {
             quantizer.Reset(); return {};
         }
         return quantizer.Round(ApplyVariation(
-            variation, target, remaining, Step(remaining, settings, dt), settings));
+            variation, target, remaining, StepWithCurve(curve, target, remaining, settings, dt), settings));
     }
     void Written(Vec2 counts, const Settings& settings) {
         const auto consume = [](float error, float count, float gain) {
