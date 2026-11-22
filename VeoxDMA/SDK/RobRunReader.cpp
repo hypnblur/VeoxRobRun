@@ -2860,8 +2860,9 @@ static void ReadInGameMapState()
 static void ReadFastVehicles()
 {
     const auto& rcfg = ConfigInstance.Radar;
-    if ((!rcfg.InGameMinimap && !rcfg.InGameFullMap) || !rcfg.InGameMapVehicles ||
-        cachedBattleEntities <= 0x10000)
+    const bool wantMapVehicles = (rcfg.InGameMinimap || rcfg.InGameFullMap) && rcfg.InGameMapVehicles;
+    const bool wantWorldVehicles = ConfigInstance.World.Vehicles || ConfigInstance.LootFilter.Enabled;
+    if ((!wantMapVehicles && !wantWorldVehicles) || cachedBattleEntities <= 0x10000)
     {
         fastVehicles.clear();
         return;
