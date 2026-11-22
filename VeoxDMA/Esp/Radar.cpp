@@ -1720,6 +1720,7 @@ void DrawInGameMapOverlay()
 	// screen pixels, scaling proportionally when CanvasScaler reference size
 	// (e.g. 1920x1080) differs from the current display resolution.
 	float minX = 0.f, maxX = 0.f, minY = 0.f, maxY = 0.f;
+	float camAspect = 0.f;
 	if (var.rectValid) {
 		const float sx = (var.uiScreenW > 100.f) ? (display.x / var.uiScreenW) : 1.f;
 		const float sy = (var.uiScreenH > 100.f) ? (display.y / var.uiScreenH) : 1.f;
@@ -1727,6 +1728,13 @@ void DrawInGameMapOverlay()
 		maxX = var.uiMaxX * sx;
 		minY = display.y - var.uiMaxY * sy;
 		maxY = display.y - var.uiMinY * sy;
+		// Use the game's unstretched UI rect aspect (uiW / uiH) for the orthographic
+		// map camera so stretched resolutions (e.g. 2560x1440 -> 3440x1440) keep
+		// horizontal panning & X positions locked to the stretched map image.
+		const float uiW = var.uiMaxX - var.uiMinX;
+		const float uiH = var.uiMaxY - var.uiMinY;
+		if (uiW > 1.f && uiH > 1.f)
+			camAspect = uiW / uiH;
 	} else if (isFull) {
 		// Fallback on the first frame 'M' opens if RectTransform hasn't resolved yet:
 		// MapMeshView.Camera renders into a 1:1 square container centered on screen.
@@ -1735,6 +1743,7 @@ void DrawInGameMapOverlay()
 		maxX = minX + side;
 		minY = (display.y - side) * 0.5f;
 		maxY = minY + side;
+		camAspect = 1.f;
 	} else {
 		const float uiScale = display.y / 1080.f;
 		const float pad = 24.f * uiScale;
@@ -1743,6 +1752,7 @@ void DrawInGameMapOverlay()
 		minY = pad;
 		maxX = pad + side;
 		maxY = pad + side;
+		camAspect = 1.f;
 	}
 
 	const float rectW = maxX - minX;
@@ -1753,7 +1763,7 @@ void DrawInGameMapOverlay()
 	const float cx = (minX + maxX) * 0.5f;
 	const float cy = (minY + maxY) * 0.5f;
 	const float halfH = mapCamSize;
-	const float halfW = halfH * (rectW / rectH);
+	const float halfW = halfH * (camAspect > 0.01f ? camAspect : (rectW / rectH));
 	if (halfW <= 0.01f || halfH <= 0.01f)
 		return;
 
