@@ -8,14 +8,18 @@
 #include "Il2Cpp.h"
 #include "Memory.h"
 #include "DeviceSession.h"
+#include "CtlState.h"
 #include "InputManager.h"
 #include "Overlay.h"
 #include "imgui.h"
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <unordered_map>
 
 namespace Aim {
@@ -23,28 +27,48 @@ namespace Aim {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+constexpr int kAlwaysKeyIndex = 18;
+constexpr int kStickDeflectKey = 0x1021;
 
-// Keep in sync with the labels below. 0 means "always active".
+// Keep indices 0..18 stable so saved configs keep their bindings.
+// Gamepad keys start at index 19 using CTL_VK_* codes + kStickDeflectKey.
 const int kKeys[] = {
-    VK_RBUTTON,      // 0: Right Mouse
-    VK_LBUTTON,      // 1: Left Mouse
-    VK_LMENU,        // 2: Left Alt
-    VK_LSHIFT,       // 3: Left Shift
-    VK_XBUTTON1,     // 4: Mouse 4
-    VK_XBUTTON2,     // 5: Mouse 5
-    VK_MBUTTON,      // 6: Middle Mouse
-    VK_LCONTROL,     // 7: Left Ctrl
-    VK_CAPITAL,      // 8: Caps Lock
-    VK_SPACE,        // 9: Space
-    VK_TAB,          // 10: Tab
-    'C',             // 11: C
-    'V',             // 12: V
-    'E',             // 13: E
-    'F',             // 14: F
-    'Q',             // 15: Q
-    'X',             // 16: X
-    'Z',             // 17: Z
-    0                // 18: Always
+    VK_RBUTTON,        // 0: Right Mouse
+    VK_LBUTTON,        // 1: Left Mouse
+    VK_LMENU,          // 2: Left Alt
+    VK_LSHIFT,         // 3: Left Shift
+    VK_XBUTTON1,       // 4: Mouse 4
+    VK_XBUTTON2,       // 5: Mouse 5
+    VK_MBUTTON,        // 6: Middle Mouse
+    VK_LCONTROL,       // 7: Left Ctrl
+    VK_CAPITAL,        // 8: Caps Lock
+    VK_SPACE,          // 9: Space
+    VK_TAB,            // 10: Tab
+    'C',               // 11: C
+    'V',               // 12: V
+    'E',               // 13: E
+    'F',               // 14: F
+    'Q',               // 15: Q
+    'X',               // 16: X
+    'Z',               // 17: Z
+    0,                 // 18: Always
+    CTL_VK_LT,         // 19: Gamepad LT
+    CTL_VK_RT,         // 20: Gamepad RT
+    CTL_VK_LB,         // 21: Gamepad LB
+    CTL_VK_RB,         // 22: Gamepad RB
+    CTL_VK_L3,         // 23: Gamepad L3
+    CTL_VK_R3,         // 24: Gamepad R3
+    CTL_VK_A,          // 25: Gamepad A
+    CTL_VK_B,          // 26: Gamepad B
+    CTL_VK_X,          // 27: Gamepad X
+    CTL_VK_Y,          // 28: Gamepad Y
+    CTL_VK_DPAD_UP,    // 29: Gamepad D-Up
+    CTL_VK_DPAD_DOWN,  // 30: Gamepad D-Down
+    CTL_VK_DPAD_LEFT,  // 31: Gamepad D-Left
+    CTL_VK_DPAD_RIGHT, // 32: Gamepad D-Right
+    CTL_VK_BACK,       // 33: Gamepad Back
+    CTL_VK_START,      // 34: Gamepad Start
+    kStickDeflectKey   // 35: Gamepad Stick
 };
 const char* const kKeyNames[] = {
     "Right Mouse",
@@ -65,9 +89,38 @@ const char* const kKeyNames[] = {
     "Q",
     "X",
     "Z",
-    "Always"
+    "Always",
+    "Gamepad LT",
+    "Gamepad RT",
+    "Gamepad LB",
+    "Gamepad RB",
+    "Gamepad L3",
+    "Gamepad R3",
+    "Gamepad A",
+    "Gamepad B",
+    "Gamepad X",
+    "Gamepad Y",
+    "Gamepad D-Up",
+    "Gamepad D-Down",
+    "Gamepad D-Left",
+    "Gamepad D-Right",
+    "Gamepad Back",
+    "Gamepad Start",
+    "Gamepad Stick"
 };
 constexpr int kKeyCount = static_cast<int>(sizeof(kKeys) / sizeof(kKeys[0]));
+static_assert(sizeof(kKeys) / sizeof(kKeys[0]) == sizeof(kKeyNames) / sizeof(kKeyNames[0]),
+    "kKeys and kKeyNames must stay in sync");
+
+const char* const kWeaponClassNames[] = {
+    "Rifle",
+    "SMG",
+    "Shotgun",
+    "Pistol",
+    "DMR / Sniper"
+};
+constexpr int kWeaponClassCount = static_cast<int>(sizeof(kWeaponClassNames) / sizeof(kWeaponClassNames[0]));
+static_assert(kWeaponClassCount == AimConfig::kWeaponProfileCount, "weapon profile count mismatch");
 
 // The camera block is written as one scatter transaction. Ten milliseconds is
 // slow enough to keep the read worker fed and still fast enough that the
@@ -79,6 +132,7 @@ int g_lastTarget = -1;
 std::uint64_t g_lastTargetSwitchMs = 0;
 bool g_wasAiming = false;
 DebugInfo g_debug{};
+std::atomic<int> g_activeFov{ 40 };
 
 // Smoothing state. Reset whenever the aim key is released or the target
 // changes, so a new pick starts from its own angle instead of sweeping across
@@ -89,6 +143,9 @@ float g_curPitch = 0.f;
 float g_carryYaw = 0.f;
 float g_carryPitch = 0.f;
 int g_smoothTarget = -1;
+float g_bezierT = 0.f;
+float g_bezierBendSign = 1.f;
+Base::AimMotion::CurveState g_cursorCurve{};
 std::uint64_t g_lastWriteTick = 0;
 Vector3 g_writtenForward{};
 bool g_haveWrittenForward = false;
@@ -102,7 +159,7 @@ std::uint64_t g_lastSessionGeneration = 0;
 std::uint64_t g_writeBlockedUntil = 0;
 
 // Previous feet position per entity, used for target leading. Kept on the
-// render thread because the reader snapshot only carries one position.
+// worker thread because the reader snapshot only carries one position.
 struct MotionSample {
     Vector3 position{};
     std::uint64_t tickMs = 0;
@@ -114,13 +171,179 @@ struct AimQuat {
     float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
 };
 
-bool Held(int keyIndex, const char** source)
+// ---- Unified Gamepad Input (Hardware Device + Host XInput) ----------------
+struct HostXInputGamepad {
+    std::uint16_t wButtons;
+    std::uint8_t bLeftTrigger;
+    std::uint8_t bRightTrigger;
+    std::int16_t sThumbLX;
+    std::int16_t sThumbLY;
+    std::int16_t sThumbRX;
+    std::int16_t sThumbRY;
+};
+struct HostXInputState {
+    std::uint32_t dwPacketNumber;
+    HostXInputGamepad Gamepad;
+};
+static_assert(sizeof(HostXInputState) == 16, "XINPUT_STATE ABI mismatch");
+
+using XInputGetStateFn = DWORD(WINAPI*)(DWORD, HostXInputState*);
+
+XInputGetStateFn ResolveXInputGetState()
+{
+    static XInputGetStateFn fn = []() -> XInputGetStateFn {
+        HMODULE mod = LoadLibraryA("xinput1_4.dll");
+        if (!mod) mod = LoadLibraryA("xinput9_1_0.dll");
+        if (!mod) mod = LoadLibraryA("xinput1_3.dll");
+        if (!mod) return nullptr;
+        return reinterpret_cast<XInputGetStateFn>(GetProcAddress(mod, "XInputGetState"));
+    }();
+    return fn;
+}
+
+std::uint16_t MapXInputButtons(std::uint16_t xi)
+{
+    std::uint16_t out = 0;
+    if (xi & 0x0001u) out |= CTL_BTN_DPAD_UP;
+    if (xi & 0x0002u) out |= CTL_BTN_DPAD_DOWN;
+    if (xi & 0x0004u) out |= CTL_BTN_DPAD_LEFT;
+    if (xi & 0x0008u) out |= CTL_BTN_DPAD_RIGHT;
+    if (xi & 0x0010u) out |= CTL_BTN_START;
+    if (xi & 0x0020u) out |= CTL_BTN_BACK;
+    if (xi & 0x0040u) out |= CTL_BTN_L3;
+    if (xi & 0x0080u) out |= CTL_BTN_R3;
+    if (xi & 0x0100u) out |= CTL_BTN_LB;
+    if (xi & 0x0200u) out |= CTL_BTN_RB;
+    if (xi & 0x1000u) out |= CTL_BTN_A;
+    if (xi & 0x2000u) out |= CTL_BTN_B;
+    if (xi & 0x4000u) out |= CTL_BTN_X;
+    if (xi & 0x8000u) out |= CTL_BTN_Y;
+    return out;
+}
+
+struct GamepadState {
+    bool connected = false;
+    const char* source = "-";
+    std::uint16_t buttons = 0;
+    float lt = 0.f; // 0..1
+    float rt = 0.f; // 0..1
+    float lx = 0.f; // -1..1
+    float ly = 0.f; // -1..1
+    float rx = 0.f; // -1..1
+    float ry = 0.f; // -1..1
+};
+
+float NormAxis(std::int16_t v)
+{
+    return std::clamp(static_cast<float>(v) / 32767.f, -1.f, 1.f);
+}
+
+GamepadState PollGamepad(const AimConfig& cfg)
+{
+    GamepadState gp{};
+    if (!cfg.ControllerEnabled) return gp;
+
+    // 1. Hardware controller bridge (Makcu Controller / Ferrum Controller)
+    const auto status = Base::Hardware::Session().GetStatus();
+    if (status.state == Base::Hardware::LinkState::Ready && status.input.controllerValid) {
+        gp.connected = true;
+        gp.source = "device gamepad";
+        gp.buttons = status.input.controllerButtons;
+        gp.lt = static_cast<float>(status.input.lt) / 255.f;
+        gp.rt = static_cast<float>(status.input.rt) / 255.f;
+        gp.lx = NormAxis(status.input.lx);
+        gp.ly = NormAxis(status.input.ly);
+        gp.rx = NormAxis(status.input.rx);
+        gp.ry = NormAxis(status.input.ry);
+        return gp;
+    }
+
+    // 2. Host PC XInput controller (throttle disconnected-slot probing to 1 Hz
+    //    because XInputGetState on empty slots stalls ~0.5 ms on some Windows builds)
+    if (const auto xinputGet = ResolveXInputGetState()) {
+        static std::atomic<int> s_connectedSlot{ -1 };
+        static std::atomic<std::uint64_t> s_lastProbeMs{ 0 };
+        const int slotCfg = std::clamp(cfg.ControllerSlot, 0, 4);
+        const auto trySlot = [&](DWORD slot) -> bool {
+            HostXInputState st{};
+            if (xinputGet(slot, &st) == ERROR_SUCCESS) {
+                gp.connected = true;
+                gp.source = "host gamepad";
+                gp.buttons = MapXInputButtons(st.Gamepad.wButtons);
+                gp.lt = static_cast<float>(st.Gamepad.bLeftTrigger) / 255.f;
+                gp.rt = static_cast<float>(st.Gamepad.bRightTrigger) / 255.f;
+                gp.lx = NormAxis(st.Gamepad.sThumbLX);
+                gp.ly = NormAxis(st.Gamepad.sThumbLY);
+                gp.rx = NormAxis(st.Gamepad.sThumbRX);
+                gp.ry = NormAxis(st.Gamepad.sThumbRY);
+                return true;
+            }
+            return false;
+        };
+
+        const int cached = s_connectedSlot.load(std::memory_order_relaxed);
+        const bool cachedMatchesCfg = cached >= 0 && (slotCfg == 0 || cached == slotCfg - 1);
+        if (cachedMatchesCfg) {
+            if (trySlot(static_cast<DWORD>(cached)))
+                return gp;
+            s_connectedSlot.store(-1, std::memory_order_relaxed);
+        }
+
+        const std::uint64_t nowMs = GetTickCount64();
+        std::uint64_t prevProbe = s_lastProbeMs.load(std::memory_order_relaxed);
+        if (nowMs - prevProbe >= 1000 &&
+            s_lastProbeMs.compare_exchange_strong(prevProbe, nowMs, std::memory_order_relaxed)) {
+            const DWORD firstSlot = (slotCfg == 0) ? 0u : static_cast<DWORD>(slotCfg - 1);
+            const DWORD lastSlot = (slotCfg == 0) ? 3u : firstSlot;
+            for (DWORD slot = firstSlot; slot <= lastSlot; ++slot) {
+                if (trySlot(slot)) {
+                    s_connectedSlot.store(static_cast<int>(slot), std::memory_order_relaxed);
+                    return gp;
+                }
+            }
+        }
+    }
+    return gp;
+}
+
+bool IsGamepadKeyCode(int vk)
+{
+    return IsCtlVk(vk) || vk == kStickDeflectKey;
+}
+
+bool GamepadKeyDown(int vk, const GamepadState& gp, const AimConfig& cfg)
+{
+    if (!gp.connected) return false;
+    const float trigThresh = std::clamp(cfg.ControllerTriggerThreshold, 0.05f, 0.95f);
+    const float stickDeadzone = std::clamp(cfg.ControllerStickDeadzone, 0.0f, 0.80f);
+    if (vk == CTL_VK_LT) return gp.lt >= trigThresh;
+    if (vk == CTL_VK_RT) return gp.rt >= trigThresh;
+    if (vk == kStickDeflectKey) {
+        const float rMag = std::hypot(gp.rx, gp.ry);
+        const float lMag = std::hypot(gp.lx, gp.ly);
+        return rMag >= stickDeadzone || lMag >= stickDeadzone;
+    }
+    const std::uint32_t bit = CtlVkBit(vk);
+    return bit != 0 && (gp.buttons & static_cast<std::uint16_t>(bit)) != 0;
+}
+
+bool Held(int keyIndex, const char** source, const GamepadState* cachedGp = nullptr)
 {
     if (keyIndex < 0 || keyIndex >= kKeyCount) keyIndex = 0;
     const int vk = kKeys[keyIndex];
     if (vk == 0) {
         if (source) *source = "always";
         return true;
+    }
+
+    if (IsGamepadKeyCode(vk)) {
+        const auto& cfg = ConfigInstance.Aim;
+        const GamepadState localGp = cachedGp ? *cachedGp : PollGamepad(cfg);
+        if (GamepadKeyDown(vk, localGp, cfg)) {
+            if (source) *source = localGp.source;
+            return true;
+        }
+        return false;
     }
 
     // Poll every source and OR the results. Short-circuiting on the DMA
@@ -152,6 +375,172 @@ bool Held(int keyIndex, const char** source)
         return true;
     }
     return false;
+}
+
+// ---- Weapon Profile Resolution --------------------------------------------
+struct EffectiveSettings {
+    int targetBone = 0;
+    int fov = 40;
+    int smoothness = 6;
+    int smoothAlgorithm = 0;
+    bool triggerEnabled = false;
+    int triggerKey = 2;
+    int triggerMinDelayMs = 20;
+    int triggerMaxDelayMs = 60;
+    float triggerHitboxScale = 1.0f;
+    int triggerMaxDistance = 200;
+    int weaponClass = -1;
+    std::string weaponName;
+    bool profileOverrideActive = false;
+};
+
+std::string FindLocalWeaponName(const RobRunReader::Snapshot& snap)
+{
+    for (const auto& ent : snap.entities) {
+        if (ent.entityId == snap.localEntityId)
+            return ent.weaponNameUtf8;
+    }
+    return {};
+}
+
+EffectiveSettings ResolveEffectiveSettings(const AimConfig& cfg, const RobRunReader::Snapshot* snap)
+{
+    EffectiveSettings eff{};
+    eff.targetBone = std::clamp(cfg.TargetBone, 0, 4);
+    eff.fov = std::clamp(cfg.Fov, 5, 180);
+    eff.smoothness = std::clamp(cfg.Smoothness, 1, 100);
+    eff.smoothAlgorithm = std::clamp(cfg.SmoothAlgorithm, 0, 2);
+    eff.triggerEnabled = cfg.TriggerEnabled;
+    eff.triggerKey = std::clamp(cfg.TriggerKey, 0, kKeyCount - 1);
+    eff.triggerMinDelayMs = std::clamp(cfg.TriggerMinDelayMs, 0, 500);
+    eff.triggerMaxDelayMs = std::clamp(cfg.TriggerMaxDelayMs, eff.triggerMinDelayMs, 500);
+    eff.triggerHitboxScale = std::clamp(cfg.TriggerHitboxScale, 0.25f, 2.0f);
+    eff.triggerMaxDistance = std::clamp(cfg.TriggerMaxDistance, 5, 500);
+
+    if (snap) {
+        eff.weaponName = FindLocalWeaponName(*snap);
+        eff.weaponClass = ClassifyWeaponName(eff.weaponName);
+    }
+
+    if (cfg.WeaponProfilesEnabled && eff.weaponClass >= 0 &&
+        eff.weaponClass < AimConfig::kWeaponProfileCount) {
+        const WeaponProfile& p = cfg.WeaponProfiles[static_cast<std::size_t>(eff.weaponClass)];
+        if (p.Enabled) {
+            eff.profileOverrideActive = true;
+            if (p.TargetBone >= 0 && p.TargetBone <= 4)
+                eff.targetBone = p.TargetBone;
+            if (p.FovOverride >= 5 && p.FovOverride <= 180)
+                eff.fov = p.FovOverride;
+            if (p.SmoothnessOverride >= 1 && p.SmoothnessOverride <= 100)
+                eff.smoothness = p.SmoothnessOverride;
+            if (p.SmoothAlgorithmOverride >= 0 && p.SmoothAlgorithmOverride <= 2)
+                eff.smoothAlgorithm = p.SmoothAlgorithmOverride;
+            eff.triggerEnabled = cfg.TriggerEnabled && p.TriggerEnabled;
+            if (p.TriggerKeyOverride >= 0 && p.TriggerKeyOverride < kKeyCount)
+                eff.triggerKey = p.TriggerKeyOverride;
+            if (p.TriggerMinDelayMs >= 0)
+                eff.triggerMinDelayMs = std::clamp(p.TriggerMinDelayMs, 0, 500);
+            if (p.TriggerMaxDelayMs >= 0)
+                eff.triggerMaxDelayMs = std::clamp(p.TriggerMaxDelayMs, eff.triggerMinDelayMs, 500);
+            else if (eff.triggerMaxDelayMs < eff.triggerMinDelayMs)
+                eff.triggerMaxDelayMs = eff.triggerMinDelayMs;
+            if (p.TriggerHitboxScale > 0.f)
+                eff.triggerHitboxScale = std::clamp(p.TriggerHitboxScale, 0.25f, 2.0f);
+            if (p.TriggerMaxDistance > 0)
+                eff.triggerMaxDistance = std::clamp(p.TriggerMaxDistance, 5, 500);
+        }
+    }
+    return eff;
+}
+
+// ---- Precision Auto-Fire State Machine ------------------------------------
+enum class TriggerPhase { Idle, WaitingDelay, Firing, Cooldown };
+TriggerPhase g_triggerPhase = TriggerPhase::Idle;
+std::uint64_t g_triggerTimerMs = 0;
+bool g_triggerButtonHeld = false;
+bool g_triggerUsedHardware = false;
+Base::Hardware::DeviceKind g_triggerDeviceKind = Base::Hardware::DeviceKind::Off;
+std::atomic<bool> g_triggerDebugActive{ false };
+std::atomic<const char*> g_triggerDebugState{ "off" };
+
+void SendHostLeftButton(bool down)
+{
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+    SendInput(1, &input, sizeof(input));
+}
+
+void PressFireButton()
+{
+    const auto status = Base::Hardware::Session().GetStatus();
+    if (status.state == Base::Hardware::LinkState::Ready &&
+        status.kind != Base::Hardware::DeviceKind::Off) {
+        Base::Hardware::Control c{};
+        c.id = 0; // Left Mouse (mouse devices) / RT (controller devices)
+        c.keyboard = false;
+        c.down = true;
+        if (Base::Hardware::Session().Button(c, status.kind)) {
+            g_triggerButtonHeld = true;
+            g_triggerUsedHardware = true;
+            g_triggerDeviceKind = status.kind;
+            return;
+        }
+    }
+    SendHostLeftButton(true);
+    g_triggerButtonHeld = true;
+    g_triggerUsedHardware = false;
+    g_triggerDeviceKind = Base::Hardware::DeviceKind::Off;
+}
+
+void RenewFireButton()
+{
+    if (!g_triggerButtonHeld || !g_triggerUsedHardware) return;
+    Base::Hardware::Control c{};
+    c.id = 0;
+    c.keyboard = false;
+    c.down = true;
+    Base::Hardware::Session().Button(c, g_triggerDeviceKind);
+}
+
+void ReleaseFireButton()
+{
+    if (!g_triggerButtonHeld) return;
+    if (g_triggerUsedHardware) {
+        Base::Hardware::Control c{};
+        c.id = 0;
+        c.keyboard = false;
+        c.down = false;
+        Base::Hardware::Session().Button(c, g_triggerDeviceKind);
+    } else {
+        SendHostLeftButton(false);
+    }
+    g_triggerButtonHeld = false;
+    g_triggerUsedHardware = false;
+    g_triggerDeviceKind = Base::Hardware::DeviceKind::Off;
+}
+
+int RollTriggerDelayMs(int minMs, int maxMs)
+{
+    minMs = std::clamp(minMs, 0, 500);
+    maxMs = std::clamp(maxMs, minMs, 500);
+    if (minMs == maxMs) return minMs;
+    static thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(minMs, maxMs);
+    return dist(rng);
+}
+
+float PointToSegmentDist(float px, float py, float ax, float ay, float bx, float by, float& outT)
+{
+    const float vx = bx - ax;
+    const float vy = by - ay;
+    const float lenSq = vx * vx + vy * vy;
+    if (lenSq < 1e-4f) {
+        outT = 0.f;
+        return std::hypot(px - ax, py - ay);
+    }
+    outT = std::clamp(((px - ax) * vx + (py - ay) * vy) / lenSq, 0.f, 1.f);
+    return std::hypot(px - (ax + vx * outT), py - (ay + vy * outT));
 }
 
 bool Finite(const Vector3& v)
@@ -546,10 +935,50 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
+bool IsAlwaysKey(int keyIndex) { return keyIndex == kAlwaysKeyIndex; }
 bool IsKeyHeld(int keyIndex)
 {
     const char* source = nullptr;
     return Held(keyIndex, &source);
+}
+
+const char* const* WeaponClassNames() { return kWeaponClassNames; }
+int WeaponClassCount() { return kWeaponClassCount; }
+
+int ClassifyWeaponName(const std::string& weaponNameUtf8)
+{
+    if (weaponNameUtf8.empty()) return -1;
+    std::string lower = weaponNameUtf8;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    auto has = [&](const char* needle) { return lower.find(needle) != std::string::npos; };
+
+    // 4 = DMR / Sniper
+    if (has("drm") || has("sniper") || has("dmr"))
+        return 4;
+    // 3 = Pistol
+    if (has("pistol") || has("revolver") || has("deagle") ||
+        has("dp9") || has("dp_9") || has("lbr44") || has("lbr_44") ||
+        has("vulture") || has("valture"))
+        return 3;
+    // 2 = Shotgun
+    if (has("shotgun") || has("pump") || has("spaz") ||
+        has("tag-12") || has("tag12") || has("harris") || has("ordr"))
+        return 2;
+    // 1 = SMG
+    if (has("mp7") || has("mac10") || has("mac-10") || has("ump") ||
+        has("vector") || has("p90") || has("jp7") || has("jp_7") ||
+        has("mc10") || has("mc_10") || has("cb45") || has("cb_45") ||
+        has("apscalar") || has("ap_scalar") || has("pdw90") || has("pdw_90"))
+        return 1;
+    // 0 = Rifle / LMG
+    if (has("ak") || has("as val") || has("r4c") || has("scar") ||
+        has("lm 249") || has("m249") || has("lmg") || has("kl") ||
+        has("srreaper") || has("sr_reaper") || has("rc556") || has("rc_556") ||
+        has("starh") || has("star_h"))
+        return 0;
+    return -1;
 }
 static std::atomic<float> g_displayWidth{ 1920.f };
 static std::atomic<float> g_displayHeight{ 1080.f };
@@ -745,6 +1174,10 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    ReleaseFireButton();
+    g_triggerPhase = TriggerPhase::Idle;
+    g_triggerDebugActive.store(false, std::memory_order_relaxed);
+    g_triggerDebugState.store("off", std::memory_order_relaxed);
     Keyboard::SetAsyncKeyPolling(false);
 }
 
@@ -766,6 +1199,7 @@ void StartAimWorker()
                 // thread never blocks on kernel DMA reads. Camera polling runs
                 // on RobRunReader's dedicated high-priority camera thread.
                 Keyboard::PollKeysAsync();
+                TickTrigger();
                 if (now - lastTick >= std::chrono::milliseconds(6)) {
                     lastTick = now;
                     Tick();
@@ -914,6 +1348,232 @@ static void DumpAimFieldsOnce()
 }
 #endif
 
+void TickTrigger()
+{
+    const auto& cfg = ConfigInstance.Aim;
+    const auto snapshot = RobRunReader::GetSnapshot();
+    const EffectiveSettings eff = ResolveEffectiveSettings(cfg, snapshot.get());
+    const std::uint64_t nowMs = GetTickCount64();
+
+    if (!eff.triggerEnabled || ConfigInstance.Overlay.PanicMode || Overlay::MenuOpen()) {
+        ReleaseFireButton();
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugActive.store(false, std::memory_order_relaxed);
+        g_triggerDebugState.store(cfg.TriggerEnabled ? "paused" : "off", std::memory_order_relaxed);
+        return;
+    }
+
+    // Always finish an active fire pulse cleanly before checking new targets.
+    if (g_triggerPhase == TriggerPhase::Firing) {
+        if (nowMs >= g_triggerTimerMs) {
+            ReleaseFireButton();
+            const int cooldown = std::clamp(cfg.TriggerCooldownMs, 0, 500);
+            if (cooldown > 0) {
+                g_triggerPhase = TriggerPhase::Cooldown;
+                g_triggerTimerMs = nowMs + static_cast<std::uint64_t>(cooldown);
+                g_triggerDebugState.store("cooldown", std::memory_order_relaxed);
+            } else {
+                g_triggerPhase = TriggerPhase::Idle;
+                g_triggerDebugState.store("armed", std::memory_order_relaxed);
+            }
+            g_triggerDebugActive.store(false, std::memory_order_relaxed);
+        } else {
+            RenewFireButton();
+            g_triggerDebugActive.store(true, std::memory_order_relaxed);
+            g_triggerDebugState.store("firing", std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (g_triggerPhase == TriggerPhase::Cooldown) {
+        if (nowMs < g_triggerTimerMs) {
+            g_triggerDebugActive.store(false, std::memory_order_relaxed);
+            g_triggerDebugState.store("cooldown", std::memory_order_relaxed);
+            return;
+        }
+        g_triggerPhase = TriggerPhase::Idle;
+    }
+
+    const GamepadState gp = PollGamepad(cfg);
+    const char* trigSource = "-";
+    const bool trigKeyHeld = Held(eff.triggerKey, &trigSource, &gp);
+    if (!trigKeyHeld) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugActive.store(false, std::memory_order_relaxed);
+        g_triggerDebugState.store("waiting key", std::memory_order_relaxed);
+        return;
+    }
+
+    if (!snapshot || snapshot->entities.empty()) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugActive.store(false, std::memory_order_relaxed);
+        g_triggerDebugState.store("no entities", std::memory_order_relaxed);
+        return;
+    }
+
+    const float dispX = g_displayWidth.load(std::memory_order_relaxed);
+    const float dispY = g_displayHeight.load(std::memory_order_relaxed);
+    const int width = static_cast<int>(dispX);
+    const int height = static_cast<int>(dispY);
+    if (width <= 0 || height <= 0) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugState.store("no display", std::memory_order_relaxed);
+        return;
+    }
+
+    Matrix4x4 viewProjection{};
+    if (!RobRunReader::ResolveViewProjection(viewProjection, width, height)) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugState.store("no projection", std::memory_order_relaxed);
+        return;
+    }
+
+    RobRunCamera::CameraState freshCamera{};
+    const bool haveFreshCamera = RobRunReader::GetFreshCamera(freshCamera) && freshCamera.valid;
+    const Vector3 camOrigin = haveFreshCamera
+        ? freshCamera.position
+        : (snapshot->camera.valid ? snapshot->camera.position : snapshot->localPosition);
+    if (camOrigin.IsZero()) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugState.store("no camera", std::memory_order_relaxed);
+        return;
+    }
+
+    const float yScale = std::sqrt(
+        viewProjection.matrix[0][1] * viewProjection.matrix[0][1] +
+        viewProjection.matrix[1][1] * viewProjection.matrix[1][1] +
+        viewProjection.matrix[2][1] * viewProjection.matrix[2][1]);
+    if (!std::isfinite(yScale) || yScale <= 1e-4f) {
+        g_triggerPhase = TriggerPhase::Idle;
+        return;
+    }
+
+    const float centerX = dispX * 0.5f;
+    const float centerY = dispY * 0.5f;
+    const float halfH = dispY * 0.5f;
+    const bool haveLocalPos = !snapshot->localPosition.IsZero();
+    const bool bvhLoaded = RobRunReader::GetBvhStatus().loaded;
+    const int trigBone = std::clamp(cfg.TriggerBone, 0, 4);
+    // World-space anatomical radii (metres) for Head, Neck, Chest, Pelvis
+    static constexpr float kBoneRadii[4] = { 0.13f, 0.11f, 0.22f, 0.20f };
+
+    bool targetOnCrosshair = false;
+    for (const auto& ent : snapshot->entities) {
+        if (ent.entityId == snapshot->localEntityId) continue;
+        if (ent.isDead) continue;
+        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
+        if (ShouldSkipByRole(ent, cfg)) continue;
+        if (cfg.TriggerVisibleOnly && !ent.visible) continue;
+        if (haveLocalPos &&
+            Distance(ent.position, snapshot->localPosition) > static_cast<float>(eff.triggerMaxDistance))
+            continue;
+
+        const float entDist = Distance(camOrigin, Vector3(ent.position.x, ent.position.y + 1.2f, ent.position.z));
+        if (!std::isfinite(entDist) || entDist < 0.35f) continue;
+
+        auto boneRadiusPx = [&](int b, const Vector3& p) -> float {
+            const float d = (std::max)(0.35f, Distance(camOrigin, p));
+            const float rM = kBoneRadii[std::clamp(b, 0, 3)] * eff.triggerHitboxScale;
+            return std::clamp((rM / d) * halfH * yScale, 2.5f, 180.f);
+        };
+
+        if (trigBone < 4) {
+            const Vector3 p = BonePoint(ent, trigBone);
+            Vector2 sc{};
+            if (!RobRunReader::ProjectWorld(viewProjection, p, width, height, sc))
+                continue;
+            const float rPx = boneRadiusPx(trigBone, p);
+            if (std::hypot(sc.x - centerX, sc.y - centerY) <= rPx) {
+                if (!cfg.TriggerVisibleOnly || !bvhLoaded || !RobRunReader::IsCameraOccluded(p)) {
+                    targetOnCrosshair = true;
+                    break;
+                }
+            }
+        } else {
+            // Any/Closest bone: test Head, Neck, Chest, Pelvis spheres and spine capsule segments.
+            Vector3 pts[4]{};
+            Vector2 scs[4]{};
+            float rads[4]{};
+            bool ok[4]{};
+            for (int b = 0; b < 4; ++b) {
+                pts[b] = BonePoint(ent, b);
+                ok[b] = RobRunReader::ProjectWorld(viewProjection, pts[b], width, height, scs[b]);
+                if (ok[b]) rads[b] = boneRadiusPx(b, pts[b]);
+            }
+
+            bool hit = false;
+            Vector3 hitPoint{};
+            for (int b = 0; b < 4; ++b) {
+                if (ok[b] && std::hypot(scs[b].x - centerX, scs[b].y - centerY) <= rads[b]) {
+                    hit = true;
+                    hitPoint = pts[b];
+                    break;
+                }
+            }
+            if (!hit) {
+                for (int b = 0; b < 3; ++b) {
+                    if (!ok[b] || !ok[b + 1]) continue;
+                    float segT = 0.f;
+                    const float segDist = PointToSegmentDist(
+                        centerX, centerY, scs[b].x, scs[b].y, scs[b + 1].x, scs[b + 1].y, segT);
+                    const float segRad = rads[b] + (rads[b + 1] - rads[b]) * segT;
+                    if (segDist <= segRad) {
+                        hit = true;
+                        hitPoint = Vector3(
+                            pts[b].x + (pts[b + 1].x - pts[b].x) * segT,
+                            pts[b].y + (pts[b + 1].y - pts[b].y) * segT,
+                            pts[b].z + (pts[b + 1].z - pts[b].z) * segT);
+                        break;
+                    }
+                }
+            }
+            if (hit) {
+                if (!cfg.TriggerVisibleOnly || !bvhLoaded || !RobRunReader::IsCameraOccluded(hitPoint)) {
+                    targetOnCrosshair = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!targetOnCrosshair) {
+        g_triggerPhase = TriggerPhase::Idle;
+        g_triggerDebugActive.store(false, std::memory_order_relaxed);
+        g_triggerDebugState.store("armed", std::memory_order_relaxed);
+        return;
+    }
+
+    if (g_triggerPhase == TriggerPhase::Idle) {
+        const int delayMs = RollTriggerDelayMs(eff.triggerMinDelayMs, eff.triggerMaxDelayMs);
+        if (delayMs <= 0) {
+            PressFireButton();
+            g_triggerPhase = TriggerPhase::Firing;
+            g_triggerTimerMs = nowMs + static_cast<std::uint64_t>(std::clamp(cfg.TriggerBurstMs, 10, 250));
+            g_triggerDebugActive.store(true, std::memory_order_relaxed);
+            g_triggerDebugState.store("firing", std::memory_order_relaxed);
+        } else {
+            g_triggerPhase = TriggerPhase::WaitingDelay;
+            g_triggerTimerMs = nowMs + static_cast<std::uint64_t>(delayMs);
+            g_triggerDebugActive.store(false, std::memory_order_relaxed);
+            g_triggerDebugState.store("delay", std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    if (g_triggerPhase == TriggerPhase::WaitingDelay) {
+        if (nowMs >= g_triggerTimerMs) {
+            PressFireButton();
+            g_triggerPhase = TriggerPhase::Firing;
+            g_triggerTimerMs = nowMs + static_cast<std::uint64_t>(std::clamp(cfg.TriggerBurstMs, 10, 250));
+            g_triggerDebugActive.store(true, std::memory_order_relaxed);
+            g_triggerDebugState.store("firing", std::memory_order_relaxed);
+        } else {
+            g_triggerDebugActive.store(false, std::memory_order_relaxed);
+            g_triggerDebugState.store("delay", std::memory_order_relaxed);
+        }
+    }
+}
+
 void Tick()
 {
     const auto& cfg = ConfigInstance.Aim;
@@ -928,10 +1588,30 @@ void Tick()
 			g_debug = info;
 		}
 	} publishDebug{ dbg };
+
+    const GamepadState gp = PollGamepad(cfg);
+    const auto snapshot = RobRunReader::GetSnapshot();
+    const EffectiveSettings eff = ResolveEffectiveSettings(cfg, snapshot.get());
+    g_activeFov.store(eff.fov, std::memory_order_relaxed);
+
     dbg.enabled = cfg.Enabled;
     dbg.menuOpen = Overlay::MenuOpen();
     dbg.aimType = cfg.AimType;
     dbg.deviceReady = Base::Hardware::Ready();
+    dbg.smoothAlgorithm = eff.smoothAlgorithm;
+    dbg.activeFov = eff.fov;
+    dbg.activeWeaponClass = eff.weaponClass;
+    dbg.activeWeaponName = eff.weaponName;
+    dbg.profileOverrideActive = eff.profileOverrideActive;
+    dbg.controllerConnected = gp.connected;
+    dbg.controllerSource = gp.source;
+    dbg.controllerLt = gp.lt;
+    dbg.controllerRt = gp.rt;
+    dbg.controllerRx = gp.rx;
+    dbg.controllerRy = gp.ry;
+    dbg.triggerEnabled = eff.triggerEnabled;
+    dbg.triggerActive = g_triggerDebugActive.load(std::memory_order_relaxed);
+    dbg.triggerState = g_triggerDebugState.load(std::memory_order_relaxed);
 
     const auto stopAiming = [] {
         if (g_wasAiming) {
@@ -943,6 +1623,8 @@ void Tick()
     const auto resetSmoothing = [] {
         g_smoothInit = false;
         g_carryYaw = g_carryPitch = 0.f;
+        g_bezierT = 0.f;
+        g_cursorCurve.Reset();
         g_lastWriteTick = 0;
         g_haveWrittenForward = false;
         g_writeHealthy = false;
@@ -971,8 +1653,25 @@ void Tick()
         return;
     }
 
+    auto stickGateOk = [&](int keyIndex) -> bool {
+        const int idx = (keyIndex >= 0 && keyIndex < kKeyCount) ? keyIndex : 0;
+        if (!IsGamepadKeyCode(kKeys[idx]) || !cfg.ControllerRequireStick)
+            return true;
+        if (!gp.connected) return false;
+        const float deadzone = std::clamp(cfg.ControllerStickDeadzone, 0.f, 0.80f);
+        return std::hypot(gp.rx, gp.ry) >= deadzone;
+    };
+
     const char* keySource = "-";
-    dbg.held = Held(cfg.AimKey, &keySource);
+    bool keyHeld = Held(cfg.AimKey, &keySource, &gp) && stickGateOk(cfg.AimKey);
+    if (!keyHeld && cfg.ControllerEnabled && cfg.ControllerSecondaryEnable) {
+        const char* padSource = "-";
+        if (Held(cfg.ControllerAimKey, &padSource, &gp) && stickGateOk(cfg.ControllerAimKey)) {
+            keyHeld = true;
+            keySource = padSource;
+        }
+    }
+    dbg.held = keyHeld;
     dbg.keySource = keySource;
     if (!dbg.held) {
         dbg.reason = "aim key not held";
@@ -983,7 +1682,6 @@ void Tick()
         return;
     }
 
-    const auto snapshot = RobRunReader::GetSnapshot();
     if (!snapshot || snapshot->entities.empty()) {
         dbg.reason = "no entities";
         stopAiming();
@@ -1033,7 +1731,7 @@ void Tick()
 
     const float centerX = dispX * 0.5f;
     const float centerY = dispY * 0.5f;
-    const float fovDeg = std::clamp(static_cast<float>(cfg.Fov), 5.f, 180.f);
+    const float fovDeg = std::clamp(static_cast<float>(eff.fov), 5.f, 180.f);
     // Screen-space cone, exactly like the FOV circle and the ESP projection.
     // The previous angular dot-product gate used the worker's camera sample
     // while the projection used the fresher render-thread camera, so it could
@@ -1060,7 +1758,8 @@ void Tick()
     const std::uint64_t nowMs = GetTickCount64();
     const float responseMs = cfg.ResponseMs > 0
         ? std::clamp(static_cast<float>(cfg.ResponseMs), 1.f, 250.f)
-        : ResponseForSmoothness(cfg.Smoothness);
+        : ResponseForSmoothness(eff.smoothness);
+    const bool bvhLoaded = RobRunReader::GetBvhStatus().loaded;
 
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
@@ -1076,31 +1775,57 @@ void Tick()
         if (haveLocalPosition &&
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) continue;
 
-        int activeBone = cfg.TargetBone;
-        if (cfg.DynamicBoneFallback) {
-            // Drop to chest (bone 2) if low health or head occluded
-            if (ent.healthKnown && ent.health <= 40.f) {
-                activeBone = 2;
-            } else if (RobRunReader::GetBvhStatus().loaded && RobRunReader::IsCameraOccluded(BonePoint(ent, activeBone))) {
-                activeBone = 2;
-            }
-        }
-
-        Vector3 point = BonePoint(ent, activeBone);
-        if (cfg.VisibleBonesOnly && RobRunReader::GetBvhStatus().loaded) {
-            if (RobRunReader::IsCameraOccluded(point)) {
-                bool altFound = false;
-                static const int altBones[] = { 0, 1, 2, 3 }; // Head, Neck, Chest, Pelvis
-                for (int b : altBones) {
-                    if (b == activeBone) continue;
-                    Vector3 altPoint = BonePoint(ent, b);
-                    if (!RobRunReader::IsCameraOccluded(altPoint)) {
-                        point = altPoint;
-                        altFound = true;
-                        break;
-                    }
+        int activeBone = eff.targetBone;
+        Vector3 point{};
+        if (activeBone == 4) {
+            // Closest bone to crosshair among Head, Neck, Chest, Pelvis
+            bool bestBoneFound = false;
+            float bestBoneDist = 1.0e9f;
+            static const int allBones[] = { 0, 1, 2, 3 };
+            for (int b : allBones) {
+                const Vector3 bp = BonePoint(ent, b);
+                if (cfg.VisibleBonesOnly && bvhLoaded && RobRunReader::IsCameraOccluded(bp))
+                    continue;
+                Vector2 bScreen{};
+                if (!RobRunReader::ProjectWorld(viewProjection, bp, width, height, bScreen))
+                    continue;
+                const float bDist = std::hypot(bScreen.x - centerX, bScreen.y - centerY);
+                if (!bestBoneFound || bDist < bestBoneDist) {
+                    bestBoneFound = true;
+                    bestBoneDist = bDist;
+                    point = bp;
                 }
-                if (!altFound) continue;
+            }
+            if (!bestBoneFound) {
+                if (cfg.VisibleBonesOnly && bvhLoaded) continue;
+                point = BonePoint(ent, 2);
+            }
+        } else {
+            if (cfg.DynamicBoneFallback) {
+                // Drop to chest (bone 2) if low health or target bone occluded
+                if (ent.healthKnown && ent.health <= 40.f) {
+                    activeBone = 2;
+                } else if (bvhLoaded && RobRunReader::IsCameraOccluded(BonePoint(ent, activeBone))) {
+                    activeBone = 2;
+                }
+            }
+
+            point = BonePoint(ent, activeBone);
+            if (cfg.VisibleBonesOnly && bvhLoaded) {
+                if (RobRunReader::IsCameraOccluded(point)) {
+                    bool altFound = false;
+                    static const int altBones[] = { 0, 1, 2, 3 }; // Head, Neck, Chest, Pelvis
+                    for (int b : altBones) {
+                        if (b == activeBone) continue;
+                        Vector3 altPoint = BonePoint(ent, b);
+                        if (!RobRunReader::IsCameraOccluded(altPoint)) {
+                            point = altPoint;
+                            altFound = true;
+                            break;
+                        }
+                    }
+                    if (!altFound) continue;
+                }
             }
         }
         int leadMs = 0;
@@ -1259,26 +1984,87 @@ void Tick()
             const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
 
             if (!g_smoothInit || g_smoothTarget != bestId) {
-                g_curYaw = targetYaw;
-                g_curPitch = targetPitch;
+                const bool instantSnap = (eff.smoothness <= 1 && cfg.ResponseMs == 0);
+                if (instantSnap) {
+                    g_curYaw = targetYaw;
+                    g_curPitch = targetPitch;
+                } else {
+                    const Vector3 startFwd = haveFreshCamera
+                        ? freshCamera.forward
+                        : (snapshot->camera.valid ? snapshot->camera.forward : EulerToForward(targetYaw, targetPitch));
+                    const float startHoriz = std::hypot(startFwd.x, startFwd.z);
+                    g_curYaw = std::atan2(startFwd.x, startFwd.z);
+                    g_curPitch = std::atan2(-startFwd.y, startHoriz);
+                }
                 g_carryYaw = g_carryPitch = 0.f;
+                g_bezierT = 0.f;
+                g_bezierBendSign = ((static_cast<unsigned>(bestId) ^ (static_cast<unsigned>(bestId) >> 2)) & 1u) ? 1.f : -1.f;
                 g_smoothInit = true;
                 g_smoothTarget = bestId;
-            } else {
+            }
+
+            {
                 float dYaw = targetYaw - g_curYaw;
                 while (dYaw > kPi) dYaw -= 2.f * kPi;
                 while (dYaw < -kPi) dYaw += 2.f * kPi;
                 const float dPitch = targetPitch - g_curPitch;
+                const float dtSec = dtMs * 0.001f;
+                const float speedMul = std::clamp(cfg.BezierSpeed, 0.25f, 3.f);
 
                 if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
                 if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
 
-                const float stepYaw = dYaw * gain + g_carryYaw;
-                const float stepPitch = dPitch * verticalGain + g_carryPitch;
+                float stepYaw = 0.f;
+                float stepPitch = 0.f;
+
+                if (eff.smoothAlgorithm == 1) {
+                    // Linear: constant angular velocity clamped to exact target arrival.
+                    const float angDist = std::hypot(dYaw, dPitch);
+                    if (angDist > 1e-6f) {
+                        const float radPerSec = (65.f / (std::max)(8.f, responseMs)) * speedMul;
+                        const float step = (std::min)(angDist, radPerSec * dtSec);
+                        stepYaw = (dYaw / angDist) * step + g_carryYaw;
+                        stepPitch = (dPitch / angDist) * step + g_carryPitch;
+                    }
+                } else if (eff.smoothAlgorithm == 2) {
+                    // Bezier: cubic S-curve progress with lateral perpendicular arc.
+                    const float angDist = std::hypot(dYaw, dPitch);
+                    if (angDist > 1e-6f) {
+                        const float durationSec = std::clamp((responseMs * 0.0045f) / speedMul, 0.035f, 0.90f);
+                        const float prevT = g_bezierT;
+                        g_bezierT = (std::min)(1.f, g_bezierT + dtSec / durationSec);
+                        auto cubicP = [](float u) -> float {
+                            const float inv = 1.f - u;
+                            return 3.f * inv * inv * u * 0.15f + 3.f * inv * u * u * 0.85f + u * u * u;
+                        };
+                        const float pPrev = cubicP(prevT);
+                        const float pCur = cubicP(g_bezierT);
+                        const float remFrac = (std::max)(1e-3f, 1.f - pPrev);
+                        const float stepFrac = (g_bezierT >= 0.999f)
+                            ? (std::min)(1.f, 1.f - std::exp(-dtMs / (std::max)(6.f, responseMs * 0.6f)))
+                            : std::clamp((pCur - pPrev) / remFrac, 0.f, 1.f);
+
+                        const float bend = std::clamp(cfg.BezierBend, 0.f, 1.f);
+                        const float inv = 1.f - g_bezierT;
+                        const float arc = 3.f * inv * inv * g_bezierT + 3.f * inv * g_bezierT * g_bezierT * 0.65f;
+                        const float nyaw = -dPitch / angDist;
+                        const float npitch = dYaw / angDist;
+                        const float lat = g_bezierBendSign * bend * 0.35f * angDist * arc * (1.f - g_bezierT);
+
+                        stepYaw = (dYaw + nyaw * lat) * stepFrac + g_carryYaw;
+                        stepPitch = (dPitch + npitch * lat) * stepFrac + g_carryPitch;
+                    }
+                } else {
+                    // EMA (0): exponential convergence
+                    stepYaw = dYaw * gain + g_carryYaw;
+                    stepPitch = dPitch * verticalGain + g_carryPitch;
+                }
+
                 g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
                 g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
                 g_curYaw += stepYaw;
                 g_curPitch += stepPitch;
+                g_curPitch = std::clamp(g_curPitch, -1.55f, 1.55f);
             }
 
             WriteOutcome outcome;
@@ -1331,7 +2117,10 @@ void Tick()
     s_lastTickTime = nowTime;
 
     Base::AimMotion::Settings settings;
-    settings.smoothX = settings.smoothY = std::clamp(cfg.Smoothness, 1, 100);
+    settings.smoothX = settings.smoothY = std::clamp(eff.smoothness, 1, 100);
+    settings.smoothAlgorithm = eff.smoothAlgorithm;
+    settings.bezierBend = std::clamp(cfg.BezierBend, 0.f, 1.f);
+    settings.bezierSpeed = std::clamp(cfg.BezierSpeed, 0.25f, 3.f);
     settings.countsPerPixelX = settings.countsPerPixelY = 1.f;
     settings.deadzonePixels = 0.5f;
 
@@ -1341,7 +2130,9 @@ void Tick()
         // sensitivity exactly. This only reaches a game running on the same PC;
         // a two-PC DMA setup needs Hardware Aim or the angle write above.
         stopAiming();
-        const auto step = Base::AimMotion::Step({ dx, dy }, settings, dt);
+        settings.responseMs = responseMs;
+        const auto step = Base::AimMotion::StepWithCurve(
+            g_cursorCurve, static_cast<std::uint64_t>(bestId), { dx, dy }, settings, dt);
         const int mx = static_cast<int>(std::lround(step.x));
         const int my = static_cast<int>(std::lround(step.y));
         dbg.stepX = mx;
@@ -1380,6 +2171,7 @@ void Tick()
     intent.observation = ++g_observation;
     intent.error = true;
     intent.intervalMs = 6;
+    intent.stickScale = std::clamp(cfg.ControllerStickScale, 10.f, 500.f);
     intent.expires = Base::Hardware::Clock::now() + std::chrono::milliseconds(50);
     if (Base::Hardware::Session().Submit(Base::Hardware::Source::Aim, intent)) {
         g_wasAiming = true;
@@ -1689,13 +2481,14 @@ void Draw()
         if (snapshot && snapshot->camera.valid) verticalFov = snapshot->camera.verticalFov;
     }
 
+    const float activeFov = static_cast<float>(std::clamp(g_activeFov.load(std::memory_order_relaxed), 5, 180));
     Matrix4x4 viewProjection{};
     float radius;
     if (RobRunReader::ResolveViewProjection(viewProjection, (int)display.x, (int)display.y)) {
-        radius = ConeRadiusPixels(viewProjection, static_cast<float>(cfg.Fov),
+        radius = ConeRadiusPixels(viewProjection, activeFov,
             verticalFov, display.y);
     } else {
-        radius = FovRadiusPixels(static_cast<float>(cfg.Fov), verticalFov, display.y);
+        radius = FovRadiusPixels(activeFov, verticalFov, display.y);
     }
     radius = (std::min)(radius, std::hypot(display.x * 0.5f, display.y * 0.5f));
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();
@@ -1710,8 +2503,15 @@ void DrawDebug()
     if (display.x <= 0.f || display.y <= 0.f) return;
 
     const DebugInfo d = GetDebug();
-    char lines[8][160];
-    std::snprintf(lines[0], sizeof(lines[0]), "Aim: %s", d.enabled ? "on" : "off");
+    static const char* const kCurveNames[] = { "EMA", "Linear", "Bezier" };
+    const char* curveName = (d.smoothAlgorithm >= 0 && d.smoothAlgorithm < 3)
+        ? kCurveNames[d.smoothAlgorithm] : "EMA";
+    const char* profName = (d.activeWeaponClass >= 0 && d.activeWeaponClass < kWeaponClassCount)
+        ? kWeaponClassNames[d.activeWeaponClass] : "Default";
+
+    char lines[10][160];
+    std::snprintf(lines[0], sizeof(lines[0]), "Aim: %s  Curve: %s  FOV: %d deg",
+        d.enabled ? "on" : "off", curveName, d.activeFov);
     std::snprintf(lines[1], sizeof(lines[1]), "Menu: %s  Key: %s (%s)",
         d.menuOpen ? "open" : "closed", d.held ? "held" : "up", d.keySource);
     std::snprintf(lines[2], sizeof(lines[2]), "Entities: %d  Candidates: %d  Target: %d",
@@ -1723,7 +2523,13 @@ void DrawDebug()
     std::snprintf(lines[5], sizeof(lines[5]), "Write: %s  %s  yaw %.1f pitch %.1f dist %.0fm",
         d.writeMode ? (d.writeOk ? "ok" : "fail") : "off",
         d.writeState, d.tgtYawDeg, d.tgtPitchDeg, d.distance);
-    std::snprintf(lines[6], sizeof(lines[6]), "Reason: %s", d.reason);
+    std::snprintf(lines[6], sizeof(lines[6]), "Weapon: %s [%s%s]  Trigger: %s",
+        d.activeWeaponName.empty() ? "-" : d.activeWeaponName.c_str(),
+        profName, d.profileOverrideActive ? "*" : "", d.triggerState);
+    std::snprintf(lines[7], sizeof(lines[7]), "Pad: %s (%s)  LT %.2f RT %.2f  RS (%.2f, %.2f)",
+        d.controllerConnected ? "on" : "off", d.controllerSource,
+        d.controllerLt, d.controllerRt, d.controllerRx, d.controllerRy);
+    std::snprintf(lines[8], sizeof(lines[8]), "Reason: %s", d.reason);
     {
         const auto cam = RobRunReader::GetCameraDebug();
         const float angle = cam.forwardDot > -1.f
@@ -1734,11 +2540,11 @@ void DrawDebug()
             std::snprintf(pose, sizeof(pose), "pose=%lldms",
                 static_cast<long long>(cam.snapshotAgeMs));
         if (cam.nativeValid)
-            std::snprintf(lines[7], sizeof(lines[7]),
+            std::snprintf(lines[9], sizeof(lines[9]),
                 "ESP cam: native d=%.2fm a=%.1f  %s", cam.positionError, angle,
                 pose);
         else
-            std::snprintf(lines[7], sizeof(lines[7]),
+            std::snprintf(lines[9], sizeof(lines[9]),
                 "ESP cam: %s (native %s)  %s",
                 RobRunReader::GetViewProjectionSource(),
                 cam.nativeEnabled ? "not found" : "off", pose);
@@ -1746,9 +2552,9 @@ void DrawDebug()
 
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     const ImVec2 origin(12.f, 12.f);
-    for (int i = 0; i < 8; ++i) {
+    for (int i = 0; i < 10; ++i) {
         dl->AddText(ImVec2(origin.x + 1.f, origin.y + i * 15.f + 1.f),
-            IM_COL32(0, 0, 0, 200), lines[i]);
+            IM_COL32(36, 38, 44, 220), lines[i]);
         dl->AddText(ImVec2(origin.x, origin.y + i * 15.f),
             IM_COL32(120, 200, 255, 235), lines[i]);
     }
