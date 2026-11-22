@@ -1294,6 +1294,205 @@ void DrawPlayerArrow(ImDrawList* dl, const ImVec2& c, float relYaw, float radius
 	dl->AddLine(ptAt(0.76f, 0.00f), ptAt(-0.45f, -0.52f), hiCol, std::max(1.0f, radius * 0.08f));
 }
 
+// Resolve game rarity tier (1=Common, 2=Uncommon, 3=Rare, 4=Epic, 5=Legendary, 6=Mythical/Exotic).
+int ResolveItemRarityTier(const RobRunWorld::Entity& we, const LootFilter::ItemDef* def)
+{
+	if (we.rarity >= 1 && we.rarity <= 6)
+		return we.rarity;
+	if (def) {
+		switch (def->rarity) {
+		case LootFilter::Rarity::Common:    return 1;
+		case LootFilter::Rarity::Uncommon:  return 2;
+		case LootFilter::Rarity::Rare:      return 3;
+		case LootFilter::Rarity::Epic:      return 4;
+		case LootFilter::Rarity::Legendary: return 5;
+		case LootFilter::Rarity::Exotic:    return 6;
+		default: break;
+		}
+	}
+	return 0;
+}
+
+ImU32 MapRarityColor(int tier, ImU32 fallback)
+{
+	switch (tier) {
+	case 1: return IM_COL32(220, 226, 234, 240); // Common - silver-white
+	case 2: return IM_COL32(46, 224, 78, 250);   // Uncommon - green
+	case 3: return IM_COL32(58, 160, 255, 250);  // Rare - blue
+	case 4: return IM_COL32(182, 76, 255, 250);  // Epic - purple
+	case 5: return IM_COL32(255, 208, 42, 255);  // Legendary - gold
+	case 6: return IM_COL32(255, 58, 128, 255);  // Mythical / Exotic - reddish-pink
+	default: return fallback;
+	}
+}
+
+bool IsCargoKind(RobRunWorld::Kind k)
+{
+	switch (k) {
+	case RobRunWorld::Kind::Cargo:
+	case RobRunWorld::Kind::CargoBush:
+	case RobRunWorld::Kind::CargoCrystal:
+	case RobRunWorld::Kind::CargoDrug:
+	case RobRunWorld::Kind::CargoCash:
+	case RobRunWorld::Kind::CargoExchange:
+	case RobRunWorld::Kind::CargoBox:
+	case RobRunWorld::Kind::CargoGoods:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool IsMapLootKind(RobRunWorld::Kind k)
+{
+	switch (k) {
+	case RobRunWorld::Kind::Loot:
+	case RobRunWorld::Kind::StaticLoot:
+	case RobRunWorld::Kind::RandomLoot:
+	case RobRunWorld::Kind::VehicleLoot:
+	case RobRunWorld::Kind::PlotLoot:
+	case RobRunWorld::Kind::FurnitureLoot:
+	case RobRunWorld::Kind::BuildingLoot:
+	case RobRunWorld::Kind::CashLootNode:
+	case RobRunWorld::Kind::SettlementCash:
+	case RobRunWorld::Kind::SafeDoor:
+		return true;
+	default:
+		return false;
+	}
+}
+
+enum class MapItemIcon {
+	Weapon,
+	Armor,
+	Valuable,
+	Cash,
+	Safe,
+	Cargo,
+	Medicine,
+	Key,
+	Generic
+};
+
+void DrawMapCategoryIcon(ImDrawList* dl, const ImVec2& c, float scale, MapItemIcon icon, ImU32 col)
+{
+	const ImU32 outline = IM_COL32(26, 28, 32, 245);
+	const ImU32 inner   = IM_COL32(26, 28, 32, 210);
+	const float s = 3.8f * scale;
+	const float outT = std::max(1.3f, 0.95f * scale);
+
+	switch (icon) {
+	case MapItemIcon::Weapon: {
+		// Compact rifle/gun silhouette: stock + receiver + barrel + magazine
+		const float rx0 = c.x - s * 1.15f, rx1 = c.x + s * 0.55f;
+		const float ry0 = c.y - s * 0.42f, ry1 = c.y + s * 0.12f;
+		// Dark outline backing
+		dl->AddRectFilled(ImVec2(rx0 - outT, ry0 - outT), ImVec2(rx1 + outT, ry1 + outT), outline, 1.0f);
+		dl->AddRectFilled(ImVec2(rx1 - 0.5f, ry0 + s * 0.05f - outT), ImVec2(c.x + s * 1.35f + outT, ry0 + s * 0.34f + outT), outline, 0.8f);
+		dl->AddRectFilled(ImVec2(c.x - s * 0.25f - outT, ry1 - 0.5f), ImVec2(c.x + s * 0.22f + outT, c.y + s * 0.88f + outT), outline, 0.8f);
+		dl->AddRectFilled(ImVec2(rx0 - outT, ry1 - 0.5f), ImVec2(c.x - s * 0.65f + outT, c.y + s * 0.68f + outT), outline, 0.8f);
+		// Rarity-colored fill
+		dl->AddRectFilled(ImVec2(rx0, ry0), ImVec2(rx1, ry1), col, 0.8f);
+		dl->AddRectFilled(ImVec2(rx1 - 0.5f, ry0 + s * 0.08f), ImVec2(c.x + s * 1.32f, ry0 + s * 0.32f), col, 0.6f);
+		dl->AddRectFilled(ImVec2(c.x - s * 0.22f, ry1 - 0.5f), ImVec2(c.x + s * 0.18f, c.y + s * 0.84f), col, 0.6f);
+		dl->AddRectFilled(ImVec2(rx0, ry1 - 0.5f), ImVec2(c.x - s * 0.68f, c.y + s * 0.64f), col, 0.6f);
+		break;
+	}
+	case MapItemIcon::Armor: {
+		// Shield silhouette
+		const ImVec2 shield[5] = {
+			ImVec2(c.x - s * 0.85f, c.y - s * 0.85f),
+			ImVec2(c.x + s * 0.85f, c.y - s * 0.85f),
+			ImVec2(c.x + s * 0.85f, c.y + s * 0.05f),
+			ImVec2(c.x,             c.y + s * 1.00f),
+			ImVec2(c.x - s * 0.85f, c.y + s * 0.05f),
+		};
+		dl->AddPolyline(shield, 5, outline, ImDrawFlags_Closed, outT * 1.8f);
+		dl->AddConvexPolyFilled(shield, 5, col);
+		dl->AddPolyline(shield, 5, outline, ImDrawFlags_Closed, std::max(1.0f, outT * 0.7f));
+		break;
+	}
+	case MapItemIcon::Valuable: {
+		// Faceted gem / diamond
+		const ImVec2 gem[5] = {
+			ImVec2(c.x - s * 0.55f, c.y - s * 0.82f),
+			ImVec2(c.x + s * 0.55f, c.y - s * 0.82f),
+			ImVec2(c.x + s * 0.98f, c.y - s * 0.15f),
+			ImVec2(c.x,             c.y + s * 0.98f),
+			ImVec2(c.x - s * 0.98f, c.y - s * 0.15f),
+		};
+		dl->AddPolyline(gem, 5, outline, ImDrawFlags_Closed, outT * 1.8f);
+		dl->AddConvexPolyFilled(gem, 5, col);
+		dl->AddPolyline(gem, 5, outline, ImDrawFlags_Closed, std::max(1.0f, outT * 0.7f));
+		dl->AddLine(gem[4], gem[2], LightenColor(col, 55), std::max(1.0f, 0.7f * scale));
+		break;
+	}
+	case MapItemIcon::Cash: {
+		// Banknote stack
+		const ImVec2 p0(c.x - s * 1.05f, c.y - s * 0.65f);
+		const ImVec2 p1(c.x + s * 1.05f, c.y + s * 0.65f);
+		dl->AddRectFilled(ImVec2(p0.x - outT, p0.y - outT), ImVec2(p1.x + outT, p1.y + outT), outline, 1.5f);
+		dl->AddRectFilled(p0, p1, col, 1.2f);
+		dl->AddCircleFilled(c, s * 0.32f, inner, 10);
+		break;
+	}
+	case MapItemIcon::Safe: {
+		// Safe box with dial
+		const ImVec2 p0(c.x - s * 0.88f, c.y - s * 0.88f);
+		const ImVec2 p1(c.x + s * 0.88f, c.y + s * 0.88f);
+		dl->AddRectFilled(ImVec2(p0.x - outT, p0.y - outT), ImVec2(p1.x + outT, p1.y + outT), outline, 2.0f);
+		dl->AddRectFilled(p0, p1, col, 1.5f);
+		dl->AddCircle(c, s * 0.40f, inner, 12, std::max(1.1f, 0.8f * scale));
+		dl->AddCircleFilled(c, s * 0.16f, inner, 8);
+		break;
+	}
+	case MapItemIcon::Cargo: {
+		// Cargo crate with diagonal brace
+		const ImVec2 p0(c.x - s * 0.90f, c.y - s * 0.90f);
+		const ImVec2 p1(c.x + s * 0.90f, c.y + s * 0.90f);
+		dl->AddRectFilled(ImVec2(p0.x - outT, p0.y - outT), ImVec2(p1.x + outT, p1.y + outT), outline, 1.2f);
+		dl->AddRectFilled(p0, p1, col, 1.0f);
+		dl->AddLine(ImVec2(p0.x + 1.2f, p1.y - 1.2f), ImVec2(p1.x - 1.2f, p0.y + 1.2f), inner, std::max(1.1f, 0.85f * scale));
+		dl->AddRect(p0, p1, outline, 1.0f, 0, std::max(1.0f, outT * 0.7f));
+		break;
+	}
+	case MapItemIcon::Medicine: {
+		// Medical cross (+)
+		const float arm = s * 0.95f;
+		const float bar = s * 0.34f;
+		dl->AddRectFilled(ImVec2(c.x - bar - outT, c.y - arm - outT), ImVec2(c.x + bar + outT, c.y + arm + outT), outline, 1.0f);
+		dl->AddRectFilled(ImVec2(c.x - arm - outT, c.y - bar - outT), ImVec2(c.x + arm + outT, c.y + bar + outT), outline, 1.0f);
+		dl->AddRectFilled(ImVec2(c.x - bar, c.y - arm), ImVec2(c.x + bar, c.y + arm), col, 0.8f);
+		dl->AddRectFilled(ImVec2(c.x - arm, c.y - bar), ImVec2(c.x + arm, c.y + bar), col, 0.8f);
+		break;
+	}
+	case MapItemIcon::Key: {
+		// Key ring + blade
+		const ImVec2 ringC(c.x - s * 0.45f, c.y);
+		const float ringR = s * 0.48f;
+		dl->AddCircleFilled(ringC, ringR + outT, outline, 12);
+		dl->AddRectFilled(ImVec2(ringC.x + ringR * 0.4f, c.y - s * 0.18f - outT),
+			ImVec2(c.x + s * 1.05f + outT, c.y + s * 0.18f + outT), outline, 0.8f);
+		dl->AddRectFilled(ImVec2(c.x + s * 0.55f - outT, c.y + s * 0.10f),
+			ImVec2(c.x + s * 0.92f + outT, c.y + s * 0.62f + outT), outline, 0.6f);
+		dl->AddCircleFilled(ringC, ringR, col, 12);
+		dl->AddCircleFilled(ringC, ringR * 0.42f, inner, 10);
+		dl->AddRectFilled(ImVec2(ringC.x + ringR * 0.4f, c.y - s * 0.16f),
+			ImVec2(c.x + s * 1.02f, c.y + s * 0.16f), col, 0.6f);
+		dl->AddRectFilled(ImVec2(c.x + s * 0.58f, c.y + s * 0.12f),
+			ImVec2(c.x + s * 0.88f, c.y + s * 0.56f), col, 0.5f);
+		break;
+	}
+	case MapItemIcon::Generic:
+	default: {
+		const float r = s * 0.72f;
+		dl->AddCircleFilled(c, r + outT, outline, 12);
+		dl->AddCircleFilled(c, r, col, 12);
+		break;
+	}
+	}
+}
+
 } // namespace
 
 void DrawInGameMapOverlay()
@@ -1430,10 +1629,15 @@ void DrawInGameMapOverlay()
 
 	dl->PushClipRect(ImVec2(clipMinX, clipMinY), ImVec2(clipMaxX, clipMaxY), true);
 
-	// 1. Optional valuables & dropped bags (drawn underneath vehicles/players)
+	// 1. Optional valuables/loot, cargo & dropped bags (drawn underneath vehicles/players)
 	if (snapshot->world && snapshot->world->valid &&
-		(cfg.InGameMapValuables || cfg.InGameMapDroppedBags))
+		(cfg.InGameMapValuables || cfg.InGameMapCargo || cfg.InGameMapDroppedBags))
 	{
+		const auto& lf = ConfigInstance.LootFilter;
+		// Rarity index: 0=All(1+), 1=Uncommon(2)+, 2=Rare(3)+, 3=Epic(4)+, 4=Legendary(5)+, 5=Mythical(6)
+		const int minRarityTier = std::clamp(cfg.InGameMapMinRarity, 0, 5) + 1;
+		const int minCargoRarityTier = std::clamp(cfg.InGameMapCargoMinRarity, 0, 5) + 1;
+
 		for (const auto& we : snapshot->world->entities) {
 			ImVec2 pt{};
 			if (cfg.InGameMapDroppedBags && we.kind == RobRunWorld::Kind::DroppedBag) {
@@ -1446,19 +1650,88 @@ void DrawInGameMapOverlay()
 				dl->AddQuad(
 					ImVec2(pt.x, pt.y - r), ImVec2(pt.x + r, pt.y),
 					ImVec2(pt.x, pt.y + r), ImVec2(pt.x - r, pt.y),
-					IM_COL32(38, 40, 46, 235), 1.4f);
-			} else if (cfg.InGameMapValuables &&
-				(we.kind == RobRunWorld::Kind::Cargo ||
-				 we.kind == RobRunWorld::Kind::CashLootNode ||
-				 we.kind == RobRunWorld::Kind::SettlementCash ||
-				 we.kind == RobRunWorld::Kind::SafeDoor)) {
+					IM_COL32(26, 28, 32, 240), 1.4f);
+				continue;
+			}
+
+			if (we.hasEmptyFlag && we.empty) continue;
+			if (we.inVehicle || we.inTable) continue;
+
+			const bool isCargo = IsCargoKind(we.kind);
+			if (isCargo) {
+				if (!cfg.InGameMapCargo) continue;
+				const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+				const int tier = ResolveItemRarityTier(we, def);
+				const int effectiveCargoTier = (tier > 0) ? tier : 1;
+				if (effectiveCargoTier < minCargoRarityTier) continue;
 				if (!worldToMap(we.position, pt)) continue;
-				const float r = 3.6f * scale;
-				const ImU32 col = (we.kind == RobRunWorld::Kind::Cargo)
-					? IM_COL32(255, 110, 230, 235)
-					: IM_COL32(100, 255, 140, 235);
-				dl->AddRectFilled(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), col);
-				dl->AddRect(ImVec2(pt.x - r, pt.y - r), ImVec2(pt.x + r, pt.y + r), IM_COL32(38, 40, 46, 235), 0.f, 0, 1.4f);
+				const ImU32 col = (we.kind == RobRunWorld::Kind::CargoCash)
+					? IM_COL32(95, 245, 130, 245)
+					: MapRarityColor(tier, IM_COL32(255, 110, 230, 245));
+				const MapItemIcon icon = (we.kind == RobRunWorld::Kind::CargoCash)
+					? MapItemIcon::Cash
+					: MapItemIcon::Cargo;
+				DrawMapCategoryIcon(dl, pt, scale, icon, col);
+				continue;
+			}
+
+			if (cfg.InGameMapValuables && IsMapLootKind(we.kind)) {
+				const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+				const bool isCash = (we.kind == RobRunWorld::Kind::CashLootNode ||
+									 we.kind == RobRunWorld::Kind::SettlementCash);
+				const bool isSafe = (we.kind == RobRunWorld::Kind::SafeDoor);
+				const int tier = ResolveItemRarityTier(we, def);
+
+				// Always show cash/safes; filter general ground/world loot by minimum rarity tier
+				if (!isCash && !isSafe) {
+					const bool isCatalogValuable = def && def->category == LootFilter::Category::Valuables;
+					const int effectiveTier = (tier > 0) ? tier : (isCatalogValuable ? 2 : 1);
+					if (effectiveTier < minRarityTier)
+						continue;
+				}
+
+				if (!worldToMap(we.position, pt)) continue;
+
+				MapItemIcon icon = MapItemIcon::Generic;
+				ImU32 fallbackCol = IM_COL32(100, 255, 140, 245);
+				if (isSafe) {
+					icon = MapItemIcon::Safe;
+					fallbackCol = IM_COL32(255, 208, 42, 250);
+				} else if (isCash) {
+					icon = MapItemIcon::Cash;
+					fallbackCol = IM_COL32(95, 245, 130, 245);
+				} else if (def) {
+					switch (def->category) {
+					case LootFilter::Category::Weapons:
+					case LootFilter::Category::WeaponMaintenance:
+						icon = MapItemIcon::Weapon;
+						break;
+					case LootFilter::Category::Armor:
+						icon = MapItemIcon::Armor;
+						break;
+					case LootFilter::Category::Valuables:
+						icon = MapItemIcon::Valuable;
+						break;
+					case LootFilter::Category::Medicine:
+						icon = MapItemIcon::Medicine;
+						break;
+					case LootFilter::Category::Keys:
+					case LootFilter::Category::Documents:
+					case LootFilter::Category::Tools:
+					case LootFilter::Category::BreachingTools:
+						icon = MapItemIcon::Key;
+						break;
+					case LootFilter::Category::Cargo:
+						icon = MapItemIcon::Cargo;
+						break;
+					default:
+						icon = MapItemIcon::Generic;
+						break;
+					}
+				}
+
+				const ImU32 col = (isCash || isSafe) ? fallbackCol : MapRarityColor(tier, fallbackCol);
+				DrawMapCategoryIcon(dl, pt, scale, icon, col);
 			}
 		}
 	}

@@ -59,6 +59,9 @@ public:
 	bool InGameMapPlayerNames = false;
 	bool InGameMapDroppedBags = false;
 	bool InGameMapValuables = false;
+	bool InGameMapCargo = false;
+	int InGameMapMinRarity = 3;      // 0=All, 1=Uncommon+, 2=Rare+, 3=Epic+, 4=Legendary+, 5=Mythical
+	int InGameMapCargoMinRarity = 1; // 0=All, 1=Uncommon+, 2=Rare+, 3=Epic+, 4=Legendary+, 5=Mythical
 	float InGameMapScale = 1.0f;
 
 	json ToJson()
@@ -104,6 +107,9 @@ public:
 		j[ConfigName][LIT("InGameMapPlayerNames")] = InGameMapPlayerNames;
 		j[ConfigName][LIT("InGameMapDroppedBags")] = InGameMapDroppedBags;
 		j[ConfigName][LIT("InGameMapValuables")] = InGameMapValuables;
+		j[ConfigName][LIT("InGameMapCargo")] = InGameMapCargo;
+		j[ConfigName][LIT("InGameMapMinRarity")] = InGameMapMinRarity;
+		j[ConfigName][LIT("InGameMapCargoMinRarity")] = InGameMapCargoMinRarity;
 		j[ConfigName][LIT("InGameMapScale")] = InGameMapScale;
 		return j;
 	}
@@ -153,6 +159,9 @@ public:
 		InGameMapPlayerNames = s.value(LIT("InGameMapPlayerNames"), InGameMapPlayerNames);
 		InGameMapDroppedBags = s.value(LIT("InGameMapDroppedBags"), InGameMapDroppedBags);
 		InGameMapValuables = s.value(LIT("InGameMapValuables"), InGameMapValuables);
+		InGameMapCargo = s.value(LIT("InGameMapCargo"), InGameMapCargo);
+		InGameMapMinRarity = s.value(LIT("InGameMapMinRarity"), InGameMapMinRarity);
+		InGameMapCargoMinRarity = s.value(LIT("InGameMapCargoMinRarity"), InGameMapCargoMinRarity);
 		InGameMapScale = s.value(LIT("InGameMapScale"), InGameMapScale);
 	}
 };

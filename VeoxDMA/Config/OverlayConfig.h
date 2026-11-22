@@ -63,9 +63,10 @@ public:
 	int BackdropWidth = 1920;
 	int BackdropHeight = 1080;
 	// When enabled, only player ESP is drawn (world ESP, radar and the money
-	// HUD are suppressed). Toggled by BattleModeKey.
+	// HUD are suppressed). Driven by BattleModeKey (Hold or Toggle).
 	bool BattleMode = false;
 	int BattleModeKey = 0;           // index into Aim::KeyNames()
+	int BattleModeBehavior = 0;      // 0 = Hold, 1 = Toggle
 	int MenuKey = 0;                 // 0=Insert, 1=Home, 2=Delete, 3=End, 4=F11, 5=F12, 6=Right Shift
 	bool PanicMode = false;          // true = immediately blank overlay & stop targeting
 	int PanicKey = 0;                // 0=None, 1=End, 2=F8, 3=F9, 4=F10, 5=F11, 6=F12
@@ -118,6 +119,7 @@ public:
 		j[ConfigName][LIT("BackdropHeight")] = BackdropHeight;
 		j[ConfigName][LIT("BattleMode")] = BattleMode;
 		j[ConfigName][LIT("BattleModeKey")] = BattleModeKey;
+		j[ConfigName][LIT("BattleModeBehavior")] = BattleModeBehavior;
 		j[ConfigName][LIT("MenuKey")] = MenuKey;
 		j[ConfigName][LIT("PanicMode")] = PanicMode;
 		j[ConfigName][LIT("PanicKey")] = PanicKey;
@@ -153,6 +155,7 @@ public:
 		BackdropHeight = s.value(LIT("BackdropHeight"), BackdropHeight);
 		BattleMode = s.value(LIT("BattleMode"), BattleMode);
 		BattleModeKey = s.value(LIT("BattleModeKey"), BattleModeKey);
+		BattleModeBehavior = s.value(LIT("BattleModeBehavior"), BattleModeBehavior);
 		MenuKey = s.value(LIT("MenuKey"), MenuKey);
 		PanicMode = s.value(LIT("PanicMode"), PanicMode);
 		PanicKey = s.value(LIT("PanicKey"), PanicKey);
