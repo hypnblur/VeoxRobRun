@@ -54,7 +54,6 @@ public:
 	float VisMaxDistance = 150.0f;
 	int VisRayCount = 8;
 	bool CarCabinSolid = false;
-	bool VisRing = true;
 	bool StatusRing = true;
 
 	bool NameByRole = true;
@@ -74,7 +73,6 @@ public:
 	D2D1::ColorF ReloadColour = Colour(255, 200, 50);
 	D2D1::ColorF ArmorColour = Colour(100, 180, 255);
 	D2D1::ColorF StaminaColour = Colour(60, 220, 100);
-	D2D1::ColorF VisRingColour = Colour(0, 255, 128);
 	D2D1::ColorF StatusRingColour = Colour(0, 255, 128);
 
 	// Worker-side pose smoothing. The reader blends every new pose sample into
@@ -198,9 +196,7 @@ public:
         j[ConfigName][LIT("VisMaxDistance")] = VisMaxDistance;
         j[ConfigName][LIT("VisRayCount")] = VisRayCount;
         j[ConfigName][LIT("CarCabinSolid")] = CarCabinSolid;
-        j[ConfigName][LIT("VisRing")] = VisRing;
         j[ConfigName][LIT("StatusRing")] = StatusRing;
-        ToJsonColour(&j, LIT("VisRingColour"), &VisRingColour);
         ToJsonColour(&j, LIT("StatusRingColour"), &StatusRingColour);
         j[ConfigName][LIT("Snaplines")] = Snaplines;
         j[ConfigName][LIT("SnaplineOrigin")] = SnaplineOrigin;
@@ -284,9 +280,7 @@ public:
         VisMaxDistance = j[ConfigName].value(LIT("VisMaxDistance"), VisMaxDistance);
         VisRayCount = j[ConfigName].value(LIT("VisRayCount"), VisRayCount);
         CarCabinSolid = j[ConfigName].value(LIT("CarCabinSolid"), CarCabinSolid);
-        VisRing = j[ConfigName].value(LIT("VisRing"), VisRing);
         StatusRing = j[ConfigName].value(LIT("StatusRing"), StatusRing);
-        FromJsonColour(j, LIT("VisRingColour"), &VisRingColour);
         FromJsonColour(j, LIT("StatusRingColour"), &StatusRingColour);
         Snaplines = j[ConfigName].value(LIT("Snaplines"), Snaplines);
         SnaplineOrigin = j[ConfigName].value(LIT("SnaplineOrigin"), SnaplineOrigin);

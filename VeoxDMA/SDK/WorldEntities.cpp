@@ -9,6 +9,7 @@
 #include "Memory.h"
 #include "DebugLog.h"
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -116,18 +117,28 @@ bool ReadScalarPosition(std::uintptr_t transform, Vector3& out)
     out = Vector3{};
     if (transform <= 0x10000) return false;
 
-    const float x = RobRunMemory::ReadFloat(transform + rr::TransformModel::X);
-    const float y = RobRunMemory::ReadFloat(transform + rr::TransformModel::Y);
-    const float z = RobRunMemory::ReadFloat(transform + rr::TransformModel::Z);
+    // TransformModel X (+0x10), Y (+0x18), Z (+0x20) form one contiguous 24-byte
+    // block: read once and decode either inline floats or wrapper pointers.
+    static_assert(rr::TransformModel::Y == rr::TransformModel::X + 8 &&
+                  rr::TransformModel::Z == rr::TransformModel::X + 16,
+                  "TransformModel X/Y/Z must be 8-byte strided");
+    std::uint64_t raw[3]{};
+    if (!RobRunMemory::ReadBytes(transform + rr::TransformModel::X, raw, sizeof(raw)))
+        return false;
+
+    float x = 0.f, y = 0.f, z = 0.f;
+    std::memcpy(&x, &raw[0], sizeof(float));
+    std::memcpy(&y, &raw[1], sizeof(float));
+    std::memcpy(&z, &raw[2], sizeof(float));
     out = Vector3(x, y, z);
     if (ValidPosition(out) && (x != 0.f || y != 0.f || z != 0.f)) return true;
 
     // Some transform models store scalar primitive wrappers instead of inline
-    // floats. Resolve each wrapper and validate the triplet.
+    // floats. Reuse the already-read 64-bit slots as wrapper pointers.
     float wx = 0.f, wy = 0.f, wz = 0.f;
-    const std::uintptr_t px = RobRunMemory::ReadPtr(transform + rr::TransformModel::X);
-    const std::uintptr_t py = RobRunMemory::ReadPtr(transform + rr::TransformModel::Y);
-    const std::uintptr_t pz = RobRunMemory::ReadPtr(transform + rr::TransformModel::Z);
+    const std::uintptr_t px = static_cast<std::uintptr_t>(raw[0]);
+    const std::uintptr_t py = static_cast<std::uintptr_t>(raw[1]);
+    const std::uintptr_t pz = static_cast<std::uintptr_t>(raw[2]);
     if (Il2Cpp::ReadPrimitiveFloat(px, wx) &&
         Il2Cpp::ReadPrimitiveFloat(py, wy) &&
         Il2Cpp::ReadPrimitiveFloat(pz, wz)) {

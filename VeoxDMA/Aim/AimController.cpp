@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <unordered_map>
 
@@ -2528,15 +2529,19 @@ static void TickRecoil()
         g_rcClient + rr::CharacterClientModel::FireModel);
     if (fireModel <= 0x10000) return;
 
-    // Uncached reads — do not use ReadBytes (cached, up to 600ms stale)
+    // Batch both uncached reads into one scatter transaction (1 FPGA round-trip)
     struct { std::uint8_t isFiring; std::uint8_t hasShot; std::uint8_t pad[2]; std::int32_t shotIndex; } fire{};
-    float pitch = 0.f;
-    if (!RobRunMemory::ReadBytesFresh(
-            fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire)))
-        return;
-    if (!RobRunMemory::ReadBytesFresh(
-            rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch)))
-        return;
+    float pitch = std::numeric_limits<float>::quiet_NaN();
+    {
+        Memory::ScopedScatter scatter(TargetProcess);
+        if (!scatter.handle) return;
+        TargetProcess.AddScatterReadRequest(scatter,
+            fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire));
+        TargetProcess.AddScatterReadRequest(scatter,
+            rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
+        if (!TargetProcess.ExecuteReadScatter(scatter))
+            return;
+    }
 
     if (!std::isfinite(pitch) || std::fabs(pitch) > 1.75f) {
         g_rcPitchValid = false;
@@ -2620,6 +2625,11 @@ static void StartRecoilWorkerLocked()
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
+            if (!ConfigInstance.Aim.NoRecoil) {
+                g_rcPitchValid = false;
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
             try { TickRecoil(); } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }

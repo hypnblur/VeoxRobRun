@@ -65,6 +65,22 @@ struct VehicleOBB {
     Float3 halfExtents;
     float yawRad;
     bool isHelicopter;
+    // Precomputed by InitCache() when dynamic occluders refresh (~2 Hz) so
+    // per-ray occlusion checks avoid redundant sin/cos and reject distant OBBs
+    // via a cheap segment-sphere test.
+    float cosNegYaw = 1.0f;
+    float sinNegYaw = 0.0f;
+    float boundRadiusSq = 0.0f;
+    bool cacheValid = false;
+
+    void InitCache() {
+        cosNegYaw = std::cos(-yawRad);
+        sinNegYaw = std::sin(-yawRad);
+        boundRadiusSq = halfExtents.x * halfExtents.x +
+                        halfExtents.y * halfExtents.y +
+                        halfExtents.z * halfExtents.z;
+        cacheValid = true;
+    }
 };
 
 struct SmokeSphere {
@@ -234,6 +250,32 @@ inline bool RayAABB(
     return tmax >= std::max(tmin, tMin) && tmin < tMax;
 }
 
+inline bool RayAABBNear(
+    const Float3& orig, const Float3& invDir,
+    const Float3& mn, const Float3& mx, float tMax, float& tNearOut)
+{
+    float t1 = (mn.x - orig.x) * invDir.x;
+    float t2 = (mx.x - orig.x) * invDir.x;
+    float tmin = std::min(t1, t2);
+    float tmax = std::max(t1, t2);
+
+    t1 = (mn.y - orig.y) * invDir.y;
+    t2 = (mx.y - orig.y) * invDir.y;
+    tmin = std::max(tmin, std::min(t1, t2));
+    tmax = std::min(tmax, std::max(t1, t2));
+
+    t1 = (mn.z - orig.z) * invDir.z;
+    t2 = (mx.z - orig.z) * invDir.z;
+    tmin = std::max(tmin, std::min(t1, t2));
+    tmax = std::min(tmax, std::max(t1, t2));
+
+    if (tmax >= std::max(tmin, 0.f) && tmin < tMax) {
+        tNearOut = tmin;
+        return true;
+    }
+    return false;
+}
+
 // Ray-Sphere intersection for spherical smoke volume decay checks
 inline bool RaySphere(
     const Float3& orig, const Float3& dir,
@@ -250,20 +292,12 @@ inline bool RaySphere(
     return t >= 0.0f && t <= tMax;
 }
 
-// Ray-OBB intersection for vehicles with optional car cabin solid mode
-inline bool RayVehicleOBB(
-    const Float3& orig, const Float3& dir,
-    const VehicleOBB& v, float tMax, bool carCabinSolid, float tMin = 0.20f)
+// Ray-OBB intersection given pre-transformed local origin and precomputed yaw trig
+inline bool RayVehicleOBBLocal(
+    const Float3& localOrig, const Float3& dir,
+    const VehicleOBB& v, float cosY, float sinY,
+    float tMax, bool carCabinSolid, float tMin = 0.20f)
 {
-    const float cosY = std::cos(-v.yawRad);
-    const float sinY = std::sin(-v.yawRad);
-
-    const Float3 rel = orig - v.center;
-    const Float3 localOrig = {
-        rel.x * cosY - rel.z * sinY,
-        rel.y,
-        rel.x * sinY + rel.z * cosY
-    };
     const Float3 localDir = {
         dir.x * cosY - dir.z * sinY,
         dir.y,
@@ -304,6 +338,23 @@ inline bool RayVehicleOBB(
     return false;
 }
 
+// Ray-OBB intersection for vehicles with optional car cabin solid mode
+inline bool RayVehicleOBB(
+    const Float3& orig, const Float3& dir,
+    const VehicleOBB& v, float tMax, bool carCabinSolid, float tMin = 0.20f)
+{
+    const float cosY = v.cacheValid ? v.cosNegYaw : std::cos(-v.yawRad);
+    const float sinY = v.cacheValid ? v.sinNegYaw : std::sin(-v.yawRad);
+
+    const Float3 rel = orig - v.center;
+    const Float3 localOrig = {
+        rel.x * cosY - rel.z * sinY,
+        rel.y,
+        rel.x * sinY + rel.z * cosY
+    };
+    return RayVehicleOBBLocal(localOrig, dir, v, cosY, sinY, tMax, carCabinSolid, tMin);
+}
+
 inline bool IsOccluded(
     const Scene& scene,
     const Float3& origin, const Float3& target,
@@ -327,21 +378,32 @@ inline bool IsOccluded(
                 return true;
         }
         for (const auto& v : dyn->vehicles) {
-            // Skip vehicles the ray originates inside (self-occlusion)
+            // Fast segment-to-bounding-sphere reject before rotating into OBB space
             const Float3 rel = origin - v.center;
-            const float cosY = std::cos(-v.yawRad);
-            const float sinY = std::sin(-v.yawRad);
-            const Float3 lo = { rel.x*cosY - rel.z*sinY, rel.y, rel.x*sinY + rel.z*cosY };
+            const float rSq = v.cacheValid
+                ? v.boundRadiusSq
+                : (v.halfExtents.x * v.halfExtents.x +
+                   v.halfExtents.y * v.halfExtents.y +
+                   v.halfExtents.z * v.halfExtents.z);
+            const float tClosest = std::clamp(-dot(rel, d), 0.0f, tMax);
+            const Float3 closest = rel + d * tClosest;
+            if (dot(closest, closest) > rSq)
+                continue;
+
+            const float cosY = v.cacheValid ? v.cosNegYaw : std::cos(-v.yawRad);
+            const float sinY = v.cacheValid ? v.sinNegYaw : std::sin(-v.yawRad);
+            const Float3 lo = { rel.x * cosY - rel.z * sinY, rel.y, rel.x * sinY + rel.z * cosY };
+            // Skip vehicles the ray originates inside (self-occlusion)
             if (std::abs(lo.x) <= v.halfExtents.x &&
                 std::abs(lo.y) <= v.halfExtents.y &&
                 std::abs(lo.z) <= v.halfExtents.z)
                 continue;
-            if (RayVehicleOBB(origin, d, v, tMax, carCabinSolid, tMin))
+            if (RayVehicleOBBLocal(lo, d, v, cosY, sinY, tMax, carCabinSolid, tMin))
                 return true;
         }
     }
 
-    // 2. Static BVH Scene Pass
+    // 2. Static BVH Scene Pass (near-child-first ordered traversal)
     if (!scene.valid || scene.nodes.empty()) return false;
 
     const Float3 invDir = {
@@ -350,25 +412,27 @@ inline bool IsOccluded(
         std::abs(d.z) > 1e-8f ? 1.0f / d.z : std::copysign(1e8f, d.z),
     };
 
+    float rootT = 0.f;
+    if (!RayAABBNear(origin, invDir, scene.nodes[0].aabbMin, scene.nodes[0].aabbMax, tMax, rootT))
+        return false;
+
     uint32_t stack[128];
     int sp = 0;
     stack[sp++] = 0;
 
     const bool hasSurfaces = !scene.surfaceTypes.empty();
+    const std::size_t surfSize = scene.surfaceTypes.size();
 
     while (sp > 0) {
         const BVHNode& node = scene.nodes[stack[--sp]];
 
-        if (!RayAABB(origin, invDir, node.aabbMin, node.aabbMax, tMax))
-            continue;
-
         if (node.isLeaf()) {
             const uint32_t start = node.triStart();
-            const uint32_t count = node.triCount();
+            const uint32_t end = start + node.triCount();
             float t;
-            for (uint32_t i = start; i < start + count; ++i) {
+            for (uint32_t i = start; i < end; ++i) {
                 if (RayTriangle(origin, d, scene.tris[i], tMax, t, tMin)) {
-                    if (hasSurfaces && i < scene.surfaceTypes.size()) {
+                    if (hasSurfaces && i < surfSize) {
                         const uint16_t surf = scene.surfaceTypes[i];
                         if (surf == Surface_VehicleGlass && !carCabinSolid) {
                             // Vehicle glass see-through allowed when car cabin solid mode is disabled
@@ -379,9 +443,29 @@ inline bool IsOccluded(
                 }
             }
         } else {
-            if (sp < 126) {
-                stack[sp++] = node.right();
-                stack[sp++] = node.left();
+            const uint32_t leftIdx = node.left();
+            const uint32_t rightIdx = node.right();
+            float tLeft = 0.f, tRight = 0.f;
+            const bool hitLeft = RayAABBNear(origin, invDir,
+                scene.nodes[leftIdx].aabbMin, scene.nodes[leftIdx].aabbMax, tMax, tLeft);
+            const bool hitRight = RayAABBNear(origin, invDir,
+                scene.nodes[rightIdx].aabbMin, scene.nodes[rightIdx].aabbMax, tMax, tRight);
+
+            if (hitLeft && hitRight) {
+                if (sp < 126) {
+                    // Push farther child first so the nearer child pops next
+                    if (tLeft <= tRight) {
+                        stack[sp++] = rightIdx;
+                        stack[sp++] = leftIdx;
+                    } else {
+                        stack[sp++] = leftIdx;
+                        stack[sp++] = rightIdx;
+                    }
+                }
+            } else if (hitLeft) {
+                if (sp < 127) stack[sp++] = leftIdx;
+            } else if (hitRight) {
+                if (sp < 127) stack[sp++] = rightIdx;
             }
         }
     }

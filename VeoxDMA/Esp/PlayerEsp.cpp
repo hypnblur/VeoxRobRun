@@ -598,42 +598,6 @@ void DrawPlayers()
 		const ImU32 stateCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.StateColour), alphaMult);
 		const ImU32 espCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.TextColour), alphaMult);
 
-		// Vis Ring: 3D Ground Circle on floor (Y + 0.05m) (item 8)
-		if (pcfg.VisRing)
-		{
-			constexpr int kRingSegments = 24;
-			constexpr float kRingRadius = 0.50f;
-			const Vector3 groundCenter(entPos.x, entPos.y + 0.05f, entPos.z);
-			ImVec2 rpts[kRingSegments];
-			bool rvalid[kRingSegments];
-			int numValid = 0;
-			for (int i = 0; i < kRingSegments; ++i) {
-				const float angle = (float)i * (6.2831853f / (float)kRingSegments);
-				const Vector3 p(groundCenter.x + std::cos(angle) * kRingRadius, groundCenter.y, groundCenter.z + std::sin(angle) * kRingRadius);
-				rvalid[i] = Project(viewProjection, p, screenW, screenH, rpts[i]);
-				if (rvalid[i]) ++numValid;
-			}
-			if (numValid >= 12) {
-				const float pulse = 0.65f + 0.35f * std::sin((float)ImGui::GetTime() * 8.f);
-				ImU32 ringCol;
-				if (ent.visible) {
-					ringCol = IM_COL32(
-						(int)(pcfg.VisRingColour.r * 255.f),
-						(int)(pcfg.VisRingColour.g * 255.f),
-						(int)(pcfg.VisRingColour.b * 255.f),
-						(int)(255.f * pulse));
-				} else {
-					ringCol = IM_COL32(130, 130, 130, (int)(80.f * alphaMult));
-				}
-				for (int i = 0; i < kRingSegments; ++i) {
-					int next = (i + 1) % kRingSegments;
-					if (rvalid[i] && rvalid[next]) {
-						dl->AddLine(rpts[i], rpts[next], ringCol, ent.visible ? 2.0f : 1.0f);
-					}
-				}
-			}
-		}
-
 		// Status Ring: Subtle screen-space halo around torso/head centroid when visible (item 8)
 		if (pcfg.StatusRing && ent.visible)
 		{

@@ -2076,7 +2076,6 @@ void DrawVisualsSkeleton()
 		SliderFloatRow("Vis Max Dist", &ConfigInstance.Player.VisMaxDistance, 0.f, 500.f, " m");
 		SliderFloatRow("Hidden Alpha", &ConfigInstance.Player.HiddenAlpha, 0.f, 1.f);
 		ToggleRow("Car Cabin Solid", &ConfigInstance.Player.CarCabinSolid);
-		ColorToggleRow("Vis Ring", &ConfigInstance.Player.VisRing, ConfigInstance.Player.VisRingColour);
 		ColorToggleRow("Status Ring", &ConfigInstance.Player.StatusRing, ConfigInstance.Player.StatusRingColour);
 		EndCard();
 	}
