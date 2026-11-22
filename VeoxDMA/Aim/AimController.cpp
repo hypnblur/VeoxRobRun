@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1003,87 +1004,187 @@ DebugInfo GetDebug()
 
 static void TickInstantLoot()
 {
-    if (!ConfigInstance.World.InstantLoot) return;
+    struct SavedRevealDesc {
+        std::uintptr_t desc = 0;
+        float shineDur = 0.f;
+        float iconDur = 0.f;
+    };
+    static std::uintptr_t s_revealDescs = 0;
+    static std::uint64_t s_revealSessionGen = 0;
+    static std::uint64_t s_revealStamp = 0;
+    static bool s_revealPatched = false;
+    static float s_savedScanTime = 0.f;
+    static std::vector<SavedRevealDesc> s_savedDescs;
+
+    const auto restoreReveal = [&] {
+        if (!s_revealPatched || s_revealDescs <= 0x10000) return;
+        namespace rv = rr::InventoryRevealViewDescriptions;
+        if (s_savedScanTime > 0.f)
+            TargetProcess.Write(s_revealDescs + rv::TimeToOneCellBorder, s_savedScanTime);
+        for (const auto& entry : s_savedDescs) {
+            if (entry.desc <= 0x10000) continue;
+            TargetProcess.Write(entry.desc + rv::ShineView + rv::ShineDuration, entry.shineDur);
+            TargetProcess.Write(entry.desc + rv::IconView + rv::IconDuration, entry.iconDur);
+        }
+        s_revealPatched = false;
+    };
+
     const auto snap = RobRunReader::GetSnapshot();
+    if (snap && snap->sessionGeneration != s_revealSessionGen) {
+        s_revealSessionGen = snap->sessionGeneration;
+        s_revealDescs = 0;
+        s_revealPatched = false;
+        s_savedDescs.clear();
+        s_revealStamp = 0;
+    }
+
+    if (!ConfigInstance.World.InstantLoot) {
+        restoreReveal();
+        return;
+    }
     if (!snap || snap->battleModel <= 0x10000) return;
 
     const auto bm = snap->battleModel;
 
-    // ProlongedInteractionDialog -> Progress (float at +0x18).
-    // When the progress bar is moving (0 < p < 1), pin it to 1.0.
-    const std::uintptr_t dialog = RobRunMemory::ReadPtr(
-        bm + rr::BattleModel::ProlongedInteractionDialog);
-    if (dialog > 0x10000) {
-        const float progress = RobRunMemory::ReadFloat(
-            dialog + rr::ProlongedInteractionDialogModel::Progress);
-        if (progress > 0.01f && progress < 0.99f) {
-            const float done = 1.0f;
-            TargetProcess.Write(
-                dialog + rr::ProlongedInteractionDialogModel::Progress,
-                done);
-        }
-    }
-
-    // DelayedUseAction -> set EndTs = StartTs so it completes this tick.
+    // 1. DelayedUseActionModel (BattleModel + 0x610): uncached read so -norefresh
+    //    cannot hide the active hold-to-use timer. Collapse EndTs to StartTs.
     const std::uintptr_t delayed = RobRunMemory::ReadPtr(
         bm + rr::BattleModel::DelayedUseAction);
     if (delayed > 0x10000) {
-        float startTs = RobRunMemory::ReadFloat(
-            delayed + rr::DelayedUseActionModel::StartTs);
-        const float endTs = RobRunMemory::ReadFloat(
-            delayed + rr::DelayedUseActionModel::EndTs);
-        if (endTs > startTs && startTs > 0.f) {
-            TargetProcess.Write(
-                delayed + rr::DelayedUseActionModel::EndTs,
-                startTs);
+        struct DelayedBlock {
+            float startTs;
+            std::uint32_t pad;
+            std::uintptr_t action;
+            float endTs;
+        } blk{};
+        if (RobRunMemory::ReadBytesFresh(
+                delayed + rr::DelayedUseActionModel::StartTs, &blk,
+                offsetof(DelayedBlock, endTs) + sizeof(blk.endTs))) {
+            if (blk.action > 0x10000 && std::isfinite(blk.startTs) && std::isfinite(blk.endTs) &&
+                blk.startTs > 0.f && blk.endTs > blk.startTs) {
+                TargetProcess.Write(delayed + rr::DelayedUseActionModel::EndTs, blk.startTs);
+            }
         }
     }
 
-    // Patch InventoryRevealViewDescriptions so loot slots appear instantly
-    // after a container is opened (skip scan/shine/icon animation phases).
-    {
-        static std::uintptr_t cachedRevealDescs = 0;
-        static std::uint64_t revealStamp = 0;
-        const std::uint64_t now = GetTickCount64();
-        if (now - revealStamp < 2000) return;
-        revealStamp = now;
+    // 2. ProlongedInteractionDialogModel (BattleModel + 0x188): uncached read
+    //    and pin Progress (float at +0x18) to 1.0 while moving.
+    const std::uintptr_t dialog = RobRunMemory::ReadPtr(
+        bm + rr::BattleModel::ProlongedInteractionDialog);
+    if (dialog > 0x10000) {
+        float progress = 0.f;
+        if (RobRunMemory::ReadBytesFresh(
+                dialog + rr::ProlongedInteractionDialogModel::Progress, &progress, sizeof(progress)) &&
+            std::isfinite(progress) && progress > 0.005f && progress < 0.995f) {
+            const float done = 1.0f;
+            TargetProcess.Write(
+                dialog + rr::ProlongedInteractionDialogModel::Progress, done);
+        }
+    }
 
-        if (!cachedRevealDescs) {
-            const std::uintptr_t klass =
-                Il2Cpp::FindClassByName("InventoryRevealViewDescriptions");
-            if (klass) {
-                const std::uintptr_t statics = Il2Cpp::StaticFields(klass);
-                if (statics)
-                    cachedRevealDescs = RobRunMemory::ReadPtr(statics);
+    // 3. Local BattleCharacterModel.ProlongedInteractionModel (+0x340):
+    //    _endTs (+0x18) is TimestampData : LongData : BasePrimitiveData<long>
+    //    with int64 _value at +0x18. PredictFinishProlongedInteractionSystem
+    //    completes when now >= EndTs, so collapse any active future EndTs to 1.
+    if (snap->localCharacter > 0x10000) {
+        const std::uintptr_t piModel = RobRunMemory::ReadPtr(
+            snap->localCharacter + rr::BattleCharacterModel::ProlongedInteraction);
+        if (piModel > 0x10000) {
+            const std::uintptr_t endTsData = RobRunMemory::ReadPtr(
+                piModel + rr::ProlongedInteractionModel::EndTs);
+            if (endTsData > 0x10000) {
+                std::int64_t endTsVal = 0;
+                if (RobRunMemory::ReadBytesFresh(
+                        endTsData + rr::ProlongedInteractionModel::DataValue,
+                        &endTsVal, sizeof(endTsVal)) &&
+                    endTsVal > 1) {
+                    const std::int64_t immediate = 1;
+                    TargetProcess.Write(
+                        endTsData + rr::ProlongedInteractionModel::DataValue, immediate);
+                }
             }
         }
-        if (cachedRevealDescs <= 0x10000) { cachedRevealDescs = 0; return; }
+    }
+
+    // 4. Patch InventoryRevealViewDescriptions so container slots reveal instantly
+    //    without scan/shine/icon animation delays.
+    //    Chain (from dump.cs):
+    //      BattleEntitiesUpdater (+0x68) -> BattleScreenContent (+0x540)
+    //      -> InventoryRevealViewDescriptions:
+    //           +0x58 TimeToOneCellBorder (float)
+    //           +0x18 List<Pair> _list -> Pair[i] (stride 0x18) -> +0x10 RevealViewDescription*
+    //               +0x40 ShineSettings.Duration (float)
+    //               +0x68 IconRevealSettings.Duration (float)
+    {
+        const std::uint64_t now = GetTickCount64();
+        if (s_revealPatched && (now - s_revealStamp) < 3000) return;
+        if (!s_revealPatched && (now - s_revealStamp) < 500) return;
+        s_revealStamp = now;
+
+        if (s_revealDescs <= 0x10000 && snap->battleEntitiesUpdater > 0x10000) {
+            const std::uintptr_t screenContent = RobRunMemory::ReadPtr(
+                snap->battleEntitiesUpdater + rr::BattleEntitiesUpdater::_battleScreenContent);
+            if (screenContent > 0x10000) {
+                const std::uintptr_t candidate = RobRunMemory::ReadPtr(
+                    screenContent + rr::BattleScreenContent::RevealViewDescriptions);
+                if (candidate > 0x10000 &&
+                    Il2Cpp::IsClass(candidate, "InventoryRevealViewDescriptions")) {
+                    s_revealDescs = candidate;
+                }
+            }
+        }
+        if (s_revealDescs <= 0x10000) return;
 
         namespace rv = rr::InventoryRevealViewDescriptions;
+        const std::uintptr_t list = RobRunMemory::ReadPtr(s_revealDescs + rv::List);
+        if (list <= 0x10000) { s_revealDescs = 0; s_revealPatched = false; return; }
+        const std::uintptr_t items = RobRunMemory::ReadPtr(list + rr::List::items);
+        const int count = RobRunMemory::ReadInt32(list + rr::List::count);
+        if (items <= 0x10000 || count <= 0 || count > 64) {
+            s_revealDescs = 0;
+            s_revealPatched = false;
+            return;
+        }
 
-        // Cell delay on the container itself (TimeToOneCellBorder).
-        // Write to the instance, NOT to individual descriptions at +0x58
-        // (that offset on a description is GlowColor and will crash).
+        if (!s_revealPatched) {
+            float origScan = 0.f;
+            if (RobRunMemory::ReadBytesFresh(
+                    s_revealDescs + rv::TimeToOneCellBorder, &origScan, sizeof(origScan)) &&
+                std::isfinite(origScan) && origScan > 0.001f) {
+                s_savedScanTime = origScan;
+            }
+            s_savedDescs.clear();
+        }
+
         const float nearZero = 0.0001f;
         const float zero = 0.0f;
-        TargetProcess.Write(cachedRevealDescs + 0x58, nearZero);
+        TargetProcess.Write(s_revealDescs + rv::TimeToOneCellBorder, nearZero);
 
-        const std::uintptr_t list = RobRunMemory::ReadPtr(
-            cachedRevealDescs + rv::Items);
-        if (list <= 0x10000) { cachedRevealDescs = 0; return; }
-        const std::uintptr_t items = RobRunMemory::ReadPtr(list + 0x10);
-        const int count = RobRunMemory::ReadInt32(list + 0x18);
-        if (items <= 0x10000 || count <= 0 || count > 500) { cachedRevealDescs = 0; return; }
-
-        for (int i = 0; i < count; i++) {
-            const std::uintptr_t pair = items + 0x20 + (std::uintptr_t)i * rv::Stride;
+        int patchedCount = 0;
+        for (int i = 0; i < count; ++i) {
+            const std::uintptr_t pair = items + rr::Array::vector + static_cast<std::uintptr_t>(i) * rv::Stride;
             const std::uintptr_t desc = RobRunMemory::ReadPtr(pair + rv::PairDesc);
             if (desc <= 0x10000) continue;
 
-            // Shine duration (inline struct 0x18 + 0x28 = desc + 0x40)
-            TargetProcess.Write(desc + 0x40, zero);
-            // Icon duration (inline struct 0x50 + 0x18 = desc + 0x68)
-            TargetProcess.Write(desc + 0x68, zero);
+            if (!s_revealPatched) {
+                SavedRevealDesc saved{};
+                saved.desc = desc;
+                RobRunMemory::ReadBytesFresh(desc + rv::ShineView + rv::ShineDuration,
+                    &saved.shineDur, sizeof(saved.shineDur));
+                RobRunMemory::ReadBytesFresh(desc + rv::IconView + rv::IconDuration,
+                    &saved.iconDur, sizeof(saved.iconDur));
+                s_savedDescs.push_back(saved);
+            }
+
+            TargetProcess.Write(desc + rv::ShineView + rv::ShineDuration, zero);
+            TargetProcess.Write(desc + rv::IconView + rv::IconDuration, zero);
+            ++patchedCount;
+        }
+
+        if (!s_revealPatched && patchedCount > 0) {
+            s_revealPatched = true;
+            std::printf("[InstantLoot] Patched InventoryRevealViewDescriptions @ 0x%llX (%d rarities, origScan=%.3fs)\n",
+                static_cast<unsigned long long>(s_revealDescs), patchedCount, s_savedScanTime);
         }
     }
 }
@@ -1191,6 +1292,7 @@ void StartAimWorker()
     g_aimWorkerThread = std::thread([] {
         using clock = std::chrono::steady_clock;
         auto lastTick = clock::now() - std::chrono::seconds(1);
+        auto lastInstantLoot = clock::now() - std::chrono::seconds(1);
         auto lastLoot = clock::now() - std::chrono::seconds(1);
         while (!g_aimWorkerStop.load(std::memory_order_relaxed)) {
             const auto now = clock::now();
@@ -1205,9 +1307,12 @@ void StartAimWorker()
                     Tick();
                     TickRecoilSpread();
                 }
+                if (now - lastInstantLoot >= std::chrono::milliseconds(16)) {
+                    lastInstantLoot = now;
+                    TickInstantLoot();
+                }
                 if (now - lastLoot >= std::chrono::milliseconds(50)) {
                     lastLoot = now;
-                    TickInstantLoot();
                     TickInstantUnlock();
                     TickCustomCamera();
                     FovChanger::Tick();

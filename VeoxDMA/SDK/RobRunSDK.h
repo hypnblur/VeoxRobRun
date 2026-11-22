@@ -449,11 +449,17 @@ inline constexpr std::uint32_t BattlePlayerCapacity = 320;
 // Active view updater (live verified)
 // ------------------------------------------------------------------
 namespace BattleEntitiesUpdater {
+inline constexpr std::uintptr_t _battleScreenContent        = 0x68;  // BattleScreenContent
 inline constexpr std::uintptr_t _battleModel                = 0x70;
+inline constexpr std::uintptr_t _globalModel                = 0x78;  // GlobalModel
 inline constexpr std::uintptr_t _entitiesModelsUpdaters     = 0x30;  // Dictionary<int, IUpdater>
 inline constexpr std::uintptr_t _entitiesViewsUpdaters      = 0x38;  // Dictionary<int, IUpdater>
 inline constexpr std::uintptr_t _mixingCameraBlendUpdater   = 0x100; // MixingCameraBlendUpdater
 inline constexpr std::uintptr_t _characterEntityViews       = 0x110; // Dictionary<int, view>
+}
+
+namespace BattleScreenContent {
+inline constexpr std::uintptr_t RevealViewDescriptions      = 0x540; // InventoryRevealViewDescriptions
 }
 
 // Updater list chain:
@@ -1174,29 +1180,32 @@ inline constexpr std::uintptr_t Progress = 0x18; // float
 }
 
 namespace ProlongedInteractionModel {
-inline constexpr std::uintptr_t EndTs = 0x18; // TimestampData (+0x18 i64)
+inline constexpr std::uintptr_t EntityId = 0x10; // IPrimitiveData<int> (_value at +0x18)
+inline constexpr std::uintptr_t EndTs    = 0x18; // IPrimitiveData<long> / TimestampData (_value at +0x18)
+inline constexpr std::uintptr_t DataValue = 0x18; // BasePrimitiveData<T>._value
 }
 
 namespace DelayedUseActionModel {
 inline constexpr std::uintptr_t StartTs = 0x18; // float
+inline constexpr std::uintptr_t Action  = 0x20; // System.Action*
 inline constexpr std::uintptr_t EndTs   = 0x28; // float
 }
 
 namespace AutoLootAfterBreakModel {
-inline constexpr std::uintptr_t AutoLootEndTs = 0x28; // float
+inline constexpr std::uintptr_t AutoLootEntityId = 0x10; // int
+inline constexpr std::uintptr_t AutoLootEndTs    = 0x28; // float
 }
 
 namespace InventoryRevealViewDescriptions {
-inline constexpr std::uintptr_t Items    = 0x10; // List<Pair> _items
-inline constexpr std::uintptr_t Size     = 0x18; // int _size
-inline constexpr std::uintptr_t Data     = 0x20; // array base
-inline constexpr std::uintptr_t Stride   = 0x18;
-inline constexpr std::uintptr_t PairDesc = 0x10; // Pair -> Description
-inline constexpr std::uintptr_t ScanTime = 0x58; // Description.TimeToOneCellBorder (f32)
-inline constexpr std::uintptr_t ShineView     = 0x18; // Description -> ShineView
-inline constexpr std::uintptr_t ShineDuration = 0x28; // ShineView.Duration (f32)
-inline constexpr std::uintptr_t IconView      = 0x50; // Description -> IconView
-inline constexpr std::uintptr_t IconDuration  = 0x18; // IconView.Duration (f32)
+// Inherits ScriptableObject (m_CachedPtr at +0x10); _list is at +0x18.
+inline constexpr std::uintptr_t List               = 0x18; // List<Pair> _list
+inline constexpr std::uintptr_t TimeToOneCellBorder = 0x58; // float on InventoryRevealViewDescriptions
+inline constexpr std::uintptr_t Stride             = 0x18; // sizeof(Pair): _id(0x0), Rarity(0x8), Description(0x10)
+inline constexpr std::uintptr_t PairDesc           = 0x10; // Pair -> RevealViewDescription*
+inline constexpr std::uintptr_t ShineView          = 0x18; // inline RevealShineFxSettings on RevealViewDescription
+inline constexpr std::uintptr_t ShineDuration      = 0x28; // RevealShineFxSettings.Duration (desc + 0x40)
+inline constexpr std::uintptr_t IconView           = 0x50; // inline IconRevealFxSettings on RevealViewDescription
+inline constexpr std::uintptr_t IconDuration       = 0x18; // IconRevealFxSettings.Duration (desc + 0x68)
 }
 
 namespace RadiusInteractEntityModel {

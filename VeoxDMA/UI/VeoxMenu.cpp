@@ -2339,7 +2339,7 @@ void DrawAim()
 			}
 		}
 		ToggleRow("Show FOV Circle", &ConfigInstance.Aim.ShowFov);
-		ToggleRow("Show Aim Debug", &ConfigInstance.Aim.ShowDebug);
+		ToggleRow("Aim Debug HUD (Top-Left)", &ConfigInstance.Aim.ShowDebug);
 		EndCard();
 
 		BeginCard("WEAPON PROFILES", kCardW);
@@ -3260,6 +3260,7 @@ void DrawSettings(bool attached, const std::string& statusText)
 		BeginCard("DISPLAY", kCardW);
 		ToggleRow("Show FPS", &ConfigInstance.Overlay.FPSEnabled);
 		ToggleRow("Status Panel", &ConfigInstance.Overlay.StatusPanel);
+		ToggleRow("Aim Debug HUD", &ConfigInstance.Aim.ShowDebug);
 
 		{
 			static const char* fontNames[kFontCount];
