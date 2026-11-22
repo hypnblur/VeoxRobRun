@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "RobRunReader.h"
+
+extern void RequestReattach();
 #include "RobRunMemory.h"
 #include "Il2Cpp.h"
 #include "Memory.h"
@@ -142,6 +144,62 @@ static bool MaybeRefreshDmaCaches(const char* reason, std::uint64_t cooldownMs)
 }
 
 static void ClearEntityCaches();
+
+// Periodically verify that ROB RUN.exe is still alive with the same PID when
+// root pointers are missing. If the user restarted the game without restarting
+// VeoxDMA, this triggers a clean re-attach automatically.
+static std::uintptr_t ReadPtrFresh(std::uintptr_t address)
+{
+    std::uintptr_t value = 0;
+    return RobRunMemory::ReadBytesFresh(address, &value, sizeof(value)) ? value : 0;
+}
+
+static bool CheckGameProcessAlive()
+{
+    static std::uint64_t s_lastCheckMs = 0;
+    static std::atomic<bool> s_reattachSignaled{ false };
+    const std::uint64_t now = GetTickCount64();
+    if (s_lastCheckMs != 0 && now >= s_lastCheckMs && (now - s_lastCheckMs) < 2000)
+        return true;
+    s_lastCheckMs = now;
+
+    const int attachedPid = TargetProcess.GetPID();
+    if (attachedPid <= 0)
+        return true;
+
+    TargetProcess.RefreshProcessesFast();
+    const DWORD livePid = TargetProcess.GetPidFromName("ROB RUN.exe");
+    if (livePid == 0 || static_cast<int>(livePid) != attachedPid) {
+        if (!s_reattachSignaled.exchange(true, std::memory_order_acq_rel)) {
+            DLOG("ProcessWatchdog: ROB RUN.exe PID changed (%d -> %lu), requesting re-attach",
+                 attachedPid, static_cast<unsigned long>(livePid));
+            std::printf("[Reader] ROB RUN.exe restarted/closed (pid %d -> %lu) — auto re-attaching...\n",
+                attachedPid, static_cast<unsigned long>(livePid));
+            RequestReattach();
+        }
+        return false;
+    }
+    s_reattachSignaled.store(false, std::memory_order_release);
+    return true;
+}
+
+// city_colliders.bvh only matches the City map. On non-City maps (Hub, Cottage,
+// etc.), raycasting against City geometry produces false occlusions where every
+// player appears behind a wall.
+static bool IsBvhActiveForCurrentLocation()
+{
+    std::string loc;
+    {
+        std::lock_guard<std::mutex> lk(locationMutex);
+        loc = cachedLocationId;
+    }
+    if (loc.empty())
+        return true; // location not read yet -> allow BVH
+    std::string lower = loc;
+    for (char& c : lower)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lower.find("city") != std::string::npos;
+}
 
 static void MarkSessionChanged()
 {
@@ -3076,6 +3134,8 @@ static void UpdateInternal()
                     std::printf("[Reader] Sustained GOM failure (%d attempts) — flushing DMA caches & retrying CR3 fix...\n",
                         gameResolveFails);
                     gameResolveFails = 0;
+                    if (!CheckGameProcessAlive())
+                        return;
                     MaybeRefreshDmaCaches("gomResolveFail", 2000);
                     TargetProcess.FixCr3();
                 }
@@ -3086,6 +3146,8 @@ static void UpdateInternal()
         } else {
             --gameRetryCountdown;
         }
+        if (!cachedGame)
+            CheckGameProcessAlive();
     } else {
         gameResolveFails = 0;
     }
@@ -3097,29 +3159,49 @@ static void UpdateInternal()
 
     // Unity swaps BattleModel and BattleEntitiesModel on every map load. The old
     // objects are freed but still pass a class check, so a stale pointer looks
-    // healthy and the ESP keeps reading the previous map. Instead of a timer,
-    // follow the stable Game pointer and compare: the moment the game points at a
-    // different model, that IS the state change.
-    // Loading screens sit between maps, so a slow poll is plenty: 8 seconds.
+    // healthy and the ESP keeps reading the previous map. Follow the Game pointer
+    // with uncached reads every 2s so location rejoins recover immediately even
+    // under -norefresh.
     static std::uint64_t lastMapCheck = 0;
     const std::uint64_t nowTick = GetTickCount64();
-    const bool mapCheckDue = (nowTick - lastMapCheck) >= 8000;
+    const bool mapCheckDue = (nowTick - lastMapCheck) >= 2000;
     if (mapCheckDue) lastMapCheck = nowTick;
     if (cachedGame && mapCheckDue) {
-        const std::uintptr_t gameModel = ReadPtr(cachedGame + rr::Game::GameModel);
+        const std::uintptr_t gameModel = ReadPtrFresh(cachedGame + rr::Game::GameModel);
         const std::uintptr_t freshBattle = gameModel > 0x10000
-            ? ReadPtr(gameModel + rr::GameModel::BattleModel) : 0;
+            ? ReadPtrFresh(gameModel + rr::GameModel::BattleModel) : 0;
         // Hysteresis: only adopt a new model once the same pointer shows up on two
         // consecutive updates. Without this a transient read or a fallback-resolved
         // pointer would be treated as a map change and clear the world every frame.
         static std::uintptr_t pendingBattle = 0;
         static int pendingBattleHits = 0;
+        static int emptyBattleHits = 0;
         if (freshBattle > 0x10000 && freshBattle != cachedBattleModel) {
+            emptyBattleHits = 0;
             if (freshBattle == pendingBattle) ++pendingBattleHits;
             else { pendingBattle = freshBattle; pendingBattleHits = 1; }
+        } else if (freshBattle <= 0x10000 && cachedBattleModel > 0x10000) {
+            pendingBattle = 0;
+            pendingBattleHits = 0;
+            if (++emptyBattleHits >= 2) {
+                DLOG("ReaderRoot: BattleModel cleared on scene exit (gameModel=0x%llx)",
+                     (unsigned long long)gameModel);
+                cachedBattleModel = 0;
+                cachedBattleEntities = 0;
+                cachedUpdater = 0;
+                cachedLocalCharacter = 0;
+                cachedCameraModel = 0;
+                cachedLookDirectionModel = 0;
+                cachedLookDirDirect = 0;
+                cachedPlayerRotationInput = 0;
+                emptyBattleHits = 0;
+                if (gameModel <= 0x10000 && !IsClass(cachedGame, "Game"))
+                    cachedGame = 0;
+            }
         } else {
             pendingBattle = 0;
             pendingBattleHits = 0;
+            emptyBattleHits = 0;
         }
         if (freshBattle > 0x10000 && freshBattle != cachedBattleModel && pendingBattleHits >= 2 &&
             IsClass(freshBattle, "BattleModel")) {
@@ -3141,7 +3223,7 @@ static void UpdateInternal()
         } else if (cachedBattleModel > 0x10000 && cachedBattleEntities > 0x10000) {
             // Same BattleModel, but the entities model under it may have been
             // rebuilt (entering or leaving a raid without a sector change).
-            const std::uintptr_t freshEntities = ReadPtr(
+            const std::uintptr_t freshEntities = ReadPtrFresh(
                 cachedBattleModel + rr::BattleModel::BattleEntitiesModel);
             if (freshEntities > 0x10000 && freshEntities != cachedBattleEntities &&
                 IsClass(freshEntities, "BattleEntitiesModel")) {
@@ -3155,6 +3237,8 @@ static void UpdateInternal()
     }
 
     if (!cachedBattleModel) {
+        if (!CheckGameProcessAlive())
+            return;
         const std::uint64_t nowMs = GetTickCount64();
         if (cachedGame > 0x10000 && (lastWaitLogMs == 0 || nowMs - lastWaitLogMs >= 5000)) {
             lastWaitLogMs = nowMs;
@@ -3186,7 +3270,7 @@ static void UpdateInternal()
 
     if (!cachedBattleEntities) {
         if (battleEntitiesRetryCountdown <= 0) {
-            const std::uintptr_t candidate = ReadPtr(
+            const std::uintptr_t candidate = ReadPtrFresh(
                 cachedBattleModel + rr::BattleModel::BattleEntitiesModel);
             if (IsClass(candidate, "BattleEntitiesModel"))
                 cachedBattleEntities = candidate;
@@ -3197,6 +3281,8 @@ static void UpdateInternal()
         }
     }
     if (cachedBattleEntities <= 0x10000) {
+        if (!CheckGameProcessAlive())
+            return;
         cachedCameraModel = 0;
         cachedLookDirectionModel = 0;
         cachedLookDirDirect = 0;
@@ -4875,27 +4961,45 @@ static void UpdateInternal()
             const bool haveLocalPos = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
             const float entDist = haveLocalPos ? Distance(entity.position, localPosition) : 0.f;
             const auto bvh = LoadBvhSnapshot();
+            const bool bvhUsable = bvh && bvh->valid && IsBvhActiveForCurrentLocation();
             if (ConfigInstance.Player.VisMaxDistance > 0.f && entDist > ConfigInstance.Player.VisMaxDistance) {
-                entity.visible = false;
-                for (auto& seg : entity.bones) {
-                    seg.visible = false;
+                if (!ConfigInstance.Aim.VisibleBonesOnly) {
+                    entity.visible = false;
+                    for (auto& seg : entity.bones) {
+                        seg.visible = false;
+                    }
                 }
+            }
+            else if (!bvhUsable && ConfigInstance.Aim.VisibleBonesOnly) {
+                // No valid BVH for this map (e.g., Hub/Cottage) — don't falsely reject
+                // standing-still players based on animator motion alone.
+                entity.visible = true;
             }
             else if (!fullMapFastMode &&
                 (ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
-                bvh && bvh->valid && visCamera.valid &&
+                bvhUsable &&
                 entity.entityId != localEntityId)
             {
+                // Refresh camera pose right before raycasting so fast peeks/turns
+                // never lag behind the camera sample taken at the start of UpdateInternal.
+                RobRunCamera::CameraState liveVisCam = visCamera;
+                {
+                    RobRunCamera::CameraState freshNow{};
+                    if (GetFreshCamera(freshNow) && freshNow.valid)
+                        liveVisCam = freshNow;
+                }
+                if (liveVisCam.valid) {
                 const CollisionBVH::Float3 cam = {
-                    visCamera.position.x,
-                    visCamera.position.y,
-                    visCamera.position.z };
+                    liveVisCam.position.x,
+                    liveVisCam.position.y,
+                    liveVisCam.position.z };
 
                 bool anyVisible = false;
                 const int rayCount = ConfigInstance.Player.VisRayCount;
 
                 if (rayCount <= 2 || entity.bones.empty()) {
-                    // Level 1: 2 Rays (Torso + Head). Lowest CPU load.
+                    // Level 1 (or fallback when Skeleton ESP is off / bones empty):
+                    // 2 Rays (Torso + Head). Never leaves anyVisible=false just because bones weren't built.
                     const CollisionBVH::Float3 torso = {
                         entity.position.x,
                         entity.position.y + 0.95f,
@@ -4963,6 +5067,7 @@ static void UpdateInternal()
                     }
                 }
                 entity.visible = anyVisible;
+                }
             }
 
             if (entity.entityId == localEntityId) {
@@ -5671,6 +5776,7 @@ bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool c
 
 bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
 {
+    if (!IsBvhActiveForCurrentLocation()) return false;
     const auto bvh = LoadBvhSnapshot();
     if (!bvh || !bvh->valid) return false;
     RobRunCamera::CameraState cam{};
