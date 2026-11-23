@@ -804,7 +804,7 @@ static void Tick()
         if (const char* why = ResolveContext(*snap, ctx)) {
             // Swaps stay while enabled (the lookups outlive a match); turning
             // the changer off restores them even outside a match.
-            if (!ConfigInstance.Skin.Enabled) { RestoreAll(); RestoreWeapons(); }
+            if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.Skin.Enabled) { RestoreAll(); RestoreWeapons(); }
             state.status = why;
             state.error = std::string(why) != "Not in a match";
             Publish(state);
@@ -822,7 +822,7 @@ static void Tick()
 
     state.inMatch = true;
     state.female = ctx.female;
-    const bool enabled = ConfigInstance.Skin.Enabled;
+    const bool enabled = ConfigInstance.Overlay.MemWriteMaster && ConfigInstance.Skin.Enabled;
     bool rebuild = false;
 
     for (int i = 0; i < kSlotCount; ++i) {
@@ -913,9 +913,10 @@ void Start()
     g_stop.store(false);
     g_thread = std::thread([] {
         while (!g_stop.load()) {
-            // Skip all DMA reads when the skin changer is off, nothing needs
-            // restoring, and the menu is closed so FPGA bandwidth stays free.
-            if (!ConfigInstance.Skin.Enabled && !HasAnyActiveSwap() && !Overlay::MenuOpen()) {
+            // Skip all DMA reads when the skin changer is off (or mem writes are disabled),
+            // nothing needs restoring, and the menu is closed so FPGA bandwidth stays free.
+            const bool wantActive = ConfigInstance.Overlay.MemWriteMaster && ConfigInstance.Skin.Enabled;
+            if (!wantActive && !HasAnyActiveSwap() && !Overlay::MenuOpen()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
                 continue;
             }

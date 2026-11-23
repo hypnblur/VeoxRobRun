@@ -215,7 +215,8 @@ bool IsHolding()
 void Tick()
 {
     std::lock_guard<std::mutex> lock(g_fovMutex);
-    const bool enabled = ConfigInstance.Overlay.FovChanger && !ConfigInstance.Overlay.PanicMode;
+    const bool enabled = ConfigInstance.Overlay.MemWriteMaster &&
+        ConfigInstance.Overlay.FovChanger && !ConfigInstance.Overlay.PanicMode;
     const float fovVal = std::clamp(ConfigInstance.Overlay.CameraFov, 20.0f, 160.0f);
 
     const auto snap = RobRunReader::GetSnapshot();

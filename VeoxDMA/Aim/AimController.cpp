@@ -1145,7 +1145,7 @@ static void TickInstantLoot()
         g_instantLoot.battleModel = bm;
     }
 
-    if (!ConfigInstance.World.InstantLoot) {
+    if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.World.InstantLoot) {
         RestoreInstantLoot();
         return;
     }
@@ -1185,7 +1185,7 @@ static bool ReadPtrFreshSafe(std::uintptr_t addr, std::uintptr_t& out);
 
 static void TickInstantUnlock()
 {
-    if (!ConfigInstance.World.InstantUnlock) return;
+    if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.World.InstantUnlock) return;
     const auto snap = RobRunReader::GetSnapshot();
     const std::uint64_t now = GetTickCount64();
     if (!CanSafelyWriteSession(snap, now)) return;
@@ -1274,7 +1274,7 @@ static void TickCustomCamera()
         if (snap) g_customCam.sessionGen = snap->sessionGeneration;
     }
 
-    if (!ConfigInstance.Overlay.CustomCameraDistance) {
+    if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.Overlay.CustomCameraDistance) {
         if (g_customCam.applied && g_customCam.captured &&
             CanSafelyWriteSession(snap, now) && snap->cameraModel == g_customCam.cameraModel) {
             std::uintptr_t liveCam = 0;
@@ -2151,7 +2151,7 @@ void Tick()
     const float targetPitch = std::atan2(-dir.y, horizontal);
 
     // -------- Memory Aim: write camera angles over DMA -------------------
-    if (cfg.AimType == 0 && cfg.MemoryWrite) {
+    if (cfg.AimType == 0 && cfg.MemoryWrite && ConfigInstance.Overlay.MemWriteMaster) {
         stopAiming();
         dbg.writeMode = true;
 
@@ -2474,7 +2474,7 @@ static bool ReadPtrFreshSafe(std::uintptr_t addr, std::uintptr_t& out)
 
 static void TickRecoil()
 {
-    if (!ConfigInstance.Aim.NoRecoil) {
+    if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.Aim.NoRecoil) {
         g_rcPitchValid = false;
         return;
     }
@@ -2625,7 +2625,7 @@ static void StartRecoilWorkerLocked()
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
-            if (!ConfigInstance.Aim.NoRecoil) {
+            if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.Aim.NoRecoil) {
                 g_rcPitchValid = false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
@@ -2651,7 +2651,7 @@ void StopRecoilWorker()
 void TickRecoilSpread()
 {
     const auto& cfg = ConfigInstance.Aim;
-    if (!cfg.NoSpread && !cfg.DynamicRecoilCompensation)
+    if (!ConfigInstance.Overlay.MemWriteMaster || (!cfg.NoSpread && !cfg.DynamicRecoilCompensation))
         return;
 
     const auto snapshot = RobRunReader::GetSnapshot();

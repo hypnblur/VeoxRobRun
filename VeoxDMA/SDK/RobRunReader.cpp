@@ -4609,13 +4609,52 @@ static void UpdateInternal()
                     det.isKnockedOut = false;
                 }
 
-                if (det.isKnockedOut && s.entityId == localEntityId &&
-                    ConfigInstance.Aim.IgnoreKnock && s.knockout > 0x10000) {
+                if ((det.isKnockedOut || det.isKnockedDown) &&
+                    localEntityId >= 0 && s.entityId == localEntityId &&
+                    ConfigInstance.Overlay.MemWriteMaster &&
+                    ConfigInstance.Aim.IgnoreKnock && !ConfigInstance.Overlay.PanicMode &&
+                    s.characterModel > 0x10000) {
                     const std::uint64_t nowMs = GetTickCount64();
                     if (sessionChangedMs == 0 || (nowMs >= sessionChangedMs && nowMs - sessionChangedMs >= 2000)) {
-                        std::uintptr_t zero = 0;
-                        TargetProcess.Write(
-                            s.knockout + rr::KnockoutModel::Phase, zero);
+                        // Never write 0 to KnockoutModel::Phase (+0x18) itself: that field is the
+                        // readonly ReferenceData<KnockoutPhaseDescription> wrapper pointer, so nulling
+                        // it causes immediate game crashes. Only clear the nullable inner _value
+                        // (+0x18 inside the wrapper) after fresh-verifying the live pointer chain.
+                        if (det.isKnockedOut && s.knockout > 0x10000 &&
+                            ReadPtrFresh(s.characterModel + rr::BattleCharacterModel::Knockout) == s.knockout) {
+                            if (s.koPhase > 0x10000 &&
+                                ReadPtrFresh(s.knockout + rr::KnockoutModel::Phase) == s.koPhase) {
+                                const std::uintptr_t livePhaseDesc =
+                                    ReadPtrFresh(s.koPhase + rr::ReferenceData::Value);
+                                if (IsActiveKnockoutPhaseDesc(livePhaseDesc)) {
+                                    std::uintptr_t zero = 0;
+                                    TargetProcess.Write(s.koPhase + rr::ReferenceData::Value, zero);
+                                }
+                            }
+                            if (s.koEndTsW > 0x10000 &&
+                                ReadPtrFresh(s.knockout + rr::KnockoutModel::EndTs) == s.koEndTsW) {
+                                std::int64_t liveEndTs = 0;
+                                if (RobRunMemory::ReadBytesFresh(
+                                        s.koEndTsW + rr::PrimitiveData::value, &liveEndTs, sizeof(liveEndTs)) &&
+                                    battleNowMs > 0 && liveEndTs > kSentinelTs && liveEndTs > battleNowMs &&
+                                    (liveEndTs - battleNowMs) <= kMaxKnockdownRemainMs) {
+                                    std::int64_t zeroTs = 0;
+                                    TargetProcess.Write(s.koEndTsW + rr::PrimitiveData::value, zeroTs);
+                                }
+                            }
+                        }
+                        if (det.isKnockedDown && s.knockdown > 0x10000 && s.kdEndTsW > 0x10000 &&
+                            ReadPtrFresh(s.characterModel + rr::BattleCharacterModel::Knockdown) == s.knockdown &&
+                            ReadPtrFresh(s.knockdown + rr::KnockdownModel::EndTs) == s.kdEndTsW) {
+                            std::int64_t liveKdEndTs = 0;
+                            if (RobRunMemory::ReadBytesFresh(
+                                    s.kdEndTsW + rr::PrimitiveData::value, &liveKdEndTs, sizeof(liveKdEndTs)) &&
+                                battleNowMs > 0 && liveKdEndTs > kSentinelTs && liveKdEndTs > battleNowMs &&
+                                (liveKdEndTs - battleNowMs) <= kMaxKnockdownRemainMs) {
+                                std::int64_t zeroTs = 0;
+                                TargetProcess.Write(s.kdEndTsW + rr::PrimitiveData::value, zeroTs);
+                            }
+                        }
                     }
                 }
 
@@ -5405,7 +5444,7 @@ static void UpdateInternal()
     // so this player pose pass runs at full speed without latency spikes.
 
     if (cachedGame > 0x10000) {
-        if (ConfigInstance.Aim.HideCrosshair)
+        if (ConfigInstance.Overlay.MemWriteMaster && ConfigInstance.Aim.HideCrosshair)
             HideDefaultCrosshair(cachedGame);
         else
             RestoreDefaultCrosshair();

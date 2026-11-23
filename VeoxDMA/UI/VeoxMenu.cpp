@@ -352,7 +352,7 @@ constexpr SearchEntry kSearchIndex[] = {
 	// Misc -> Gameplay & Tools
 	{ "Camera Zoom", 4, 0 }, { "Camera Distance", 4, 0 }, { "FOV Changer", 4, 0 },
 	{ "Camera FOV", 4, 0 }, { "Instant Loot", 4, 0 }, { "Instant Safe & Door Unlock", 4, 0 },
-	{ "Ignore Knock (Local)", 4, 0 }, { "Hide Default Crosshair", 4, 0 },
+	{ "Mem Write Master Switch", 4, 0 }, { "Ignore Knock (Local)", 4, 0 }, { "Hide Default Crosshair", 4, 0 },
 	{ "Battle Mode", 4, 0 }, { "Battle Mode Key", 4, 0 }, { "Battle Mode Action", 4, 0 },
 	{ "Read Item Catalog", 4, 0 }, { "Dump Item Prices", 4, 0 }, { "Probe Money Models", 4, 0 },
 	// Misc -> Skins
@@ -848,6 +848,14 @@ void DrawPillSwitch(ImDrawList* dl, const ImRect& track, float t)
 		C(Mix(kTextDim, ImVec4(1, 1, 1, 1), t)));
 }
 
+struct PendingMemWritePrompt {
+	bool requestOpen = false;
+	bool* targetFlag = nullptr; // nullptr when triggered directly by Mem Write Master Switch
+	bool tracksDirty = true;
+	std::string featureName;
+};
+static PendingMemWritePrompt g_memWritePrompt{};
+
 bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracksDirty = true)
 {
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
@@ -862,9 +870,22 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracks
 	bool hov = false, held = false;
 	const bool pressed = ImGui::ButtonBehavior(bb, id, &hov, &held);
 	if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+	bool changed = false;
 	if (pressed) {
-		*v = !*v;
-		if (tracksDirty) g_dirty = true;
+		const bool turningOn = !*v;
+		if (memoryWrite && turningOn && !ConfigInstance.Overlay.MemWriteMaster) {
+			// Gate enabling any MEM WRITE switch behind an explicit confirmation popup.
+			const char* dispEnd = ImGui::FindRenderedTextEnd(label);
+			g_memWritePrompt.requestOpen = true;
+			g_memWritePrompt.targetFlag = (v == &ConfigInstance.Overlay.MemWriteMaster) ? nullptr : v;
+			g_memWritePrompt.tracksDirty = tracksDirty;
+			g_memWritePrompt.featureName.assign(label, dispEnd);
+		} else {
+			*v = !*v;
+			changed = true;
+			if (tracksDirty) g_dirty = true;
+		}
 	}
 
 	static std::map<ImGuiID, float> anim;
@@ -885,10 +906,10 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracks
 	const ImRect track(ImVec2(p.x + w - tw, p.y + (kRow - th) * 0.5f),
 		ImVec2(p.x + w, p.y + (kRow + th) * 0.5f));
 	if (memoryWrite)
-		MemoryWriteBadge(track.Min.x - 8.f, p.y, kRow, *v);
+		MemoryWriteBadge(track.Min.x - 8.f, p.y, kRow, *v && ConfigInstance.Overlay.MemWriteMaster);
 	DrawPillSwitch(dl, track, t);
 
-	return pressed;
+	return changed;
 }
 
 bool ColorToggleRow(const char* label, bool* v, D2D1::ColorF& colour)
@@ -2868,6 +2889,9 @@ void DrawMiscGameplay()
 	ImGui::BeginGroup();
 	{
 		BeginCard("Gameplay", IconKind::Sliders, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Mem Write Master Switch", &ConfigInstance.Overlay.MemWriteMaster, true);
+		if (!ConfigInstance.Overlay.MemWriteMaster)
+			Note("Master Switch is OFF - all MEM WRITE features below are inactive.");
 		ToggleRow("Camera Zoom", &ConfigInstance.Overlay.CustomCameraDistance, true);
 		if (ConfigInstance.Overlay.CustomCameraDistance)
 			SliderFloatRow("Camera Distance", &ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f, " m");
@@ -2877,7 +2901,7 @@ void DrawMiscGameplay()
 		ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot, true);
 		ToggleRow("Instant Safe & Door Unlock", &ConfigInstance.World.InstantUnlock, true);
 		ToggleRow("Ignore Knock (Local)", &ConfigInstance.Aim.IgnoreKnock, true);
-		ToggleRow("Hide Default Crosshair", &ConfigInstance.Aim.HideCrosshair);
+		ToggleRow("Hide Default Crosshair", &ConfigInstance.Aim.HideCrosshair, true);
 		EndCard();
 
 		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
@@ -3393,6 +3417,8 @@ void DrawSettingsOverlay()
 	ImGui::BeginGroup();
 	{
 		BeginCard("Hotkeys & Safety", IconKind::Shield, kCardW);
+		ToggleRow("Mem Write Master Switch", &ConfigInstance.Overlay.MemWriteMaster, true);
+		Note("Must be enabled for any MEM WRITE feature to operate. Turning it off disables & restores all active writes.");
 		ComboRow("Menu Key", &ConfigInstance.Overlay.MenuKey, kMenuKeyLabels, IM_ARRAYSIZE(kMenuKeyLabels));
 		ToggleRow("Panic Mode", &ConfigInstance.Overlay.PanicMode);
 		ComboRow("Panic Key", &ConfigInstance.Overlay.PanicKey, panicKeys, IM_ARRAYSIZE(panicKeys));
@@ -4242,6 +4268,80 @@ void Draw(bool attached, const std::string& statusText)
 		}
 
 		g_lastPos = pos;
+
+		// Confirmation modal whenever a user enables a MEM WRITE feature while the
+		// Mem Write Master Switch is off. Kept inside the ##ROBRUN window scope so
+		// OpenPopup and BeginPopupModal share the exact same ImGui ID stack.
+		if (g_memWritePrompt.requestOpen) {
+			g_memWritePrompt.requestOpen = false;
+			ImGui::OpenPopup("##memwrite_confirm");
+		}
+		{
+			constexpr float modalW = 390.f;
+			const ImVec2 center(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f);
+			ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+			ImGui::SetNextWindowSize(ImVec2(modalW, 0.f), ImGuiCond_Always);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.f, 16.f));
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.f);
+			ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
+			ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.f, 10.f));
+			ImGui::PushStyleColor(ImGuiCol_PopupBg, C(kPopup));
+			ImGui::PushStyleColor(ImGuiCol_Border, C(kAccent, 0.65f));
+			ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, IM_COL32(0, 0, 0, 145));
+
+			if (ImGui::BeginPopupModal("##memwrite_confirm", nullptr,
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar |
+				ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings))
+			{
+				ImGui::PushFont(font::inter_medium_widget);
+				ImGui::PushStyleColor(ImGuiCol_Text, C(kAccent));
+				ImGui::TextUnformatted("MEM WRITE WARNING");
+				ImGui::PopStyleColor();
+
+				ImGui::PushStyleColor(ImGuiCol_Text, C(kText));
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + modalW - 36.f);
+				ImGui::TextUnformatted("You're enabling a mem write feature, do you wish to proceed?");
+				ImGui::PopTextWrapPos();
+				ImGui::PopStyleColor();
+				ImGui::PopFont();
+
+				if (g_memWritePrompt.targetFlag && !g_memWritePrompt.featureName.empty()) {
+					Note("Enabling \"%s\" will also turn on the Mem Write Master Switch.",
+						g_memWritePrompt.featureName.c_str());
+				} else {
+					Note("Enabling the Mem Write Master Switch allows active MEM WRITE features to modify game memory over DMA.");
+				}
+
+				ImGui::Dummy(ImVec2(0.f, 4.f));
+				const float avail = ImGui::GetContentRegionAvail().x;
+				const float btnW = (avail - 10.f) * 0.5f;
+
+				if (InlineButton("Yes, Enable", btnW, true)) {
+					ConfigInstance.Overlay.MemWriteMaster = true;
+					if (g_memWritePrompt.targetFlag)
+						*g_memWritePrompt.targetFlag = true;
+					if (g_memWritePrompt.tracksDirty)
+						g_dirty = true;
+					g_memWritePrompt = {};
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::SameLine(0.f, 10.f);
+				if (InlineButton("No, Don't Enable", btnW, false)) {
+					g_memWritePrompt = {};
+					ImGui::CloseCurrentPopup();
+				}
+
+				if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+					g_memWritePrompt = {};
+					ImGui::CloseCurrentPopup();
+				}
+
+				ImGui::EndPopup();
+			}
+
+			ImGui::PopStyleColor(3);
+			ImGui::PopStyleVar(4);
+		}
 	}
 	ImGui::End();
 
