@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "WebRadar.h"
+#include "WebRadarHtml.h"
+#include "MapSpriteData.h"
 #include "Radar.h"
 #include "RobRunReader.h"
 #include "RobRunSDK.h"
@@ -14,6 +16,10 @@
 #include <shellapi.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <cstdio>
+#include <memory>
+#include <unordered_map>
 #include <utility>
 
 namespace WebRadar {
@@ -21,10 +27,45 @@ namespace WebRadar {
 namespace {
 
 std::atomic<bool> g_serverRunning{ false };
+std::atomic<int> g_activeStreams{ 0 };
 std::thread g_serverThread;
 int g_serverPort = 8888;
 std::mutex g_socketMutex;
 SOCKET g_listenSocket = INVALID_SOCKET;
+
+// RAM cache for /maps/<filename>
+std::mutex g_mapCacheMutex;
+std::unordered_map<std::string, std::shared_ptr<const std::vector<char>>> g_mapFileCache;
+
+// Shared state for vehicle driver/motion memory and cached loot serialization
+std::mutex g_stateBuildMutex;
+
+struct LastVehicleDriver {
+	std::int32_t entityId = -1;
+	int role = 0;
+	std::string roleName;
+	std::string nicknameUtf8;
+	bool isTeammate = false;
+	std::uint64_t stampMs = 0;
+};
+std::unordered_map<int, LastVehicleDriver> g_lastVehDriver;
+std::uint64_t g_lastVehDriverSession = 0;
+
+struct VehicleMotion {
+	Vector3 anchorPos{};
+	std::uint64_t lastMovedMs = 0;
+	bool initialized = false;
+};
+std::unordered_map<int, VehicleMotion> g_vehMotion;
+std::uint64_t g_vehMotionSession = 0;
+
+std::uint64_t g_localPublicId = 0;
+std::uint64_t g_localPubSession = 0;
+std::string g_lastAutoLocationId;
+
+const void* g_cachedLootWorldPtr = nullptr;
+std::uint64_t g_cachedLootVer = 0;
+json g_cachedLootArray = json::array();
 
 void CloseListenSocket()
 {
@@ -78,798 +119,689 @@ std::string UrlDecode(const std::string& in)
 	return out;
 }
 
-// ---------------------------------------------------------------------------
-// Embedded HTML5 / Canvas Single-Page Application
-// ---------------------------------------------------------------------------
-const std::string kWebRadarHtml = std::string(R"raw_html(<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>VeoxDMA - Tactical Web Radar</title>
-<style>
-  :root {
-    --bg-dark: #0a0c14;
-    --panel-bg: rgba(14, 18, 30, 0.88);
-    --panel-border: rgba(160, 100, 255, 0.22);
-    --accent: #9d4edd;
-    --accent-bright: #c77dff;
-    --accent-glow: rgba(157, 78, 221, 0.35);
-    --text: #f0f2fd;
-    --text-dim: #9aa2c2;
-    --text-faint: #5a6282;
-    --green: #38ef7d;
-    --cyan: #38bdf8;
-    --red: #ff4d4d;
-    --gold: #ffc107;
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body, html {
-    width: 100%; height: 100%;
-    background-color: var(--bg-dark);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    overflow: hidden;
-    user-select: none;
-    -webkit-user-select: none;
-  }
-  #radarCanvas {
-    position: absolute;
-    top: 0; left: 0;
-    width: 100%; height: 100%;
-    display: block;
-    cursor: grab;
-  }
-  #radarCanvas:active { cursor: grabbing; }
-
-  /* Floating Glassmorphism Toolbar */
-  .toolbar {
-    position: absolute;
-    top: 14px; left: 14px;
-    background: var(--panel-bg);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-    border: 1px solid var(--panel-border);
-    border-radius: 12px;
-    padding: 10px 16px;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
-    z-index: 100;
-    flex-wrap: wrap;
-    max-width: calc(100vw - 28px);
-  }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-weight: 800;
-    letter-spacing: 1.5px;
-    font-size: 14px;
-    color: var(--text);
-  }
-  .brand-badge {
-    background: linear-gradient(135deg, #7b2cbf, #9d4edd);
-    color: #fff;
-    padding: 3px 7px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 900;
-  }
-  .status-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 11px;
-    font-weight: 700;
-    padding: 3px 10px;
-    border-radius: 20px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-  .status-badge.online {
-    background: rgba(56, 239, 125, 0.14);
-    color: var(--green);
-    border: 1px solid rgba(56, 239, 125, 0.4);
-  }
-  .status-badge.offline {
-    background: rgba(255, 77, 77, 0.14);
-    color: var(--red);
-    border: 1px solid rgba(255, 77, 77, 0.4);
-  }
-  .status-dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background-color: currentColor;
-    box-shadow: 0 0 8px currentColor;
-  }
-  .control-group {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  select, button {
-    background: rgba(255, 255, 255, 0.07);
-    color: var(--text);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 6px;
-    padding: 5px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    outline: none;
-    transition: all 0.2s ease;
-  }
-  select:hover, button:hover {
-    background: rgba(157, 78, 221, 0.25);
-    border-color: var(--accent);
-    color: #fff;
-  }
-  button { cursor: pointer; }
-  button:active { transform: scale(0.96); }
-  .btn-primary {
-    background: rgba(157, 78, 221, 0.35);
-    border-color: var(--accent);
-    color: #f3e8ff;
-  }
-  .btn-primary:hover {
-    background: var(--accent);
-    box-shadow: 0 0 14px var(--accent-glow);
-  }
-  label.toggle-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    color: var(--text-dim);
-    cursor: pointer;
-    font-weight: 500;
-  }
-  label.toggle-label input {
-    accent-color: var(--accent);
-    cursor: pointer;
-  }
-
-  /* HUD Readouts */
-  .hud-stats {
-    position: absolute;
-    bottom: 14px; left: 14px;
-    background: var(--panel-bg);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid var(--panel-border);
-    border-radius: 10px;
-    padding: 8px 14px;
-    font-size: 12px;
-    color: var(--text-dim);
-    display: flex;
-    gap: 16px;
-    z-index: 100;
-  }
-  .hud-val { color: var(--text); font-weight: 700; }
-
-  /* Map Legend */
-  .legend {
-    position: absolute;
-    bottom: 14px; right: 14px;
-    background: var(--panel-bg);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid var(--panel-border);
-    border-radius: 10px;
-    padding: 8px 14px;
-    font-size: 11px;
-    display: flex;
-    gap: 12px;
-    z-index: 100;
-  }
-  .legend-item { display: flex; align-items: center; gap: 5px; font-weight: 600; }
-  .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
-
-  /* Compass Rose */
-  .compass {
-    position: absolute;
-    top: 14px; right: 14px;
-    width: 48px; height: 48px;
-    border-radius: 50%;
-    background: var(--panel-bg);
-    border: 1px solid var(--panel-border);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    font-size: 13px;
-    color: var(--red);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    z-index: 100;
-    pointer-events: none;
-    transition: transform 0.1s linear;
-  }
-</style>
-)raw_html") + R"raw_html(</head>
-<body>
-
-<canvas id="radarCanvas"></canvas>
-
-<!-- Top Toolbar -->
-<div class="toolbar">
-  <div class="brand">
-    <span class="brand-badge">VEOX</span>
-    <span>RADAR</span>
-  </div>
-
-  <div id="statusBadge" class="status-badge offline">
-    <span class="status-dot"></span>
-    <span id="statusText">WAITING</span>
-  </div>
-
-  <div class="control-group">
-    <label class="toggle-label" title="Active 2D BVH map">MAP:</label>
-    <select id="mapSelect"></select>
-  </div>
-
-  <div class="control-group">
-    <label class="toggle-label"><input type="checkbox" id="chkFollow" checked> Follow Me</label>
-    <label class="toggle-label"><input type="checkbox" id="chkRotate"> Rotate View</label>
-  </div>
-
-  <div class="control-group">
-    <label class="toggle-label"><input type="checkbox" id="chkPlayers" checked> Players</label>
-    <label class="toggle-label"><input type="checkbox" id="chkLoot" checked> Loot</label>
-    <label class="toggle-label"><input type="checkbox" id="chkVehicles" checked> Vehicles</label>
-    <label class="toggle-label"><input type="checkbox" id="chkBvh" checked> BVH Walls</label>
-  </div>
-
-  <div class="control-group">
-    <button id="btnZoomIn" title="Zoom in (or Mouse Wheel)">+</button>
-    <button id="btnZoomOut" title="Zoom out (or Mouse Wheel)">-</button>
-    <button id="btnReset" class="btn-primary" title="Reset view">RESET</button>
-  </div>
-</div>
-
-<!-- Compass Rose -->
-<div id="compass" class="compass">N</div>
-
-<!-- Bottom Stats HUD -->
-<div class="hud-stats">
-  <div>LOC: <span id="hudLoc" class="hud-val">-</span></div>
-  <div>POS: <span id="hudPos" class="hud-val">0, 0</span></div>
-  <div>ENTITIES: <span id="hudPlayers" class="hud-val">0</span> P | <span id="hudLoot" class="hud-val">0</span> L</div>
-  <div>ZOOM: <span id="hudZoom" class="hud-val">1.0x</span></div>
-</div>
-
-<!-- Map Legend -->
-<div class="legend">
-  <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div> YOU</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#00f5d4"></div> PARTY</div>
-  <div class="legend-item"><div class="legend-dot" style="background:var(--cyan)"></div> POLICE</div>
-  <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div> CRIMINAL</div>
-  <div class="legend-item"><div class="legend-dot" style="background:var(--gold)"></div> CIVILIAN</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#e0aaff"></div> SAFE / CRATE</div>
-</div>
-
-<script>
-(() => {
-  const canvas = document.getElementById("radarCanvas");
-  const ctx = canvas.getContext("2d");
-
-  // DOM Controls
-  const statusBadge = document.getElementById("statusBadge");
-  const statusText = document.getElementById("statusText");
-  const mapSelect = document.getElementById("mapSelect");
-  const chkFollow = document.getElementById("chkFollow");
-  const chkRotate = document.getElementById("chkRotate");
-  const chkPlayers = document.getElementById("chkPlayers");
-  const chkLoot = document.getElementById("chkLoot");
-  const chkVehicles = document.getElementById("chkVehicles");
-  const chkBvh = document.getElementById("chkBvh");
-  const btnZoomIn = document.getElementById("btnZoomIn");
-  const btnZoomOut = document.getElementById("btnZoomOut");
-  const btnReset = document.getElementById("btnReset");
-  const compass = document.getElementById("compass");
-  const hudLoc = document.getElementById("hudLoc");
-  const hudPos = document.getElementById("hudPos");
-  const hudPlayers = document.getElementById("hudPlayers");
-  const hudLoot = document.getElementById("hudLoot");
-  const hudZoom = document.getElementById("hudZoom");
-
-  // State
-  let state = {
-    locationId: "",
-    mapName: "",
-    mapUrl: "",
-    bounds: { minX: -600, maxX: 600, minZ: -400, maxZ: 400 },
-    local: { valid: false, x: 0, y: 0, z: 0, yaw: 0, pitch: 0 },
-    players: [],
-    vehicles: [],
-    loot: [],
-    availableMaps: []
-  };
-
-  // View state
-  let view = {
-    zoom: 1.0,
-    panX: 0,
-    panY: 0,
-    isDragging: false,
-    dragStartX: 0,
-    dragStartY: 0,
-    panStartX: 0,
-    panStartY: 0
-  };
-
-  // Map image cache
-  let currentMapUrl = "";
-  let mapImage = new Image();
-  let mapLoaded = false;
-
-  // BVH wireframe segments cache
-  let bvhLines = [];
-  let lastBvhFetch = 0;
-
-  // Resize canvas
-  function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-  }
-  window.addEventListener("resize", resize);
-  resize();
-
-  // Mouse / Touch Pan & Zoom
-  canvas.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const factor = e.deltaY < 0 ? 1.15 : 0.87;
-    const newZoom = Math.min(Math.max(view.zoom * factor, 0.2), 12.0);
-    // Zoom toward mouse pointer
-    const mouseX = e.clientX - canvas.width * 0.5;
-    const mouseY = e.clientY - canvas.height * 0.5;
-    view.panX -= mouseX / view.zoom - mouseX / newZoom;
-    view.panY -= mouseY / view.zoom - mouseY / newZoom;
-    view.zoom = newZoom;
-    hudZoom.textContent = view.zoom.toFixed(1) + "x";
-  }, { passive: false });
-
-  canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 0) {
-      view.isDragging = true;
-      view.dragStartX = e.clientX;
-      view.dragStartY = e.clientY;
-      view.panStartX = view.panX;
-      view.panStartY = view.panY;
-    }
-  });
-
-  window.addEventListener("mousemove", (e) => {
-    if (view.isDragging) {
-      const dx = (e.clientX - view.dragStartX) / view.zoom;
-      const dy = (e.clientY - view.dragStartY) / view.zoom;
-      view.panX = view.panStartX - dx;
-      view.panY = view.panStartY - dy;
-      chkFollow.checked = false; // Disable follow on manual pan
-    }
-  });
-
-  window.addEventListener("mouseup", () => { view.isDragging = false; });
-
-  // Mobile Touch Pan / Pinch-to-zoom
-  let initialTouchDist = 0;
-  let initialZoom = 1.0;
-  canvas.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 1) {
-      view.isDragging = true;
-      view.dragStartX = e.touches[0].clientX;
-      view.dragStartY = e.touches[0].clientY;
-      view.panStartX = view.panX;
-      view.panStartY = view.panY;
-    } else if (e.touches.length === 2) {
-      view.isDragging = false;
-      initialTouchDist = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY
-      );
-      initialZoom = view.zoom;
-    }
-  }, { passive: true });
-
-  canvas.addEventListener("touchmove", (e) => {
-    if (e.touches.length === 1 && view.isDragging) {
-      const dx = (e.touches[0].clientX - view.dragStartX) / view.zoom;
-      const dy = (e.touches[0].clientY - view.dragStartY) / view.zoom;
-      view.panX = view.panStartX - dx;
-      view.panY = view.panStartY - dy;
-      chkFollow.checked = false;
-    } else if (e.touches.length === 2 && initialTouchDist > 0) {
-      const dist = Math.hypot(
-        e.touches[0].clientX - e.touches[1].clientX,
-        e.touches[0].clientY - e.touches[1].clientY
-      );
-      view.zoom = Math.min(Math.max(initialZoom * (dist / initialTouchDist), 0.2), 12.0);
-      hudZoom.textContent = view.zoom.toFixed(1) + "x";
-    }
-  }, { passive: true });
-
-  canvas.addEventListener("touchend", () => {
-    view.isDragging = false;
-    initialTouchDist = 0;
-  });
-
-  // Toolbar button handlers
-  btnZoomIn.onclick = () => {
-    view.zoom = Math.min(view.zoom * 1.25, 12.0);
-    hudZoom.textContent = view.zoom.toFixed(1) + "x";
-  };
-  btnZoomOut.onclick = () => {
-    view.zoom = Math.max(view.zoom * 0.8, 0.2);
-    hudZoom.textContent = view.zoom.toFixed(1) + "x";
-  };
-  btnReset.onclick = () => {
-    view.zoom = 1.0;
-    view.panX = 0;
-    view.panY = 0;
-    chkFollow.checked = true;
-    hudZoom.textContent = "1.0x";
-  };
-
-  mapSelect.onchange = () => {
-    const chosen = mapSelect.value;
-    if (chosen) {
-      fetch("/api/setmap?name=" + encodeURIComponent(chosen));
-    }
-  };
-
-  // Convert World Coordinate (X, Z) to Map Pixel (mx, my)
-  function worldToMapPixel(wx, wz) {
-    const b = state.bounds;
-    const w = b.maxX - b.minX || 1.0;
-    const h = b.maxZ - b.minZ || 1.0;
-    const imgW = mapLoaded ? mapImage.width : 2048;
-    const imgH = mapLoaded ? mapImage.height : 2048;
-    const nx = (wx - b.minX) / w;
-    const nz = (wz - b.minZ) / h;
-    return { x: nx * imgW, y: nz * imgH };
-  }
-
-  // Fetch BVH 2D Wall Contours
-  async function fetchBvhLines() {
-    const now = Date.now();
-    if (now - lastBvhFetch < 3000) return;
-    lastBvhFetch = now;
-    try {
-      const res = await fetch("/api/bvh");
-      if (res.ok) {
-        bvhLines = await res.json();
-      }
-    } catch (_) {}
-  }
-
-  // Data Fetch Loop
-  let isFetching = false;
-  async function pollState() {
-    if (isFetching) return;
-    isFetching = true;
-    try {
-      const res = await fetch("/api/state");
-      if (res.ok) {
-        const data = await res.json();
-        state = data;
-
-        // Status badge
-        statusBadge.className = "status-badge online";
-        statusText.textContent = "CONNECTED";
-
-        // HUD Readouts
-        hudLoc.textContent = data.locationId || "In Battle";
-        if (data.local && data.local.valid) {
-          hudPos.textContent = Math.round(data.local.x) + ", " + Math.round(data.local.z);
-        } else {
-          hudPos.textContent = "-";
-        }
-        hudPlayers.textContent = data.players ? data.players.length : 0;
-        hudLoot.textContent = data.loot ? data.loot.length : 0;
-
-        // Populate Map Dropdown once or when changed
-        if (data.availableMaps && data.availableMaps.length > 0) {
-          if (mapSelect.options.length !== data.availableMaps.length) {
-            mapSelect.innerHTML = "";
-            for (const m of data.availableMaps) {
-              const opt = document.createElement("option");
-              opt.value = m;
-              opt.textContent = m.replace(".png", "").replace("_map", " (BVH)").replace(/_/g, " ").toUpperCase();
-              mapSelect.appendChild(opt);
-            }
-          }
-          if (data.mapName && mapSelect.value !== data.mapName) {
-            mapSelect.value = data.mapName;
-          }
-        }
-
-        // Load / change map texture
-        if (data.mapUrl && data.mapUrl !== currentMapUrl) {
-          currentMapUrl = data.mapUrl;
-          mapLoaded = false;
-          mapImage = new Image();
-          mapImage.onload = () => { mapLoaded = true; };
-          mapImage.src = data.mapUrl;
-        }
-
-        // Follow local player
-        if (chkFollow.checked && data.local && data.local.valid) {
-          const lp = worldToMapPixel(data.local.x, data.local.z);
-          view.panX = lp.x;
-          view.panY = lp.y;
-        }
-      } else {
-        statusBadge.className = "status-badge offline";
-        statusText.textContent = "WAITING";
-      }
-    } catch (e) {
-      statusBadge.className = "status-badge offline";
-      statusText.textContent = "OFFLINE";
-    } finally {
-      isFetching = false;
-    }
-  }
-
-  setInterval(pollState, 33); // 30 Hz polling
-
-)raw_html" + R"raw_html(  // Main Render Loop
-  function draw() {
-    requestAnimationFrame(draw);
-
-    const w = canvas.width;
-    const h = canvas.height;
-    ctx.clearRect(0, 0, w, h);
-
-    // Dark grid background
-    ctx.fillStyle = "#0c0e18";
-    ctx.fillRect(0, 0, w, h);
-
-    const cx = w * 0.5;
-    const cy = h * 0.5;
-
-    // Player rotation angle
-    const playerYaw = (chkRotate.checked && state.local && state.local.valid)
-      ? state.local.yaw
-      : 0;
-
-    // Update compass needle
-    compass.style.transform = `rotate(${-playerYaw * (180 / Math.PI)}deg)`;
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    if (playerYaw !== 0) ctx.rotate(-playerYaw);
-    ctx.scale(view.zoom, view.zoom);
-    ctx.translate(-view.panX, -view.panY);
-
-    // 1. Draw Map Image
-    const imgW = mapLoaded ? mapImage.width : 2048;
-    const imgH = mapLoaded ? mapImage.height : 2048;
-
-    if (mapLoaded) {
-      ctx.drawImage(mapImage, 0, 0, imgW, imgH);
-    } else {
-      ctx.fillStyle = "#141824";
-      ctx.fillRect(0, 0, imgW, imgH);
-      ctx.strokeStyle = "rgba(157, 78, 221, 0.4)";
-      ctx.strokeRect(0, 0, imgW, imgH);
-      ctx.fillStyle = "rgba(255, 255, 255, 0.2)";
-      ctx.font = "24px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("Loading Map...", imgW * 0.5, imgH * 0.5);
-    }
-
-    // 2. Draw Subtle World Grid
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
-    ctx.lineWidth = 1.0 / view.zoom;
-    const step = 100;
-    for (let x = 0; x <= imgW; x += step) {
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, imgH); ctx.stroke();
-    }
-    for (let y = 0; y <= imgH; y += step) {
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(imgW, y); ctx.stroke();
-    }
-
-    // 3. Draw BVH 2D Wall Contours (if enabled and loaded)
-    if (chkBvh.checked) {
-      fetchBvhLines();
-      if (bvhLines && bvhLines.length > 0) {
-        ctx.strokeStyle = "rgba(120, 210, 255, 0.45)";
-        ctx.lineWidth = 1.5 / view.zoom;
-        ctx.beginPath();
-        for (const line of bvhLines) {
-          const p1 = worldToMapPixel(line[0], line[1]);
-          const p2 = worldToMapPixel(line[2], line[3]);
-          ctx.moveTo(p1.x, p1.y);
-          ctx.lineTo(p2.x, p2.y);
-        }
-        ctx.stroke();
-      }
-    }
-
-    // 4. Draw Vehicles
-    if (chkVehicles.checked && state.vehicles) {
-      for (const v of state.vehicles) {
-        const p = worldToMapPixel(v.x, v.z);
-        ctx.fillStyle = "rgba(56, 189, 248, 0.85)";
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 1.5 / view.zoom;
-        ctx.beginPath();
-        ctx.rect(p.x - 7, p.y - 7, 14, 14);
-        ctx.fill();
-        ctx.stroke();
-
-        if (view.zoom >= 0.7 && v.label) {
-          ctx.fillStyle = "#e0f2fe";
-          ctx.font = "bold 11px sans-serif";
-          ctx.textAlign = "center";
-          ctx.fillText(v.label, p.x, p.y + 18);
-        }
-      }
-    }
-
-    // 5. Draw Loot & Containers
-    if (chkLoot.checked && state.loot) {
-      for (const item of state.loot) {
-        const p = worldToMapPixel(item.x, item.z);
-        let col = "#22c55e"; // default cash green
-        let radius = 3.5;
-
-        if (item.isSafe) {
-          col = "#e0aaff";
-          radius = 6.0;
-        } else if (item.isValuable) {
-          col = "#f59e0b";
-          radius = 4.5;
-        } else if (item.isContainer) {
-          col = "#38bdf8";
-          radius = 4.0;
-        }
-
-        ctx.fillStyle = col;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-        ctx.fill();
-
-        if (item.isSafe) {
-          ctx.strokeStyle = "#fff";
-          ctx.lineWidth = 1.2 / view.zoom;
-          ctx.stroke();
-        }
-
-        if (view.zoom >= 1.2 && item.label) {
-          ctx.fillStyle = col;
-          ctx.font = "10px sans-serif";
-          ctx.textAlign = "center";
-          ctx.fillText(item.label, p.x, p.y + radius + 10);
-        }
-      }
-    }
-
-    // 6. Draw Other Players
-    if (chkPlayers.checked && state.players) {
-      for (const p of state.players) {
-        if (p.isLocal) continue; // Drawn last
-        const sp = worldToMapPixel(p.x, p.z);
-
-        // Role color
-        let col = "#fde047"; // Civilian / default yellow
-        if (p.isParty) col = "#00f5d4";
-        else if (p.roleName === "Police Officer" || p.role === 1) col = "#38bdf8";
-        else if (p.roleName === "Criminal" || p.role === 0) col = "#ff4d4d";
-
-        // Direction tick
-        if (p.yaw !== undefined) {
-          const tickLen = 14;
-          const tx = sp.x + Math.sin(p.yaw) * tickLen;
-          const ty = sp.y - Math.cos(p.yaw) * tickLen;
-          ctx.strokeStyle = col;
-          ctx.lineWidth = 2.0 / view.zoom;
-          ctx.beginPath();
-          ctx.moveTo(sp.x, sp.y);
-          ctx.lineTo(tx, ty);
-          ctx.stroke();
-        }
-
-        // Player dot
-        ctx.fillStyle = col;
-        ctx.strokeStyle = "#000";
-        ctx.lineWidth = 1.5 / view.zoom;
-        ctx.beginPath();
-        ctx.arc(sp.x, sp.y, 6.0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-
-        // Player Name & Distance Label
-        if (view.zoom >= 0.6) {
-          ctx.font = "bold 11px sans-serif";
-          ctx.textAlign = "center";
-
-          // Text shadow
-          ctx.fillStyle = "#000";
-          const label = p.name ? p.name : (p.roleName || "Player");
-          ctx.fillText(label, sp.x + 1, sp.y - 10 + 1);
-          ctx.fillText(label, sp.x - 1, sp.y - 10 - 1);
-
-          ctx.fillStyle = col;
-          ctx.fillText(label, sp.x, sp.y - 10);
-
-          if (p.distance) {
-            ctx.fillStyle = "#94a3b8";
-            ctx.font = "9px sans-serif";
-            ctx.fillText(Math.round(p.distance) + "m", sp.x, sp.y + 16);
-          }
-        }
-      }
-    }
-
-    // 7. Draw Local Player (YOU)
-    if (state.local && state.local.valid) {
-      const lp = worldToMapPixel(state.local.x, state.local.z);
-
-      // FOV Cone (90-degree translucent arc forward)
-      const coneDist = 80;
-      const fovHalf = Math.PI * 0.25;
-      const angle = state.local.yaw || 0;
-      ctx.fillStyle = "rgba(56, 239, 125, 0.12)";
-      ctx.beginPath();
-      ctx.moveTo(lp.x, lp.y);
-      ctx.arc(lp.x, lp.y, coneDist, angle - Math.PI * 0.5 - fovHalf, angle - Math.PI * 0.5 + fovHalf);
-      ctx.closePath();
-      ctx.fill();
-
-      // Pulsing outer beacon
-      const pulseTime = (Date.now() % 1500) / 1500;
-      const pulseR = 8 + pulseTime * 18;
-      ctx.strokeStyle = `rgba(56, 239, 125, ${1.0 - pulseTime})`;
-      ctx.lineWidth = 2.0 / view.zoom;
-      ctx.beginPath();
-      ctx.arc(lp.x, lp.y, pulseR, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // Local player chevron / pointer
-      ctx.save();
-      ctx.translate(lp.x, lp.y);
-      ctx.rotate(angle);
-
-      ctx.fillStyle = "#38ef7d";
-      ctx.strokeStyle = "#000";
-      ctx.lineWidth = 2.0 / view.zoom;
-      ctx.beginPath();
-      ctx.moveTo(0, -12);
-      ctx.lineTo(8, 8);
-      ctx.lineTo(0, 4);
-      ctx.lineTo(-8, 8);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
-
-      // "YOU" Label
-      ctx.font = "bold 12px sans-serif";
-      ctx.fillStyle = "#38ef7d";
-      ctx.textAlign = "center";
-      ctx.fillText("YOU", lp.x, lp.y - 18);
-    }
-
-    ctx.restore();
-  }
-
-  requestAnimationFrame(draw);
-})();
-</script>
-
-</body>
-</html>
-)raw_html";
+std::string RgbHex(int r, int g, int b)
+{
+	char buf[10];
+	std::snprintf(buf, sizeof(buf), "#%02x%02x%02x",
+		std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
+	return buf;
+}
 
 // ---------------------------------------------------------------------------
-// Worker Thread: Lightweight HTTP 1.1 Web Server
+// Exact In-Game Map Role & Rarity Helpers (1:1 with Radar.cpp)
+// ---------------------------------------------------------------------------
+struct Rgb { int r, g, b; };
+
+Rgb GetInGameMapRoleRgb(int role, const std::string& roleName, bool isTeammate)
+{
+	if (isTeammate) return { 75, 235, 235 };
+	const std::string label = RobRunReader::RoleLabel(role, roleName);
+	if (label == "Criminal") return { 255, 68, 68 };
+	if (label == "Police Officer") return { 55, 145, 255 };
+	if (label == "Civilian" || label == "Hubber") return { 70, 225, 90 };
+	return { 255, 68, 68 };
+}
+
+Rgb MuteRoleRgb(Rgb c)
+{
+	return {
+		static_cast<int>(c.r * 0.55f + 185.f * 0.45f),
+		static_cast<int>(c.g * 0.55f + 190.f * 0.45f),
+		static_cast<int>(c.b * 0.55f + 198.f * 0.45f)
+	};
+}
+
+int RolePriority(int role, const std::string& roleName, bool isTeammate)
+{
+	if (isTeammate) return 1;
+	const std::string label = RobRunReader::RoleLabel(role, roleName);
+	if (label == "Criminal") return 4;
+	if (label == "Police Officer") return 3;
+	return 2;
+}
+
+int ResolveItemRarityTier(const RobRunWorld::Entity& we, const LootFilter::ItemDef* def)
+{
+	if (we.rarity >= 1 && we.rarity <= 6)
+		return we.rarity;
+	if (def) {
+		switch (def->rarity) {
+		case LootFilter::Rarity::Common:    return 1;
+		case LootFilter::Rarity::Uncommon:  return 2;
+		case LootFilter::Rarity::Rare:      return 3;
+		case LootFilter::Rarity::Epic:      return 4;
+		case LootFilter::Rarity::Legendary: return 5;
+		case LootFilter::Rarity::Exotic:    return 6;
+		default: break;
+		}
+	}
+	return 0;
+}
+
+std::string MapRarityHex(int tier, const char* fallback)
+{
+	switch (tier) {
+	case 1: return "#dce2ea"; // Common
+	case 2: return "#2ee04e"; // Uncommon
+	case 3: return "#3aa0ff"; // Rare
+	case 4: return "#b64cff"; // Epic
+	case 5: return "#ffd02a"; // Legendary
+	case 6: return "#ff3a80"; // Mythical / Exotic
+	default: return fallback;
+	}
+}
+
+bool IsCargoKind(RobRunWorld::Kind k)
+{
+	switch (k) {
+	case RobRunWorld::Kind::Cargo:
+	case RobRunWorld::Kind::CargoBush:
+	case RobRunWorld::Kind::CargoCrystal:
+	case RobRunWorld::Kind::CargoDrug:
+	case RobRunWorld::Kind::CargoCash:
+	case RobRunWorld::Kind::CargoExchange:
+	case RobRunWorld::Kind::CargoBox:
+	case RobRunWorld::Kind::CargoGoods:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool IsMapLootKind(RobRunWorld::Kind k)
+{
+	switch (k) {
+	case RobRunWorld::Kind::Loot:
+	case RobRunWorld::Kind::StaticLoot:
+	case RobRunWorld::Kind::RandomLoot:
+	case RobRunWorld::Kind::VehicleLoot:
+	case RobRunWorld::Kind::PlotLoot:
+	case RobRunWorld::Kind::FurnitureLoot:
+	case RobRunWorld::Kind::BuildingLoot:
+	case RobRunWorld::Kind::CashLootNode:
+	case RobRunWorld::Kind::SettlementCash:
+	case RobRunWorld::Kind::SafeDoor:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool LookupEmbeddedSprite(const std::string& name, const std::uint8_t*& outPtr, std::size_t& outSize)
+{
+	struct Entry { const char* name; const std::uint8_t* ptr; std::size_t size; };
+	static constexpr Entry kTable[] = {
+		{ "player_arrow_base.png", MapSpriteData::kMapPngPlayerArrowBase, sizeof(MapSpriteData::kMapPngPlayerArrowBase) },
+		{ "player_arrow_fill.png", MapSpriteData::kMapPngPlayerArrowFill, sizeof(MapSpriteData::kMapPngPlayerArrowFill) },
+		{ "car_base.png",          MapSpriteData::kMapPngCarBase,         sizeof(MapSpriteData::kMapPngCarBase) },
+		{ "car_fill.png",          MapSpriteData::kMapPngCarFill,         sizeof(MapSpriteData::kMapPngCarFill) },
+		{ "police_car_base.png",   MapSpriteData::kMapPngPoliceCarBase,   sizeof(MapSpriteData::kMapPngPoliceCarBase) },
+		{ "police_car_fill.png",   MapSpriteData::kMapPngPoliceCarFill,   sizeof(MapSpriteData::kMapPngPoliceCarFill) },
+		{ "helicopter_base.png",   MapSpriteData::kMapPngHelicopterBase,  sizeof(MapSpriteData::kMapPngHelicopterBase) },
+		{ "helicopter_fill.png",   MapSpriteData::kMapPngHelicopterFill,  sizeof(MapSpriteData::kMapPngHelicopterFill) },
+		{ "dropped_bag_base.png",  MapSpriteData::kMapPngDroppedBagBase,  sizeof(MapSpriteData::kMapPngDroppedBagBase) },
+		{ "dropped_bag_fill.png",  MapSpriteData::kMapPngDroppedBagFill,  sizeof(MapSpriteData::kMapPngDroppedBagFill) },
+		{ "weapon_base.png",       MapSpriteData::kMapPngWeaponBase,      sizeof(MapSpriteData::kMapPngWeaponBase) },
+		{ "weapon_fill.png",       MapSpriteData::kMapPngWeaponFill,      sizeof(MapSpriteData::kMapPngWeaponFill) },
+		{ "armor_base.png",        MapSpriteData::kMapPngArmorBase,       sizeof(MapSpriteData::kMapPngArmorBase) },
+		{ "armor_fill.png",        MapSpriteData::kMapPngArmorFill,       sizeof(MapSpriteData::kMapPngArmorFill) },
+		{ "valuable_base.png",     MapSpriteData::kMapPngValuableBase,    sizeof(MapSpriteData::kMapPngValuableBase) },
+		{ "valuable_fill.png",     MapSpriteData::kMapPngValuableFill,    sizeof(MapSpriteData::kMapPngValuableFill) },
+		{ "cash_base.png",         MapSpriteData::kMapPngCashBase,        sizeof(MapSpriteData::kMapPngCashBase) },
+		{ "cash_fill.png",         MapSpriteData::kMapPngCashFill,        sizeof(MapSpriteData::kMapPngCashFill) },
+		{ "safe_base.png",         MapSpriteData::kMapPngSafeBase,        sizeof(MapSpriteData::kMapPngSafeBase) },
+		{ "safe_fill.png",         MapSpriteData::kMapPngSafeFill,        sizeof(MapSpriteData::kMapPngSafeFill) },
+		{ "cargo_base.png",        MapSpriteData::kMapPngCargoBase,       sizeof(MapSpriteData::kMapPngCargoBase) },
+		{ "cargo_fill.png",        MapSpriteData::kMapPngCargoFill,       sizeof(MapSpriteData::kMapPngCargoFill) },
+		{ "medicine_base.png",     MapSpriteData::kMapPngMedicineBase,    sizeof(MapSpriteData::kMapPngMedicineBase) },
+		{ "medicine_fill.png",     MapSpriteData::kMapPngMedicineFill,    sizeof(MapSpriteData::kMapPngMedicineFill) },
+		{ "key_base.png",          MapSpriteData::kMapPngKeyBase,         sizeof(MapSpriteData::kMapPngKeyBase) },
+		{ "key_fill.png",          MapSpriteData::kMapPngKeyFill,         sizeof(MapSpriteData::kMapPngKeyFill) },
+		{ "generic_base.png",      MapSpriteData::kMapPngGenericLootBase, sizeof(MapSpriteData::kMapPngGenericLootBase) },
+		{ "generic_fill.png",      MapSpriteData::kMapPngGenericLootFill, sizeof(MapSpriteData::kMapPngGenericLootFill) },
+	};
+	for (const auto& e : kTable) {
+		if (name == e.name) {
+			outPtr = e.ptr;
+			outSize = e.size;
+			return true;
+		}
+	}
+	return false;
+}
+
+// ---------------------------------------------------------------------------
+// High-Speed Frame JSON Builder (ports Radar.cpp::DrawInGameMapOverlay 1:1)
+// ---------------------------------------------------------------------------
+std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
+{
+	std::lock_guard<std::mutex> lock(g_stateBuildMutex);
+
+	const auto snapshot = RobRunReader::GetSnapshot();
+	const std::string loc = RobRunReader::GetLocationId();
+	const auto& cfg = ConfigInstance.Radar;
+	const auto& pcfg = ConfigInstance.Player;
+
+	// Auto-select map if location changed (thread-safe RequestSetMap)
+	if (cfg.AutoMapSelect && !loc.empty() && loc != g_lastAutoLocationId) {
+		g_lastAutoLocationId = loc;
+		const char* mapped = Radar::MapFileForLocation(loc);
+		if (mapped) {
+			const auto& files = Radar::GetMapFiles();
+			for (int i = 0; i < (int)files.size(); ++i) {
+				if (files[i] == mapped) {
+					Radar::RequestSetMap(i);
+					break;
+				}
+			}
+		}
+	}
+
+	json j;
+	j["status"] = "ok";
+	j["locationId"] = loc;
+
+	const std::string activeMap = Radar::GetCurrentMapName();
+	j["mapName"] = activeMap;
+	j["mapUrl"] = "/maps/" + activeMap;
+	j["availableMaps"] = Radar::GetMapFiles();
+
+	// Sync VeoxMenu accent color live
+	{
+		const auto& ac = ConfigInstance.Overlay.AccentColour;
+		const float ar = std::clamp(ac.r, 0.08f, 1.f);
+		const float ag = std::clamp(ac.g, 0.08f, 1.f);
+		const float ab = std::clamp(ac.b, 0.08f, 1.f);
+		j["accent"] = RgbHex((int)(ar * 255.f), (int)(ag * 255.f), (int)(ab * 255.f));
+		j["accentBright"] = RgbHex(
+			(int)(std::clamp(ar * 0.78f + 0.22f, 0.f, 1.f) * 255.f),
+			(int)(std::clamp(ag * 0.78f + 0.22f, 0.f, 1.f) * 255.f),
+			(int)(std::clamp(ab * 0.78f + 0.22f, 0.f, 1.f) * 255.f));
+	}
+
+	j["bounds"] = {
+		{ "minX", cfg.WorldMinX },
+		{ "maxX", cfg.WorldMaxX },
+		{ "minZ", cfg.WorldMinZ },
+		{ "maxZ", cfg.WorldMaxZ }
+	};
+
+	j["defaults"] = {
+		{ "players", cfg.InGameMapPlayers },
+		{ "vehicles", cfg.InGameMapVehicles },
+		{ "names", cfg.InGameMapPlayerNames },
+		{ "bags", cfg.InGameMapDroppedBags },
+		{ "valuables", cfg.InGameMapValuables },
+		{ "cargo", cfg.InGameMapCargo },
+		{ "minRarity", cfg.InGameMapMinRarity },
+		{ "cargoMinRarity", cfg.InGameMapCargoMinRarity },
+		{ "scale", cfg.InGameMapScale }
+	};
+
+	if (snapshot && snapshot->inGameMap.valid) {
+		j["inGameMap"] = {
+			{ "valid", true },
+			{ "fullscreenOpen", snapshot->inGameMap.fullscreenOpen },
+			{ "minimapCamSize", snapshot->inGameMap.minimap.valid ? snapshot->inGameMap.minimap.cameraSize : 0.f }
+		};
+	} else {
+		j["inGameMap"] = { { "valid", false }, { "fullscreenOpen", false }, { "minimapCamSize", 0.f } };
+	}
+
+	// Local player (prefer fresh camera forward for zero-lag heading)
+	if (snapshot && !snapshot->localPosition.IsZero()) {
+		float yaw = snapshot->localYaw;
+		RobRunCamera::CameraState freshCam{};
+		if (RobRunReader::GetFreshCamera(freshCam) && freshCam.valid) {
+			const float hSq = freshCam.forward.x * freshCam.forward.x + freshCam.forward.z * freshCam.forward.z;
+			if (hSq > 1e-4f)
+				yaw = std::atan2(freshCam.forward.x, freshCam.forward.z);
+		} else if (snapshot->camera.valid) {
+			const float hSq = snapshot->camera.forward.x * snapshot->camera.forward.x + snapshot->camera.forward.z * snapshot->camera.forward.z;
+			if (hSq > 1e-4f)
+				yaw = std::atan2(snapshot->camera.forward.x, snapshot->camera.forward.z);
+		}
+		j["local"] = {
+			{ "valid", true },
+			{ "x", snapshot->localPosition.x },
+			{ "y", snapshot->localPosition.y },
+			{ "z", snapshot->localPosition.z },
+			{ "yaw", yaw },
+			{ "entityId", snapshot->localEntityId }
+		};
+	} else {
+		j["local"] = { { "valid", false } };
+	}
+
+	// Vehicles + Players (exact Radar.cpp::DrawInGameMapOverlay occupant/driver/motion logic)
+	json playersOut = json::array();
+	json vehiclesOut = json::array();
+
+	if (snapshot) {
+		const std::int32_t localId = snapshot->localEntityId;
+		const bool useFastVeh = !snapshot->fastVehicles.empty();
+		const bool haveWorld = snapshot->world && snapshot->world->valid;
+
+		if (snapshot->sessionGeneration != g_localPubSession) {
+			g_localPubSession = snapshot->sessionGeneration;
+			g_localPublicId = 0;
+		}
+		if (snapshot->sessionGeneration != g_lastVehDriverSession) {
+			g_lastVehDriverSession = snapshot->sessionGeneration;
+			g_lastVehDriver.clear();
+		}
+		if (snapshot->sessionGeneration != g_vehMotionSession) {
+			g_vehMotionSession = snapshot->sessionGeneration;
+			g_vehMotion.clear();
+		}
+		for (const auto& ent : snapshot->entities) {
+			if (ent.entityId == localId && ent.publicId > 0) {
+				g_localPublicId = ent.publicId;
+				break;
+			}
+		}
+
+		struct MapVehicle {
+			int id = 0;
+			RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
+			Vector3 position{};
+			std::uint64_t ownerPublicId = 0;
+			std::string ownerRoleName;
+			std::string ownerNicknameUtf8;
+			bool hasDriver = false;
+		};
+		std::vector<MapVehicle> mapVehicles;
+		auto isWorldVehicle = [](RobRunWorld::Kind k) {
+			return k == RobRunWorld::Kind::Car ||
+			       k == RobRunWorld::Kind::Helicopter ||
+			       k == RobRunWorld::Kind::Vehicle;
+		};
+
+		if (useFastVeh) {
+			mapVehicles.reserve(snapshot->fastVehicles.size());
+			for (const auto& fv : snapshot->fastVehicles) {
+				mapVehicles.push_back(MapVehicle{
+					fv.id, fv.kind, fv.position, fv.ownerPublicId, fv.ownerRoleName, fv.ownerNicknameUtf8, fv.hasDriver
+				});
+			}
+		} else if (haveWorld) {
+			for (const auto& we : snapshot->world->entities) {
+				if (!isWorldVehicle(we.kind)) continue;
+				mapVehicles.push_back(MapVehicle{ we.id, we.kind, we.position, 0, {}, {}, false });
+			}
+		}
+
+		const std::size_t vehCount = mapVehicles.size();
+		struct VehicleOccupantInfo {
+			bool occupied = false;
+			bool localOccupied = false;
+			bool isPolice = false;
+			int priority = 0;
+			Rgb color{ 210, 216, 224 };
+			Vector3 driverPos{};
+			bool hasDriverPos = false;
+			std::vector<std::string> occupantNames;
+		};
+		std::vector<VehicleOccupantInfo> vehOcc(vehCount);
+		std::vector<int> playerMatchedVeh(snapshot->entities.size(), -1);
+		const std::uint64_t vehNowMs = GetTickCount64();
+
+		if (vehCount > 0) {
+			for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
+				const auto& ent = snapshot->entities[ei];
+				if (ent.isDead) continue;
+				if (!ent.inVehicle && ent.vehicleId <= 0) continue;
+
+				const bool isLocal = (ent.entityId == localId);
+				const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+				if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
+
+				int matchedIdx = -1;
+				if (ent.vehicleId > 0) {
+					for (std::size_t vi = 0; vi < vehCount; ++vi) {
+						if (mapVehicles[vi].id == ent.vehicleId) {
+							matchedIdx = static_cast<int>(vi);
+							break;
+						}
+					}
+				}
+				if (matchedIdx < 0 && ent.inVehicle &&
+					std::isfinite(ent.position.x) && std::isfinite(ent.position.z))
+				{
+					float bestDistSq = 36.f;
+					for (std::size_t vi = 0; vi < vehCount; ++vi) {
+						const float dx = mapVehicles[vi].position.x - ent.position.x;
+						const float dz = mapVehicles[vi].position.z - ent.position.z;
+						const float dSq = dx * dx + dz * dz;
+						if (dSq < bestDistSq) {
+							bestDistSq = dSq;
+							matchedIdx = static_cast<int>(vi);
+						}
+					}
+				}
+
+				if (matchedIdx >= 0) {
+					playerMatchedVeh[ei] = matchedIdx;
+					auto& occ = vehOcc[static_cast<std::size_t>(matchedIdx)];
+					if (isLocal) {
+						occ.localOccupied = true;
+						g_lastVehDriver.erase(mapVehicles[static_cast<std::size_t>(matchedIdx)].id);
+					} else {
+						if (!ent.nicknameUtf8.empty())
+							occ.occupantNames.push_back(ent.nicknameUtf8);
+						const int prio = RolePriority(ent.role, ent.roleName, isTeammate);
+						if (!occ.occupied || prio > occ.priority) {
+							occ.occupied = true;
+							occ.priority = prio;
+							occ.isPolice = (RobRunReader::RoleLabel(ent.role, ent.roleName) == "Police Officer");
+							occ.color = GetInGameMapRoleRgb(ent.role, ent.roleName, isTeammate);
+							if (std::isfinite(ent.position.x) && std::isfinite(ent.position.z)) {
+								occ.driverPos = ent.position;
+								occ.hasDriverPos = true;
+							}
+							auto& ld = g_lastVehDriver[mapVehicles[static_cast<std::size_t>(matchedIdx)].id];
+							ld.entityId = ent.entityId;
+							ld.role = ent.role;
+							ld.roleName = ent.roleName;
+							if (!ent.nicknameUtf8.empty())
+								ld.nicknameUtf8 = ent.nicknameUtf8;
+							ld.isTeammate = isTeammate;
+							ld.stampMs = vehNowMs;
+						}
+					}
+				}
+			}
+		}
+
+		constexpr std::uint64_t kVehRecentMoveMs = 10'000ULL;
+		constexpr std::uint64_t kLastDriverMaxAgeMs = 120'000ULL;
+
+		for (std::size_t vi = 0; vi < vehCount; ++vi) {
+			const auto& mv = mapVehicles[vi];
+			const auto& occ = vehOcc[vi];
+			if (occ.localOccupied) continue; // Never draw local player's vehicle while seated inside it
+			const Vector3& vehWorldPos = (occ.occupied && occ.hasDriverPos) ? occ.driverPos : mv.position;
+			if (!std::isfinite(vehWorldPos.x) || !std::isfinite(vehWorldPos.z)) continue;
+
+			auto& mot = g_vehMotion[mv.id];
+			if (!mot.initialized) {
+				mot.anchorPos = vehWorldPos;
+				mot.lastMovedMs = 0;
+				mot.initialized = true;
+			} else {
+				const float mdx = vehWorldPos.x - mot.anchorPos.x;
+				const float mdz = vehWorldPos.z - mot.anchorPos.z;
+				if (mdx * mdx + mdz * mdz > 0.1225f) {
+					mot.anchorPos = vehWorldPos;
+					mot.lastMovedMs = vehNowMs;
+				}
+			}
+			const bool recentlyMoved = (mot.lastMovedMs != 0) && (vehNowMs - mot.lastMovedMs <= kVehRecentMoveMs);
+			const bool activeRemoteVeh = !occ.occupied && (mv.hasDriver || recentlyMoved);
+
+			const LastVehicleDriver* remembered = nullptr;
+			if (!occ.occupied) {
+				auto it = g_lastVehDriver.find(mv.id);
+				if (it != g_lastVehDriver.end()) {
+					if (vehNowMs - it->second.stampMs <= kLastDriverMaxAgeMs) {
+						remembered = &it->second;
+					} else {
+						g_lastVehDriver.erase(it);
+					}
+				}
+			}
+
+			Rgb vehRgb{ 210, 216, 224 };
+			std::string label;
+			const bool isOwnVeh = !occ.occupied &&
+				(occ.localOccupied || (g_localPublicId > 0 && mv.ownerPublicId == g_localPublicId));
+
+			if (isOwnVeh) {
+				vehRgb = { 70, 225, 90 };
+			} else if (occ.occupied) {
+				vehRgb = occ.color;
+				for (std::size_t ni = 0; ni < occ.occupantNames.size(); ++ni) {
+					if (ni > 0) label += ", ";
+					label += occ.occupantNames[ni];
+				}
+			} else if (activeRemoteVeh) {
+				if (remembered) {
+					vehRgb = GetInGameMapRoleRgb(remembered->role, remembered->roleName, remembered->isTeammate);
+					label = remembered->nicknameUtf8;
+				}
+				if (label.empty() && !mv.ownerNicknameUtf8.empty())
+					label = mv.ownerNicknameUtf8;
+				if (!remembered && !mv.ownerRoleName.empty())
+					vehRgb = GetInGameMapRoleRgb(0, mv.ownerRoleName, false);
+			} else if (remembered || !mv.ownerRoleName.empty()) {
+				Rgb baseRole{ 210, 216, 224 };
+				if (remembered) {
+					baseRole = GetInGameMapRoleRgb(remembered->role, remembered->roleName, remembered->isTeammate);
+					label = remembered->nicknameUtf8;
+				} else {
+					baseRole = GetInGameMapRoleRgb(0, mv.ownerRoleName, false);
+				}
+				if (label.empty() && !mv.ownerNicknameUtf8.empty())
+					label = mv.ownerNicknameUtf8;
+				vehRgb = MuteRoleRgb(baseRole);
+			}
+
+			const bool isPoliceVeh =
+				(occ.occupied && occ.isPolice) ||
+				(!occ.occupied && remembered && RobRunReader::RoleLabel(remembered->role, remembered->roleName) == "Police Officer") ||
+				(!occ.occupied && !remembered && !mv.ownerRoleName.empty() && RobRunReader::RoleLabel(0, mv.ownerRoleName) == "Police Officer");
+
+			const char* sprite = (mv.kind == RobRunWorld::Kind::Helicopter)
+				? "helicopter"
+				: (isPoliceVeh ? "police_car" : "car");
+
+			vehiclesOut.push_back({
+				{ "id", mv.id },
+				{ "x", vehWorldPos.x },
+				{ "z", vehWorldPos.z },
+				{ "sprite", sprite },
+				{ "color", RgbHex(vehRgb.r, vehRgb.g, vehRgb.b) },
+				{ "label", label },
+				{ "occupied", occ.occupied || occ.localOccupied }
+			});
+		}
+
+		// Players
+		for (std::size_t ei = 0; ei < snapshot->entities.size(); ++ei) {
+			const auto& ent = snapshot->entities[ei];
+			if (ent.isDead) continue;
+			if (!std::isfinite(ent.position.x) || !std::isfinite(ent.position.z)) continue;
+
+			const bool isLocal = (ent.entityId == localId);
+			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
+
+			float entYaw = ent.yaw;
+			const float lookHorizSq = ent.lookDirection.x * ent.lookDirection.x + ent.lookDirection.z * ent.lookDirection.z;
+			if (std::isfinite(lookHorizSq) && lookHorizSq > 0.01f)
+				entYaw = std::atan2(ent.lookDirection.x, ent.lookDirection.z);
+
+			float dist = 0.f;
+			if (!snapshot->localPosition.IsZero())
+				dist = Distance(ent.position, snapshot->localPosition);
+
+			const Rgb rgb = isLocal ? Rgb{ 255, 255, 255 } : GetInGameMapRoleRgb(ent.role, ent.roleName, isTeammate);
+			const bool inVeh = ent.inVehicle || (playerMatchedVeh[ei] >= 0);
+
+			playersOut.push_back({
+				{ "id", ent.entityId },
+				{ "name", ent.nicknameUtf8 },
+				{ "isLocal", isLocal },
+				{ "isTeammate", isTeammate },
+				{ "roleLabel", RobRunReader::RoleLabel(ent.role, ent.roleName) },
+				{ "color", RgbHex(rgb.r, rgb.g, rgb.b) },
+				{ "x", ent.position.x },
+				{ "z", ent.position.z },
+				{ "yaw", std::isfinite(entYaw) ? entYaw : 0.f },
+				{ "distance", dist },
+				{ "inVehicle", inVeh },
+				{ "matchedVeh", playerMatchedVeh[ei] >= 0 }
+			});
+		}
+
+		// Rebuild cached loot array ONLY when snapshot->world pointer changes
+		const void* curWorldPtr = (haveWorld) ? static_cast<const void*>(snapshot->world.get()) : nullptr;
+		if (curWorldPtr != g_cachedLootWorldPtr) {
+			g_cachedLootWorldPtr = curWorldPtr;
+			++g_cachedLootVer;
+			g_cachedLootArray = json::array();
+
+			if (haveWorld) {
+				const auto& lf = ConfigInstance.LootFilter;
+				for (const auto& we : snapshot->world->entities) {
+					if (!std::isfinite(we.position.x) || !std::isfinite(we.position.z)) continue;
+
+					if (we.kind == RobRunWorld::Kind::DroppedBag) {
+						g_cachedLootArray.push_back({
+							{ "cat", "bag" },
+							{ "sprite", "dropped_bag" },
+							{ "tier", 0 },
+							{ "alwaysShow", true },
+							{ "color", "#ffc832" },
+							{ "x", we.position.x },
+							{ "z", we.position.z }
+						});
+						continue;
+					}
+
+					if (we.hasEmptyFlag && we.empty) continue;
+					if (we.inVehicle || we.inTable) continue;
+
+					if (IsCargoKind(we.kind)) {
+						const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+						const int tier = ResolveItemRarityTier(we, def);
+						const int effTier = (tier > 0) ? tier : 1;
+						const bool isCargoCash = (we.kind == RobRunWorld::Kind::CargoCash);
+						g_cachedLootArray.push_back({
+							{ "cat", "cargo" },
+							{ "sprite", isCargoCash ? "cash" : "cargo" },
+							{ "tier", effTier },
+							{ "alwaysShow", false },
+							{ "color", isCargoCash ? "#5ff582" : MapRarityHex(tier, "#ff6ee6") },
+							{ "x", we.position.x },
+							{ "z", we.position.z }
+						});
+						continue;
+					}
+
+					if (IsMapLootKind(we.kind)) {
+						const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+						const bool isCash = (we.kind == RobRunWorld::Kind::CashLootNode ||
+											 we.kind == RobRunWorld::Kind::SettlementCash);
+						const bool isSafe = (we.kind == RobRunWorld::Kind::SafeDoor);
+						const int tier = ResolveItemRarityTier(we, def);
+						const bool isCatalogVal = def && def->category == LootFilter::Category::Valuables;
+						const int effTier = (tier > 0) ? tier : (isCatalogVal ? 2 : 1);
+
+						const char* sprite = "generic";
+						const char* fallbackHex = "#64ff8c";
+						if (isSafe) {
+							sprite = "safe";
+							fallbackHex = "#ffd02a";
+						} else if (isCash) {
+							sprite = "cash";
+							fallbackHex = "#5ff582";
+						} else if (def) {
+							switch (def->category) {
+							case LootFilter::Category::Weapons:
+							case LootFilter::Category::WeaponMaintenance: sprite = "weapon"; break;
+							case LootFilter::Category::Armor:             sprite = "armor"; break;
+							case LootFilter::Category::Valuables:         sprite = "valuable"; break;
+							case LootFilter::Category::Medicine:          sprite = "medicine"; break;
+							case LootFilter::Category::Keys:
+							case LootFilter::Category::Documents:
+							case LootFilter::Category::Tools:
+							case LootFilter::Category::BreachingTools:    sprite = "key"; break;
+							case LootFilter::Category::Cargo:             sprite = "cargo"; break;
+							default:                                      sprite = "generic"; break;
+							}
+						}
+
+						g_cachedLootArray.push_back({
+							{ "cat", "loot" },
+							{ "sprite", sprite },
+							{ "tier", effTier },
+							{ "alwaysShow", isCash || isSafe },
+							{ "color", (isCash || isSafe) ? std::string(fallbackHex) : MapRarityHex(tier, fallbackHex) },
+							{ "x", we.position.x },
+							{ "z", we.position.z }
+						});
+					}
+				}
+			}
+		}
+	}
+
+	j["players"] = std::move(playersOut);
+	j["vehicles"] = std::move(vehiclesOut);
+	j["lootVer"] = g_cachedLootVer;
+	if (forceIncludeLoot || clientLootVer != g_cachedLootVer) {
+		j["loot"] = g_cachedLootArray;
+		clientLootVer = g_cachedLootVer;
+	}
+
+	return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated SSE Stream Handler (50 Hz zero-overhead push over 1 TCP socket)
+// ---------------------------------------------------------------------------
+void RunSseClient(SOCKET client)
+{
+	struct Guard {
+		SOCKET s;
+		~Guard() {
+			closesocket(s);
+			g_activeStreams.fetch_sub(1, std::memory_order_relaxed);
+		}
+	} guard{ client };
+
+	const std::string header =
+		"HTTP/1.1 200 OK\r\n"
+		"Content-Type: text/event-stream; charset=utf-8\r\n"
+		"Cache-Control: no-cache, no-transform\r\n"
+		"Connection: keep-alive\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
+		"X-Accel-Buffering: no\r\n\r\n";
+
+	if (!SendAll(client, header.data(), header.size()))
+		return;
+
+	std::uint64_t clientLootVer = 0;
+	bool firstFrame = true;
+
+	while (g_serverRunning.load(std::memory_order_relaxed)) {
+		try {
+			std::string payload = BuildStateJson(firstFrame, clientLootVer);
+			firstFrame = false;
+
+			std::string frame;
+			frame.reserve(payload.size() + 8);
+			frame.append("data: ");
+			frame.append(payload);
+			frame.append("\n\n");
+
+			if (!SendAll(client, frame.data(), frame.size()))
+				break;
+		} catch (...) {
+			break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(20)); // 50 Hz
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Worker Thread: Lightweight HTTP 1.1 + SSE Web Server
 // ---------------------------------------------------------------------------
 void RunServerLoop(int port)
 {
 	WSADATA wsaData{};
-	const bool wsaOk = (WSAStartup(MAKEWORD(2, 2), &wsaData) == 0);
-	if (!wsaOk) {
+	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
 		g_serverRunning.store(false);
 		return;
 	}
@@ -888,7 +820,7 @@ void RunServerLoop(int port)
 
 	sockaddr_in serverAddr{};
 	serverAddr.sin_family = AF_INET;
-	serverAddr.sin_addr.s_addr = INADDR_ANY; // Listen on all interfaces (localhost + LAN)
+	serverAddr.sin_addr.s_addr = INADDR_ANY;
 	serverAddr.sin_port = htons(static_cast<u_short>(port));
 
 	if (bind(listenSock, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
@@ -897,7 +829,7 @@ void RunServerLoop(int port)
 		return;
 	}
 
-	if (listen(listenSock, 10) == SOCKET_ERROR) {
+	if (listen(listenSock, 16) == SOCKET_ERROR) {
 		closesocket(listenSock);
 		g_serverRunning.store(false);
 		return;
@@ -928,7 +860,7 @@ void RunServerLoop(int port)
 
 		timeval tv{};
 		tv.tv_sec = 0;
-		tv.tv_usec = 100000; // 100ms select timeout for clean thread shutdown
+		tv.tv_usec = 100000;
 
 		int sel = select(0, &readSet, nullptr, nullptr, &tv);
 		if (sel <= 0) continue;
@@ -939,294 +871,235 @@ void RunServerLoop(int port)
 		if (client == INVALID_SOCKET) continue;
 
 		try {
-		// Set client timeouts to 2 seconds
-		DWORD timeoutMs = 2000;
-		setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
-		setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+			// Disable Nagle's algorithm so small state frames flush immediately
+			int nodelay = 1;
+			setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
-		char reqBuf[4096] = {};
-		int bytesRead = recv(client, reqBuf, sizeof(reqBuf) - 1, 0);
-		if (bytesRead <= 0) {
-			closesocket(client);
-			continue;
-		}
+			DWORD timeoutMs = 2000;
+			setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+			setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
 
-		std::string request(reqBuf, bytesRead);
-		std::istringstream reqStream(request);
-		std::string method, path, proto;
-		reqStream >> method >> path >> proto;
-
-		// Handle CORS preflight
-		if (method == "OPTIONS") {
-			std::string resp =
-				"HTTP/1.1 204 No Content\r\n"
-				"Access-Control-Allow-Origin: *\r\n"
-				"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-				"Access-Control-Allow-Headers: Content-Type\r\n"
-				"Content-Length: 0\r\n"
-				"Connection: close\r\n\r\n";
-			SendAll(client, resp.data(), resp.size());
-			closesocket(client);
-			continue;
-		}
-
-		// Routing: Root / HTML SPA
-		if (path == "/" || path == "/index.html" || path.empty()) {
-			const std::string& body = kWebRadarHtml;
-			std::string header =
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: text/html; charset=utf-8\r\n"
-				"Content-Length: " + std::to_string(body.size()) + "\r\n"
-				"Access-Control-Allow-Origin: *\r\n"
-				"Connection: close\r\n\r\n";
-			if (SendAll(client, header.data(), header.size()))
-				SendAll(client, body.data(), body.size());
-		}
-		// Routing: /api/state
-		else if (path.rfind("/api/state", 0) == 0) {
-			json j;
-			j["status"] = "ok";
-			const auto snapshot = RobRunReader::GetSnapshot();
-			const std::string loc = RobRunReader::GetLocationId();
-			j["locationId"] = loc;
-
-			const std::string activeMap = Radar::GetCurrentMapName();
-			j["mapName"] = activeMap;
-			j["mapUrl"] = "/maps/" + activeMap;
-
-			const auto& cfg = ConfigInstance.Radar;
-			j["bounds"] = {
-				{ "minX", cfg.WorldMinX },
-				{ "maxX", cfg.WorldMaxX },
-				{ "minZ", cfg.WorldMinZ },
-				{ "maxZ", cfg.WorldMaxZ }
-			};
-
-			if (snapshot && !snapshot->localPosition.IsZero()) {
-				j["local"] = {
-					{ "valid", true },
-					{ "x", snapshot->localPosition.x },
-					{ "y", snapshot->localPosition.y },
-					{ "z", snapshot->localPosition.z },
-					{ "yaw", snapshot->localYaw },
-					{ "pitch", snapshot->localPitch },
-					{ "entityId", snapshot->localEntityId }
-				};
-			} else {
-				j["local"] = { { "valid", false } };
+			char reqBuf[4096] = {};
+			int bytesRead = recv(client, reqBuf, sizeof(reqBuf) - 1, 0);
+			if (bytesRead <= 0) {
+				closesocket(client);
+				continue;
 			}
 
-			// Players
-			json players = json::array();
-			if (snapshot) {
-				for (const auto& ent : snapshot->entities) {
-					if (ent.isDead) continue;
-					const bool isLocal = (ent.entityId == snapshot->localEntityId);
-					float dist = 0.f;
-					if (!snapshot->localPosition.IsZero())
-						dist = Distance(ent.position, snapshot->localPosition);
+			std::string request(reqBuf, bytesRead);
+			std::istringstream reqStream(request);
+			std::string method, path, proto;
+			reqStream >> method >> path >> proto;
 
-					players.push_back({
-						{ "id", ent.entityId },
-						{ "name", ent.nicknameUtf8 },
-						{ "isLocal", isLocal },
-						{ "isParty", ent.isPartyMember },
-						{ "role", ent.role },
-						{ "roleName", ent.roleName },
-						{ "x", ent.position.x },
-						{ "y", ent.position.y },
-						{ "z", ent.position.z },
-						{ "yaw", ent.yaw },
-						{ "distance", dist }
-					});
+			if (method == "OPTIONS") {
+				const std::string resp =
+					"HTTP/1.1 204 No Content\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+					"Access-Control-Allow-Headers: Content-Type\r\n"
+					"Content-Length: 0\r\n"
+					"Connection: close\r\n\r\n";
+				SendAll(client, resp.data(), resp.size());
+				closesocket(client);
+				continue;
+			}
+
+			// Root SPA
+			if (path == "/" || path == "/index.html" || path.empty()) {
+				const std::string& body = GetWebRadarHtml();
+				const std::string header =
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: text/html; charset=utf-8\r\n"
+					"Content-Length: " + std::to_string(body.size()) + "\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Connection: close\r\n\r\n";
+				if (SendAll(client, header.data(), header.size()))
+					SendAll(client, body.data(), body.size());
+			}
+			// High-speed 50 Hz SSE Stream
+			else if (path.rfind("/api/stream", 0) == 0) {
+				if (g_activeStreams.load(std::memory_order_relaxed) < 8) {
+					g_activeStreams.fetch_add(1, std::memory_order_relaxed);
+					std::thread(RunSseClient, client).detach();
+					continue; // ownership transferred to SSE thread
+				} else {
+					const std::string busy = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+					SendAll(client, busy.data(), busy.size());
 				}
 			}
-			j["players"] = players;
-
-			// Vehicles & Loot
-			json vehicles = json::array();
-			json loot = json::array();
-			if (snapshot && snapshot->world && snapshot->world->valid) {
-				for (const auto& ent : snapshot->world->entities) {
-					if (ent.kind == RobRunWorld::Kind::Car ||
-						ent.kind == RobRunWorld::Kind::Helicopter ||
-						ent.kind == RobRunWorld::Kind::Vehicle) {
-						vehicles.push_back({
-							{ "kind", (int)ent.kind },
-							{ "label", ent.label },
-							{ "x", ent.position.x },
-							{ "y", ent.position.y },
-							{ "z", ent.position.z }
-						});
-					} else {
-						bool isSafe = (ent.kind == RobRunWorld::Kind::SafeDoor);
-						bool isContainer = (ent.kind == RobRunWorld::Kind::StorageBox ||
-											ent.kind == RobRunWorld::Kind::VehicleTrunk ||
-											ent.kind == RobRunWorld::Kind::FirstAidCabinet);
-						bool isValuable = (ent.kind == RobRunWorld::Kind::CashLootNode ||
-										   ent.kind == RobRunWorld::Kind::CryptoWorkbench ||
-										   ent.kind == RobRunWorld::Kind::MoneyWorkbench ||
-										   ent.kind == RobRunWorld::Kind::SettlementCash);
-
-						loot.push_back({
-							{ "kind", (int)ent.kind },
-							{ "label", ent.label },
-							{ "x", ent.position.x },
-							{ "y", ent.position.y },
-							{ "z", ent.position.z },
-							{ "isSafe", isSafe },
-							{ "isContainer", isContainer },
-							{ "isValuable", isValuable }
-						});
-					}
+			// One-shot / fallback JSON state
+			else if (path.rfind("/api/state", 0) == 0) {
+				std::uint64_t dummyVer = 0;
+				const std::string body = BuildStateJson(true, dummyVer);
+				const std::string header =
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: application/json; charset=utf-8\r\n"
+					"Content-Length: " + std::to_string(body.size()) + "\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Connection: close\r\n\r\n";
+				if (SendAll(client, header.data(), header.size()))
+					SendAll(client, body.data(), body.size());
+			}
+			// Embedded 2-pass map sprites (/sprites/<name>.png)
+			else if (path.rfind("/sprites/", 0) == 0) {
+				std::string spriteName = path.substr(9);
+				const auto q = spriteName.find('?');
+				if (q != std::string::npos) spriteName.resize(q);
+				const std::uint8_t* ptr = nullptr;
+				std::size_t sz = 0;
+				if (LookupEmbeddedSprite(spriteName, ptr, sz) && ptr && sz > 0) {
+					const std::string header =
+						"HTTP/1.1 200 OK\r\n"
+						"Content-Type: image/png\r\n"
+						"Content-Length: " + std::to_string(sz) + "\r\n"
+						"Cache-Control: public, max-age=86400\r\n"
+						"Access-Control-Allow-Origin: *\r\n"
+						"Connection: close\r\n\r\n";
+					if (SendAll(client, header.data(), header.size()))
+						SendAll(client, reinterpret_cast<const char*>(ptr), sz);
+				} else {
+					const std::string nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+					SendAll(client, nf.data(), nf.size());
 				}
 			}
-			j["vehicles"] = vehicles;
-			j["loot"] = loot;
-			j["availableMaps"] = Radar::GetMapFiles();
-
-			std::string body = j.dump(-1, ' ', false, json::error_handler_t::replace);
-			std::string header =
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/json; charset=utf-8\r\n"
-				"Content-Length: " + std::to_string(body.size()) + "\r\n"
-				"Access-Control-Allow-Origin: *\r\n"
-				"Connection: close\r\n\r\n";
-			if (SendAll(client, header.data(), header.size()))
-				SendAll(client, body.data(), body.size());
-		}
-		// Routing: /api/setmap?name=...
-		else if (path.rfind("/api/setmap", 0) == 0) {
-			auto pos = path.find("name=");
-			if (pos != std::string::npos) {
-				std::string rawName = path.substr(pos + 5);
-				const auto amp = rawName.find('&');
-				if (amp != std::string::npos) rawName.resize(amp);
-				const std::string name = UrlDecode(rawName);
-				const auto& files = Radar::GetMapFiles();
-				for (int i = 0; i < (int)files.size(); ++i) {
-					if (files[i] == name) {
-						Radar::RequestSetMap(i);
-						break;
-					}
-				}
-			}
-			std::string body = "{\"status\":\"ok\"}";
-			std::string header =
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/json\r\n"
-				"Content-Length: " + std::to_string(body.size()) + "\r\n"
-				"Access-Control-Allow-Origin: *\r\n"
-				"Connection: close\r\n\r\n";
-			if (SendAll(client, header.data(), header.size()))
-				SendAll(client, body.data(), body.size());
-		}
-		// Routing: /api/bvh (2D collision wall contours)
-		else if (path == "/api/bvh") {
-			json lines = json::array();
-			const auto scene = RobRunReader::GetBvhScene();
-			const auto snap = RobRunReader::GetSnapshot();
-
-			if (scene && scene->valid && !scene->tris.empty()) {
-				float centerY = snap ? snap->localPosition.y : 0.f;
-				float range = 180.f;
-				float rangeSq = range * range;
-				float cx = snap ? snap->localPosition.x : 0.f;
-				float cz = snap ? snap->localPosition.z : 0.f;
-
-				int count = 0;
-				for (const auto& tri : scene->tris) {
-					// Check height range (near player Y)
-					float midY = (tri.v0.y + tri.v1.y + tri.v2.y) * 0.3333f;
-					if (std::abs(midY - centerY) > 8.0f) continue;
-
-					// Distance check
-					float midX = (tri.v0.x + tri.v1.x + tri.v2.x) * 0.3333f;
-					float midZ = (tri.v0.z + tri.v1.z + tri.v2.z) * 0.3333f;
-					float dx = midX - cx, dz = midZ - cz;
-					if (dx*dx + dz*dz > rangeSq) continue;
-
-					// Normal test: skip horizontal floors/ceilings
-					CollisionBVH::Float3 e1 = tri.v1 - tri.v0;
-					CollisionBVH::Float3 e2 = tri.v2 - tri.v0;
-					CollisionBVH::Float3 n = CollisionBVH::cross(e1, e2);
-					float len = std::sqrt(CollisionBVH::dot(n, n));
-					if (len < 1e-6f) continue;
-					if (std::abs(n.y / len) > 0.65f) continue; // Skip floors
-
-					lines.push_back({ tri.v0.x, tri.v0.z, tri.v1.x, tri.v1.z });
-					lines.push_back({ tri.v1.x, tri.v1.z, tri.v2.x, tri.v2.z });
-					lines.push_back({ tri.v2.x, tri.v2.z, tri.v0.x, tri.v0.z });
-
-					if (++count > 1200) break; // Limit payload size
-				}
-			}
-
-			std::string body = lines.dump();
-			std::string header =
-				"HTTP/1.1 200 OK\r\n"
-				"Content-Type: application/json\r\n"
-				"Content-Length: " + std::to_string(body.size()) + "\r\n"
-				"Access-Control-Allow-Origin: *\r\n"
-				"Connection: close\r\n\r\n";
-			if (SendAll(client, header.data(), header.size()))
-				SendAll(client, body.data(), body.size());
-		}
-		// Routing: /maps/<filename> (Map image binary)
-		else if (path.rfind("/maps/", 0) == 0) {
-			std::string filename = path.substr(6);
-			auto q = filename.find('?');
-			if (q != std::string::npos) filename = filename.substr(0, q);
-			filename = UrlDecode(filename);
-
-			// Strict whitelist against known map filenames: prevents absolute
-			// paths (/..., C:\...), drive prefixes, and directory traversal.
-			bool allowed = !filename.empty() &&
-				filename.find("..") == std::string::npos &&
-				filename.find('/') == std::string::npos &&
-				filename.find('\\') == std::string::npos &&
-				filename.find(':') == std::string::npos &&
-				filename.find('\0') == std::string::npos;
-			if (allowed) {
-				const auto& knownMaps = Radar::GetMapFiles();
-				allowed = std::find(knownMaps.begin(), knownMaps.end(), filename) != knownMaps.end();
-			}
-
-			if (allowed) {
-				std::filesystem::path fullPath = Radar::GetMapsDirectory() / filename;
-				std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
-				if (f.is_open()) {
-					const std::streamoff rawSize = f.tellg();
-					constexpr std::streamoff kMaxMapBytes = 32 * 1024 * 1024;
-					if (rawSize > 0 && rawSize <= kMaxMapBytes) {
-						f.seekg(0, std::ios::beg);
-						std::vector<char> buf(static_cast<std::size_t>(rawSize));
-						if (f.read(buf.data(), rawSize)) {
-							std::string header =
-								"HTTP/1.1 200 OK\r\n"
-								"Content-Type: image/png\r\n"
-								"Content-Length: " + std::to_string(buf.size()) + "\r\n"
-								"Cache-Control: public, max-age=600\r\n"
-								"Access-Control-Allow-Origin: *\r\n"
-								"Connection: close\r\n\r\n";
-							if (SendAll(client, header.data(), header.size()))
-								SendAll(client, buf.data(), buf.size());
-							closesocket(client);
-							continue;
+			// Switch active map
+			else if (path.rfind("/api/setmap", 0) == 0) {
+				const auto pos = path.find("name=");
+				if (pos != std::string::npos) {
+					std::string rawName = path.substr(pos + 5);
+					const auto amp = rawName.find('&');
+					if (amp != std::string::npos) rawName.resize(amp);
+					const std::string name = UrlDecode(rawName);
+					const auto& files = Radar::GetMapFiles();
+					for (int i = 0; i < (int)files.size(); ++i) {
+						if (files[i] == name) {
+							Radar::RequestSetMap(i);
+							break;
 						}
 					}
 				}
+				const std::string body = "{\"status\":\"ok\"}";
+				const std::string header =
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: application/json\r\n"
+					"Content-Length: " + std::to_string(body.size()) + "\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Connection: close\r\n\r\n";
+				if (SendAll(client, header.data(), header.size()))
+					SendAll(client, body.data(), body.size());
 			}
+			// BVH 2D collision wall contours
+			else if (path == "/api/bvh") {
+				json lines = json::array();
+				const auto scene = RobRunReader::GetBvhScene();
+				const auto snap = RobRunReader::GetSnapshot();
 
-			std::string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-			SendAll(client, notFound.data(), notFound.size());
-		}
-		else {
-			std::string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-			SendAll(client, notFound.data(), notFound.size());
-		}
+				if (scene && scene->valid && !scene->tris.empty()) {
+					const float centerY = snap ? snap->localPosition.y : 0.f;
+					constexpr float range = 180.f;
+					constexpr float rangeSq = range * range;
+					const float cx = snap ? snap->localPosition.x : 0.f;
+					const float cz = snap ? snap->localPosition.z : 0.f;
+
+					int count = 0;
+					for (const auto& tri : scene->tris) {
+						const float midY = (tri.v0.y + tri.v1.y + tri.v2.y) * 0.3333f;
+						if (std::abs(midY - centerY) > 8.0f) continue;
+
+						const float midX = (tri.v0.x + tri.v1.x + tri.v2.x) * 0.3333f;
+						const float midZ = (tri.v0.z + tri.v1.z + tri.v2.z) * 0.3333f;
+						const float dx = midX - cx, dz = midZ - cz;
+						if (dx * dx + dz * dz > rangeSq) continue;
+
+						const CollisionBVH::Float3 e1 = tri.v1 - tri.v0;
+						const CollisionBVH::Float3 e2 = tri.v2 - tri.v0;
+						const CollisionBVH::Float3 n = CollisionBVH::cross(e1, e2);
+						const float len = std::sqrt(CollisionBVH::dot(n, n));
+						if (len < 1e-6f) continue;
+						if (std::abs(n.y / len) > 0.65f) continue;
+
+						lines.push_back({ tri.v0.x, tri.v0.z, tri.v1.x, tri.v1.z });
+						lines.push_back({ tri.v1.x, tri.v1.z, tri.v2.x, tri.v2.z });
+						lines.push_back({ tri.v2.x, tri.v2.z, tri.v0.x, tri.v0.z });
+						if (++count > 1200) break;
+					}
+				}
+
+				const std::string body = lines.dump();
+				const std::string header =
+					"HTTP/1.1 200 OK\r\n"
+					"Content-Type: application/json\r\n"
+					"Content-Length: " + std::to_string(body.size()) + "\r\n"
+					"Access-Control-Allow-Origin: *\r\n"
+					"Connection: close\r\n\r\n";
+				if (SendAll(client, header.data(), header.size()))
+					SendAll(client, body.data(), body.size());
+			}
+			// Cached map image binary (/maps/<filename>)
+			else if (path.rfind("/maps/", 0) == 0) {
+				std::string filename = path.substr(6);
+				const auto q = filename.find('?');
+				if (q != std::string::npos) filename.resize(q);
+				filename = UrlDecode(filename);
+
+				bool allowed = !filename.empty() &&
+					filename.find("..") == std::string::npos &&
+					filename.find('/') == std::string::npos &&
+					filename.find('\\') == std::string::npos &&
+					filename.find(':') == std::string::npos &&
+					filename.find('\0') == std::string::npos;
+				if (allowed) {
+					const auto& knownMaps = Radar::GetMapFiles();
+					allowed = std::find(knownMaps.begin(), knownMaps.end(), filename) != knownMaps.end();
+				}
+
+				std::shared_ptr<const std::vector<char>> data;
+				if (allowed) {
+					{
+						std::lock_guard<std::mutex> lk(g_mapCacheMutex);
+						auto it = g_mapFileCache.find(filename);
+						if (it != g_mapFileCache.end())
+							data = it->second;
+					}
+					if (!data) {
+						const std::filesystem::path fullPath = Radar::GetMapsDirectory() / filename;
+						std::ifstream f(fullPath, std::ios::binary | std::ios::ate);
+						if (f.is_open()) {
+							const std::streamoff rawSize = f.tellg();
+							constexpr std::streamoff kMaxMapBytes = 32 * 1024 * 1024;
+							if (rawSize > 0 && rawSize <= kMaxMapBytes) {
+								f.seekg(0, std::ios::beg);
+								auto buf = std::make_shared<std::vector<char>>(static_cast<std::size_t>(rawSize));
+								if (f.read(buf->data(), rawSize)) {
+									std::lock_guard<std::mutex> lk(g_mapCacheMutex);
+									g_mapFileCache[filename] = buf;
+									data = buf;
+								}
+							}
+						}
+					}
+				}
+
+				if (data && !data->empty()) {
+					const std::string header =
+						"HTTP/1.1 200 OK\r\n"
+						"Content-Type: image/png\r\n"
+						"Content-Length: " + std::to_string(data->size()) + "\r\n"
+						"Cache-Control: public, max-age=3600\r\n"
+						"Access-Control-Allow-Origin: *\r\n"
+						"Connection: close\r\n\r\n";
+					if (SendAll(client, header.data(), header.size()))
+						SendAll(client, data->data(), data->size());
+				} else {
+					const std::string nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+					SendAll(client, nf.data(), nf.size());
+				}
+			} else {
+				const std::string nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+				SendAll(client, nf.data(), nf.size());
+			}
 		} catch (...) {
-			std::string errResp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+			const std::string errResp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 			SendAll(client, errResp.data(), errResp.size());
 		}
 
@@ -1262,6 +1135,10 @@ void Stop()
 	if (g_serverThread.joinable()) {
 		g_serverThread.join();
 	}
+	// Give detached SSE stream threads a brief window to notice g_serverRunning == false
+	for (int i = 0; i < 20 && g_activeStreams.load(std::memory_order_relaxed) > 0; ++i) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(15));
+	}
 }
 
 bool IsRunning()
@@ -1284,7 +1161,7 @@ void OpenInBrowser()
 	if (!IsRunning()) {
 		Start(ConfigInstance.Radar.WebRadarPort);
 	}
-	std::string url = GetUrl();
+	const std::string url = GetUrl();
 	ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 

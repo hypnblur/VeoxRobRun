@@ -42,12 +42,12 @@ public:
 	bool WebRadarRotateWithPlayer = false;
 	bool WebRadarFollowPlayer = true;
 
-	float WorldMinX = -600.f;
-	float WorldMaxX = 600.f;
-	float WorldMinZ = -400.f;
-	float WorldMaxZ = 400.f;
+	float WorldMinX = -1232.33f;
+	float WorldMaxX = 1131.41f;
+	float WorldMinZ = -460.78f;
+	float WorldMaxZ = 914.29f;
 
-	std::string SelectedMap = "city_colliders_map.png";
+	std::string SelectedMap = "shooter_city.png";
 
 	// In-game minimap & fullscreen ('M') map overlay
 	bool InGameMinimap = true;

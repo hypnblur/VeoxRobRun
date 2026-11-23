@@ -388,10 +388,17 @@ void Init()
 
 	if (g_currentMapIndex >= 0) {
 		LoadMapByName(g_mapFiles[g_currentMapIndex]);
+		if (ConfigInstance.Radar.AutoMapSelect)
+			CalibrateBoundsForMap(g_mapFiles[g_currentMapIndex]);
 	} else if (!g_mapFiles.empty()) {
 		g_currentMapIndex = 0;
-		ConfigInstance.Radar.SelectedMap = g_mapFiles[0];
-		LoadMapByName(g_mapFiles[0]);
+		for (int i = 0; i < (int)g_mapFiles.size(); ++i) {
+			if (g_mapFiles[i] == "shooter_city.png") { g_currentMapIndex = i; break; }
+		}
+		ConfigInstance.Radar.SelectedMap = g_mapFiles[g_currentMapIndex];
+		LoadMapByName(g_mapFiles[g_currentMapIndex]);
+		if (ConfigInstance.Radar.AutoMapSelect)
+			CalibrateBoundsForMap(g_mapFiles[g_currentMapIndex]);
 	} else {
 		printf("[Radar] No map files found in maps/ folder\n");
 	}
@@ -723,7 +730,7 @@ void Draw()
 			float scale = side / std::max(worldW, worldH) * cfg.Zoom;
 
 			float normX = (localPos.x - cfg.WorldMinX) / worldW;
-			float normZ = (localPos.z - cfg.WorldMinZ) / worldH;
+			float normZ = (cfg.WorldMaxZ - localPos.z) / worldH;
 
 			float halfViewU = (side / (2.f * scale)) / worldW;
 			float halfViewV = (side / (2.f * scale)) / worldH;
@@ -944,50 +951,67 @@ const char* MapFileForLocation(const std::string& id)
 {
 	std::string lower = id;
 	for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
-	if (lower == "shootercity")   return "city_colliders_map.png";
-	if (lower == "settlement")    return "settlement.png";
-	if (lower == "settlement2")   return "settlement_2.png";
-	if (lower == "prison")        return "prison.png";
-	if (lower == "hub")           return "hangar.png";
-	if (lower == "sectorcenter")  return "city_colliders_map.png";
-	if (lower == "clanbattle")    return "city_colliders_map.png";
-	if (lower == "lootybay")      return "looty_bay.png";
-	if (lower == "lennysmotel")   return "lennys_motel.png";
+	if (lower.empty()) return nullptr;
+	if (lower.find("settlement") != std::string::npos)
+		return "settlement_2.png";
+	if (lower.find("prison") != std::string::npos)
+		return "prison.png";
+	if (lower.find("sector") != std::string::npos ||
+		lower.find("hangar") != std::string::npos || lower.find("sales") != std::string::npos)
+		return "hangar.png";
+	if (lower.find("looty") != std::string::npos)
+		return "looty_bay.png";
+	if (lower.find("hub") != std::string::npos || lower.find("lenny") != std::string::npos ||
+		lower.find("motel") != std::string::npos)
+		return "lennys_motel.png";
+	if (lower.find("city") != std::string::npos || lower.find("shooter") != std::string::npos ||
+		lower.find("clan") != std::string::npos)
+		return "shooter_city.png";
 	return nullptr;
 }
 
 void CalibrateBoundsForMap(const std::string& mapName)
 {
-	if (mapName == "city_colliders_map.png" || mapName == "map.png") {
-		ConfigInstance.Radar.WorldMinX = -600.f;
-		ConfigInstance.Radar.WorldMaxX = 600.f;
-		ConfigInstance.Radar.WorldMinZ = -400.f;
-		ConfigInstance.Radar.WorldMaxZ = 400.f;
-	} else if (mapName == "settlement.png" || mapName == "settlement_2.png") {
-		ConfigInstance.Radar.WorldMinX = -450.f;
-		ConfigInstance.Radar.WorldMaxX = 450.f;
-		ConfigInstance.Radar.WorldMinZ = -450.f;
-		ConfigInstance.Radar.WorldMaxZ = 450.f;
+	if (mapName == "shooter_city.png" || mapName == "map.png") {
+		ConfigInstance.Radar.WorldMinX = -1232.33f;
+		ConfigInstance.Radar.WorldMaxX = 1131.41f;
+		ConfigInstance.Radar.WorldMinZ = -460.78f;
+		ConfigInstance.Radar.WorldMaxZ = 914.29f;
+	} else if (mapName == "city_colliders_map.png") {
+		ConfigInstance.Radar.WorldMinX = -1086.91f;
+		ConfigInstance.Radar.WorldMaxX = 1062.33f;
+		ConfigInstance.Radar.WorldMinZ = -318.83f;
+		ConfigInstance.Radar.WorldMaxZ = 776.33f;
+	} else if (mapName == "settlement_2.png") {
+		ConfigInstance.Radar.WorldMinX = -1401.87f;
+		ConfigInstance.Radar.WorldMaxX = 1873.07f;
+		ConfigInstance.Radar.WorldMinZ = -1658.79f;
+		ConfigInstance.Radar.WorldMaxZ = 1616.15f;
+	} else if (mapName == "settlement.png") {
+		ConfigInstance.Radar.WorldMinX = -1242.60f;
+		ConfigInstance.Radar.WorldMaxX = 1591.30f;
+		ConfigInstance.Radar.WorldMinZ = -1667.80f;
+		ConfigInstance.Radar.WorldMaxZ = 1166.00f;
 	} else if (mapName == "prison.png") {
 		ConfigInstance.Radar.WorldMinX = -350.f;
 		ConfigInstance.Radar.WorldMaxX = 350.f;
 		ConfigInstance.Radar.WorldMinZ = -350.f;
 		ConfigInstance.Radar.WorldMaxZ = 350.f;
 	} else if (mapName == "hangar.png") {
-		ConfigInstance.Radar.WorldMinX = -200.f;
-		ConfigInstance.Radar.WorldMaxX = 200.f;
-		ConfigInstance.Radar.WorldMinZ = -200.f;
-		ConfigInstance.Radar.WorldMaxZ = 200.f;
+		ConfigInstance.Radar.WorldMinX = -1296.80f;
+		ConfigInstance.Radar.WorldMaxX = 1769.99f;
+		ConfigInstance.Radar.WorldMinZ = -1756.02f;
+		ConfigInstance.Radar.WorldMaxZ = 1310.77f;
 	} else if (mapName == "looty_bay.png") {
 		ConfigInstance.Radar.WorldMinX = -500.f;
 		ConfigInstance.Radar.WorldMaxX = 500.f;
 		ConfigInstance.Radar.WorldMinZ = -500.f;
 		ConfigInstance.Radar.WorldMaxZ = 500.f;
 	} else if (mapName == "lennys_motel.png") {
-		ConfigInstance.Radar.WorldMinX = -300.f;
-		ConfigInstance.Radar.WorldMaxX = 300.f;
-		ConfigInstance.Radar.WorldMinZ = -300.f;
-		ConfigInstance.Radar.WorldMaxZ = 300.f;
+		ConfigInstance.Radar.WorldMinX = -721.99f;
+		ConfigInstance.Radar.WorldMaxX = 733.36f;
+		ConfigInstance.Radar.WorldMinZ = -733.36f;
+		ConfigInstance.Radar.WorldMaxZ = 721.99f;
 	}
 }
 
@@ -1097,10 +1121,10 @@ void DrawFullMap()
 	}
 	dl->AddRect(mapMin, mapMax, IM_COL32(40, 80, 160, 180), 0.f, 0, 1.5f);
 
-	// Helper: world XZ -> screen pixel
+	// Helper: world XZ -> screen pixel (North/+Z UP)
 	auto worldToScreen = [&](float wx, float wz) -> ImVec2 {
 		float nx = (wx - cfg.WorldMinX) / worldW;
-		float nz = (wz - cfg.WorldMinZ) / worldH;
+		float nz = (cfg.WorldMaxZ - wz) / worldH;
 		return ImVec2(drawOrigin.x + nx * drawW, drawOrigin.y + nz * drawH);
 	};
 
@@ -2347,6 +2371,15 @@ void ProcessPendingMap()
 	const int pending = g_pendingMapIndex.exchange(-1, std::memory_order_acq_rel);
 	if (pending >= 0)
 		SetMap(pending);
+
+	if (ConfigInstance.Radar.AutoMapSelect) {
+		static std::string s_lastLoc;
+		const std::string loc = RobRunReader::GetLocationId();
+		if (!loc.empty() && loc != s_lastLoc) {
+			s_lastLoc = loc;
+			AutoSelectMap(loc);
+		}
+	}
 }
 
 void SetMap(int index)
@@ -2363,9 +2396,7 @@ void SetMap(int index)
 			g_currentMapIndex = index;
 		}
 		ConfigInstance.Radar.SelectedMap = g_mapFiles[index];
-		if (ConfigInstance.Radar.AutoMapSelect) {
-			CalibrateBoundsForMap(g_mapFiles[index]);
-		}
+		CalibrateBoundsForMap(g_mapFiles[index]);
 	}
 }
 

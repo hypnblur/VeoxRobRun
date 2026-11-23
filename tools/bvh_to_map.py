@@ -91,7 +91,7 @@ def render_map(tris, size=2048, bounds=None, bg=(15, 18, 25),
 
     def world_to_px(x, z):
         px = (x - xmin) * scale
-        py = (z - zmin) * scale
+        py = (zmax - z) * scale
         return (int(px), int(py))
 
     def in_bounds(v):
