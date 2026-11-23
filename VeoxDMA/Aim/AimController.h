@@ -34,6 +34,7 @@ struct DebugInfo {
 	float tgtPitchDeg = 0.f;
 	float distance = 0.f;
 	int leadMs = 0;
+	const char* predictionSource = "off";
 	// Active smoothing, weapon profile, controller, and auto-fire telemetry
 	int smoothAlgorithm = 0;
 	int activeFov = 40;

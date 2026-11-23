@@ -342,10 +342,7 @@ public:
 		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
-		PredictionMode = j[ConfigName].value(LIT("PredictionMode"), PredictionMode);
-		// Support configs saved with the previous adaptive toggle.
-		if (j[ConfigName].value(LIT("AdaptivePredictionEnabled"), false))
-			PredictionMode = 1;
+		PredictionMode = std::clamp(j[ConfigName].value(LIT("PredictionMode"), PredictionMode), 0, 1);
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);

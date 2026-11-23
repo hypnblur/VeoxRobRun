@@ -1623,6 +1623,11 @@ void DrawAimGeneral()
 				SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
 				SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
 			}
+			else
+			{
+				Note("Adaptive: %s", Aim::GetDebug().predictionSource);
+				Note("Automatic strength and full vertical lead; response uses Smoothness or Response.");
+			}
 		}
 
 		SectionLabel("Target Lock & Switching");
