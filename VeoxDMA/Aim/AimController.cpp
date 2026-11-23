@@ -1018,12 +1018,11 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
     if (speedXZ < 0.35f && speedY < 0.35f) return false;
 
     const float speed = std::sqrt(vx * vx + vy * vy + vz * vz);
-    const float maxSpeed = inVehicle ? 45.f : 12.f;
-    const float maxLeadDist = inVehicle ? 2.5f : 0.55f;
-    if (!std::isfinite(speed) || speed > maxSpeed) return false;
+    // Only reject non-finite values or true teleports/respawns (> 25 m in one sample).
+    const float stepDist = std::hypot(position.x - previous.x, position.y - previous.y, position.z - previous.z);
+    if (!std::isfinite(speed) || !std::isfinite(stepDist) || stepDist > 25.f) return false;
 
-    float lead = std::min(inVehicle ? 0.085f : 0.065f, responseMs * 0.001f);
-    lead = std::min(lead, maxLeadDist / speed);
+    float lead = std::min(inVehicle ? 0.120f : 0.085f, responseMs * 0.001f);
     const float strength = std::clamp(static_cast<float>(strengthPercent) / 100.f, 0.f, 2.f);
     lead *= strength;
     const float yScale = std::clamp(static_cast<float>(yScalePercent) / 100.f, 0.f, 1.f);
@@ -1050,11 +1049,10 @@ constexpr int   kFallbackStrengthPercent = 100;
 constexpr int   kFallbackYScalePercent = 100;
 constexpr int   kHistoryWindowMs = 260;
 constexpr int   kStaleMs         = 500;
-// Sanity limits (same scale as ApplyLeading's 12 m/s gate and 0.55 m lead cap).
-constexpr float kMaxSpeed        = 12.0f;  // m/s, faster fits are teleports/glitches
-constexpr float kMaxAccel        = 40.0f;  // m/s^2, beyond this use the straight-line fit
-constexpr float kMaxLeadDistance = 0.55f;  // m, total predicted displacement
-constexpr float kMaxJumpMeters   = 3.0f;   // a bigger step resets the history
+// Pure teleport/respawn & curvature guards — no artificial speed or lead-distance cap
+// so fast players, cars, and helicopters get full adaptive prediction.
+constexpr float kMaxQuadraticAccel  = 80.0f;  // m/s^2, above this fall back to straight-line velocity fit
+constexpr float kTeleportJumpMeters = 25.0f;  // only true teleports/respawns reset history
 // A sample is recorded when the target actually moved; a standing target is
 // refreshed at this interval so a stop is still seen.
 constexpr float kMinMoveMeters   = 0.001f;
@@ -1071,18 +1069,17 @@ static int PushMotionSample(int entityId, const Vector3& position,
     std::uint64_t observationUs, std::uint64_t nowMs, bool& changed,
     bool inVehicle = false)
 {
+    (void)inVehicle;
     MotionHistory& hist = g_motionHistory[entityId];
     changed = false;
     if (observationUs == 0 || observationUs == hist.lastObservationUs)
         return static_cast<int>(hist.samples.size());
 
-    // Clock went backwards (new session) or the target teleported: the old
-    // samples describe a different trajectory.
+    // Clock went backwards (new session) or the target teleported/respawned.
     if (hist.lastObservationUs != 0 && observationUs < hist.lastObservationUs)
         hist = MotionHistory{};
-    const float maxJump = inVehicle ? 6.0f : AdaptiveTuning::kMaxJumpMeters;
     if (!hist.samples.empty() &&
-        MovedEnough(position, hist.samples.back().position, maxJump))
+        MovedEnough(position, hist.samples.back().position, AdaptiveTuning::kTeleportJumpMeters))
         hist = MotionHistory{};
 
     hist.lastObservationUs = observationUs;
@@ -1126,15 +1123,13 @@ static bool EstimateMotion(const MotionHistory& hist,
     float& accX, float& accY, float& accZ,
     bool& quadratic, bool inVehicle = false)
 {
+    (void)inVehicle;
     AimMotionFit::Derivatives fit{};
     if (!AimMotionFit::FitAdaptive(hist.samples, fit, quadratic)) return false;
 
-    const float maxSpeed = inVehicle ? 45.0f : AdaptiveTuning::kMaxSpeed;
-    const float maxAccel = inVehicle ? 60.0f : AdaptiveTuning::kMaxAccel;
-
     // An implausible curvature is almost always sample noise: fall back to the
-    // straight-line fit instead of extrapolating it.
-    if (quadratic && std::hypot(fit.ax, fit.ay, fit.az) > maxAccel) {
+    // straight-line velocity fit instead of extrapolating noise or dropping lead.
+    if (quadratic && std::hypot(fit.ax, fit.ay, fit.az) > AdaptiveTuning::kMaxQuadraticAccel) {
         double intercept[3]{};
         AimMotionFit::Derivatives lin{};
         if (!AimMotionFit::FitLinearLatest(hist.samples, lin, intercept)) return false;
@@ -1145,9 +1140,6 @@ static bool EstimateMotion(const MotionHistory& hist,
     const double speed = std::hypot(fit.vx, fit.vy, fit.vz);
     const double accel = std::hypot(fit.ax, fit.ay, fit.az);
     if (!std::isfinite(speed) || !std::isfinite(accel))
-        return false;
-    // Reject outliers (teleports, respawns) rather than extrapolating them.
-    if (speed > maxSpeed || accel > maxAccel)
         return false;
 
     velX = static_cast<float>(fit.vx);
@@ -1233,21 +1225,15 @@ static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
         }
     }
 
-    const float maxLeadDist = inVehicle ? 2.5f : AdaptiveTuning::kMaxLeadDistance;
     float leadMsF = 0.f;
     if (accelReliable) {
         leadMsF = ComputeAdaptiveLeadMs(observationAgeMs, sampleCount, responseMs);
         mode = it->second.quadraticValid ? "adaptive quadratic" : "adaptive linear";
         const float t = leadMsF * 0.001f;
         const float halfA = 0.5f;
-        float ox = velX * t + halfA * accX * t * t;
-        float oy = velY * t + halfA * accY * t * t;
-        float oz = velZ * t + halfA * accZ * t * t;
-        const float offsetLen = std::sqrt(ox * ox + oy * oy + oz * oz);
-        if (offsetLen > maxLeadDist) {
-            const float k = maxLeadDist / offsetLen;
-            ox *= k; oy *= k; oz *= k;
-        }
+        const float ox = velX * t + halfA * accX * t * t;
+        const float oy = velY * t + halfA * accY * t * t;
+        const float oz = velZ * t + halfA * accZ * t * t;
         out = Vector3(point.x + ox, point.y + oy, point.z + oz);
     } else if (AdaptiveTuning::kAllowFallback) {
         if (haveHist && it->second.samples.size() >= 2) {
