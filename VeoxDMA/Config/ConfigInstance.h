@@ -47,7 +47,6 @@ public:
 		Aim.NoRecoil = false;
 		Aim.NoSpread = false;
 		Aim.DynamicRecoilCompensation = false;
-		Aim.IgnoreKnock = false;
 		Aim.HideCrosshair = false;
 		Overlay.CustomCameraDistance = false;
 		Overlay.FovChanger = false;
