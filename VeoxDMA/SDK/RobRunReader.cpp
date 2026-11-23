@@ -605,6 +605,8 @@ static std::string g_bvhRequestedPath;
 static std::uint64_t g_bvhLastAttemptMs = 0;
 static CollisionBVH::DynamicOccluders g_dynOccluders;
 static std::mutex g_dynOccludersMutex;
+static std::atomic<bool> g_localInVehicle{ false };
+static std::atomic<int>  g_localVehicleId{ 0 };
 
 static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::State>& world)
 {
@@ -613,12 +615,36 @@ static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::Stat
     dyn.vehicles.reserve(world->entities.size());
     dyn.smokes.reserve(world->entities.size());
 
+    static std::unordered_map<int, Vector3> s_prevVehPos;
+    std::unordered_set<int> seenVehIds;
+    seenVehIds.reserve(64);
+
     for (const auto& e : world->entities) {
         if (e.kind == RobRunWorld::Kind::Vehicle ||
             e.kind == RobRunWorld::Kind::Car ||
             e.kind == RobRunWorld::Kind::Helicopter)
         {
+            if (e.id > 0) {
+                seenVehIds.insert(e.id);
+                bool movedThisTick = false;
+                auto it = s_prevVehPos.find(e.id);
+                if (it != s_prevVehPos.end()) {
+                    const float dx = e.position.x - it->second.x;
+                    const float dy = e.position.y - it->second.y;
+                    const float dz = e.position.z - it->second.z;
+                    movedThisTick = (dx * dx + dy * dy + dz * dz > 0.50f * 0.50f);
+                    it->second = e.position;
+                } else {
+                    s_prevVehPos[e.id] = e.position;
+                }
+                // Only skip while actively moving this tick (no post-stop cooldown,
+                // so the moment a car stops its collision is immediately active).
+                if (movedThisTick)
+                    continue;
+            }
+
             CollisionBVH::VehicleOBB v;
+            v.entityId = e.id;
             v.center = { e.position.x, e.position.y + 0.95f, e.position.z };
             v.yawRad = e.yaw * (3.14159265f / 180.0f);
             v.isHelicopter = (e.kind == RobRunWorld::Kind::Helicopter);
@@ -636,6 +662,15 @@ static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::Stat
             smk.center = { e.position.x, e.position.y + 0.5f, e.position.z };
             smk.radius = 4.5f;
             dyn.smokes.push_back(smk);
+        }
+    }
+
+    if (s_prevVehPos.size() > seenVehIds.size() + 16) {
+        for (auto it = s_prevVehPos.begin(); it != s_prevVehPos.end(); ) {
+            if (seenVehIds.find(it->first) == seenVehIds.end())
+                it = s_prevVehPos.erase(it);
+            else
+                ++it;
         }
     }
 
@@ -1063,6 +1098,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     cameraState = RobRunCamera::CameraState{};
     localEntityId = -1;
     localPosition = Vector3();
+    g_localInVehicle.store(false, std::memory_order_relaxed);
+    g_localVehicleId.store(0, std::memory_order_relaxed);
     fallbackViewProjection = Matrix4x4{};
     fallbackViewProjectionValid = false;
     { std::lock_guard<std::mutex> lk(locationMutex); cachedLocationId.clear(); }
@@ -4545,15 +4582,14 @@ static void UpdateInternal()
                 if (!det.hasArmor && s.pubHasArmorW > 0x10000)
                     det.hasArmor = s.pubHasArmorVal != 0;
 
-                // Vehicle (from ReadRoleAndVehicle path)
-                if (s.vehicleWrapper > 0x10000 && s.vehIdRole > 0) {
-                    det.inVehicle = true;
-                    det.vehicleId = s.vehIdRole;
-                }
-                // Vehicle (from ReadCommonState path, takes priority)
-                if (s.vehIdW > 0x10000) {
-                    det.inVehicle = s.vehIdCommon > 0;
-                    det.vehicleId = s.vehIdCommon > 0 ? s.vehIdCommon : 0;
+                // Vehicle: prefer non-zero ID from either CommonModel or InVehicleModel
+                // so a zero CommonModel::VehicleEntityId never clobbers a valid InVehicleModel ID.
+                if (s.vehIdW > 0x10000 || s.vehicleWrapper > 0x10000) {
+                    const int resolvedVehId =
+                        (s.vehIdW > 0x10000 && s.vehIdCommon > 0) ? s.vehIdCommon :
+                        ((s.vehicleWrapper > 0x10000 && s.vehIdRole > 0) ? s.vehIdRole : 0);
+                    det.inVehicle = resolvedVehId > 0;
+                    det.vehicleId = resolvedVehId;
                 }
 
                 // Role (sequential — uses cache, usually hits)
@@ -4695,6 +4731,21 @@ static void UpdateInternal()
             if (GetFreshCamera(freshNow) && freshNow.valid)
                 liveVisCam = freshNow;
         }
+
+        // Track local player's vehicle so our own car never self-occludes camera
+        // rays while driving, while keeping vehicle collision active for players
+        // outside cars.
+        bool passLocalInVehicle = false;
+        int  passLocalVehicleId = 0;
+        if (localEntityId > 0) {
+            auto detIt = detailCache.find(localEntityId);
+            if (detIt != detailCache.end()) {
+                passLocalInVehicle = detIt->second.inVehicle;
+                passLocalVehicleId = detIt->second.inVehicle ? detIt->second.vehicleId : 0;
+            }
+        }
+        g_localInVehicle.store(passLocalInVehicle, std::memory_order_relaxed);
+        g_localVehicleId.store(passLocalVehicleId, std::memory_order_relaxed);
 
         int fallbackBudget = 1;
         for (auto& w : work) {
@@ -5277,21 +5328,29 @@ static void UpdateInternal()
                 const auto& bvh = passBvh;
                 bool anyVisible = false;
                 const int rayCount = visRayCount;
+                const int skipVeh1 = passLocalVehicleId;
+                const int skipVeh2 = entity.inVehicle ? entity.vehicleId : 0;
+                // In car: no dynamic vehicle collision (static map BVH walls/buildings
+                // and smokes still apply). Outside of car: full vehicle collision
+                // (except the local player's own car so driving never self-occludes).
+                const bool skipVehicles =
+                    (passLocalInVehicle && passLocalVehicleId <= 0) ||
+                    entity.inVehicle;
 
                 if (rayCount <= 2 || entity.bones.empty()) {
                     // Level 1 (or fallback when Skeleton ESP is off / bones empty):
                     // 2 Rays (Torso + Head). Never leaves anyVisible=false just because bones weren't built.
                     const CollisionBVH::Float3 torso = {
                         entity.position.x,
-                        entity.position.y + 0.95f,
+                        entity.position.y + (entity.inVehicle ? 0.75f : 0.95f),
                         entity.position.z };
                     const CollisionBVH::Float3 head = {
                         entity.position.x,
-                        entity.position.y + 1.65f,
+                        entity.position.y + (entity.inVehicle ? 1.12f : 1.65f),
                         entity.position.z };
 
-                    bool torsoVis = !CollisionBVH::IsOccluded(*bvh, cam, torso, &dynCopy, carCabinSolid);
-                    bool headVis = !CollisionBVH::IsOccluded(*bvh, cam, head, &dynCopy, carCabinSolid);
+                    bool torsoVis = !CollisionBVH::IsOccluded(*bvh, cam, torso, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool headVis = !CollisionBVH::IsOccluded(*bvh, cam, head, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
                     anyVisible = torsoVis || headVis;
                     for (auto& seg : entity.bones) {
                         seg.visible = anyVisible;
@@ -5301,13 +5360,13 @@ static void UpdateInternal()
                     const auto& bp = entity.bonePoints;
                     const CollisionBVH::Float3 pHead = bp.hasHead ?
                         CollisionBVH::Float3{ bp.head.x, bp.head.y, bp.head.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 1.70f, entity.position.z };
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 1.12f : 1.70f), entity.position.z };
                     const CollisionBVH::Float3 pChest = bp.hasChest ?
                         CollisionBVH::Float3{ bp.chest.x, bp.chest.y, bp.chest.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 1.25f, entity.position.z };
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 0.85f : 1.25f), entity.position.z };
                     const CollisionBVH::Float3 pPelvis = bp.hasPelvis ?
                         CollisionBVH::Float3{ bp.pelvis.x, bp.pelvis.y, bp.pelvis.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + 0.85f, entity.position.z };
+                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 0.55f : 0.85f), entity.position.z };
                     const CollisionBVH::Float3 pLHand = (std::abs(bp.leftHand.x) > 0.01f) ?
                         CollisionBVH::Float3{ bp.leftHand.x, bp.leftHand.y, bp.leftHand.z } :
                         CollisionBVH::Float3{ entity.position.x - 0.40f, entity.position.y + 1.0f, entity.position.z };
@@ -5316,12 +5375,12 @@ static void UpdateInternal()
                         CollisionBVH::Float3{ entity.position.x + 0.40f, entity.position.y + 1.0f, entity.position.z };
                     const CollisionBVH::Float3 pFeet = { entity.position.x, entity.position.y + 0.15f, entity.position.z };
 
-                    bool vHead   = !CollisionBVH::IsOccluded(*bvh, cam, pHead, &dynCopy, carCabinSolid);
-                    bool vChest  = !CollisionBVH::IsOccluded(*bvh, cam, pChest, &dynCopy, carCabinSolid);
-                    bool vPelvis = !CollisionBVH::IsOccluded(*bvh, cam, pPelvis, &dynCopy, carCabinSolid);
-                    bool vLHand  = !CollisionBVH::IsOccluded(*bvh, cam, pLHand, &dynCopy, carCabinSolid);
-                    bool vRHand  = !CollisionBVH::IsOccluded(*bvh, cam, pRHand, &dynCopy, carCabinSolid);
-                    bool vFeet   = !CollisionBVH::IsOccluded(*bvh, cam, pFeet, &dynCopy, carCabinSolid);
+                    bool vHead   = !CollisionBVH::IsOccluded(*bvh, cam, pHead, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool vChest  = !CollisionBVH::IsOccluded(*bvh, cam, pChest, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool vPelvis = !CollisionBVH::IsOccluded(*bvh, cam, pPelvis, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool vLHand  = !CollisionBVH::IsOccluded(*bvh, cam, pLHand, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool vRHand  = !CollisionBVH::IsOccluded(*bvh, cam, pRHand, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
+                    bool vFeet   = !CollisionBVH::IsOccluded(*bvh, cam, pFeet, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
 
                     anyVisible = (vHead || vChest || vPelvis || vLHand || vRHand || vFeet);
 
@@ -5342,7 +5401,7 @@ static void UpdateInternal()
                             (seg.a.x + seg.b.x) * 0.5f,
                             (seg.a.y + seg.b.y) * 0.5f,
                             (seg.a.z + seg.b.z) * 0.5f };
-                        seg.visible = !CollisionBVH::IsOccluded(*bvh, cam, mid, &dynCopy, carCabinSolid);
+                        seg.visible = !CollisionBVH::IsOccluded(*bvh, cam, mid, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
                         if (seg.visible)
                             anyVisible = true;
                     }
@@ -6041,12 +6100,21 @@ std::shared_ptr<const CollisionBVH::Scene> GetBvhScene()
     return LoadBvhSnapshot();
 }
 
-bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool checkDynamic)
+bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool checkDynamic,
+                bool targetInVehicle, int targetVehicleId)
 {
     const auto bvh = LoadBvhSnapshot();
     if (!bvh || !bvh->valid) return false;
     const CollisionBVH::Float3 o{ origin.x, origin.y, origin.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
+    const bool carCabinSolid = ConfigInstance.Player.CarCabinSolid;
+    const bool localInVeh = g_localInVehicle.load(std::memory_order_relaxed);
+    const int  localVehId = g_localVehicleId.load(std::memory_order_relaxed);
+    const int  skipVeh2   = targetInVehicle ? targetVehicleId : 0;
+    const bool skipVehicles =
+        (localInVeh && localVehId <= 0) ||
+        targetInVehicle;
+
     CollisionBVH::DynamicOccluders dynCopy;
     const CollisionBVH::DynamicOccluders* dyn = nullptr;
     if (checkDynamic) {
@@ -6054,10 +6122,11 @@ bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool c
         dynCopy = g_dynOccluders;
         dyn = &dynCopy;
     }
-    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, carCabinSolid, tMin, localVehId, skipVeh2, skipVehicles);
 }
 
-bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
+bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic,
+                      bool targetInVehicle, int targetVehicleId)
 {
     if (!IsBvhActiveForCurrentLocation()) return false;
     const auto bvh = LoadBvhSnapshot();
@@ -6070,6 +6139,14 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
     if (!cam.valid) return false;
     const CollisionBVH::Float3 o{ cam.position.x, cam.position.y, cam.position.z };
     const CollisionBVH::Float3 t{ target.x, target.y, target.z };
+    const bool carCabinSolid = ConfigInstance.Player.CarCabinSolid;
+    const bool localInVeh = g_localInVehicle.load(std::memory_order_relaxed);
+    const int  localVehId = g_localVehicleId.load(std::memory_order_relaxed);
+    const int  skipVeh2   = targetInVehicle ? targetVehicleId : 0;
+    const bool skipVehicles =
+        (localInVeh && localVehId <= 0) ||
+        targetInVehicle;
+
     CollisionBVH::DynamicOccluders dynCopy;
     const CollisionBVH::DynamicOccluders* dyn = nullptr;
     if (checkDynamic) {
@@ -6077,7 +6154,7 @@ bool IsCameraOccluded(const Vector3& target, float tMin, bool checkDynamic)
         dynCopy = g_dynOccluders;
         dyn = &dynCopy;
     }
-    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, ConfigInstance.Player.CarCabinSolid, tMin);
+    return CollisionBVH::IsOccluded(*bvh, o, t, dyn, carCabinSolid, tMin, localVehId, skipVeh2, skipVehicles);
 }
 
 bool GetFreshFullMapVariance(Vector2& pos, float& rot, float& cameraSize)

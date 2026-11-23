@@ -2026,7 +2026,8 @@ void TickTrigger()
                 continue;
             const float rPx = boneRadiusPx(trigBone, p);
             if (std::hypot(sc.x - centerX, sc.y - centerY) <= rPx) {
-                if (!cfg.TriggerVisibleOnly || !bvhLoaded || !RobRunReader::IsCameraOccluded(p)) {
+                if (!cfg.TriggerVisibleOnly || !bvhLoaded ||
+                    !RobRunReader::IsCameraOccluded(p, 0.20f, true, ent.inVehicle, ent.vehicleId)) {
                     targetOnCrosshair = true;
                     break;
                 }
@@ -2070,7 +2071,8 @@ void TickTrigger()
                 }
             }
             if (hit) {
-                if (!cfg.TriggerVisibleOnly || !bvhLoaded || !RobRunReader::IsCameraOccluded(hitPoint)) {
+                if (!cfg.TriggerVisibleOnly || !bvhLoaded ||
+                    !RobRunReader::IsCameraOccluded(hitPoint, 0.20f, true, ent.inVehicle, ent.vehicleId)) {
                     targetOnCrosshair = true;
                     break;
                 }
@@ -2370,7 +2372,8 @@ void Tick()
             static const int allBones[] = { 0, 1, 2, 3 };
             for (int b : allBones) {
                 const Vector3 bp = BonePoint(ent, b);
-                if (cfg.VisibleBonesOnly && bvhLoaded && RobRunReader::IsCameraOccluded(bp))
+                if (cfg.VisibleBonesOnly && bvhLoaded &&
+                    RobRunReader::IsCameraOccluded(bp, 0.20f, true, ent.inVehicle, ent.vehicleId))
                     continue;
                 Vector2 bScreen{};
                 if (!RobRunReader::ProjectWorld(viewProjection, bp, width, height, bScreen))
@@ -2391,20 +2394,21 @@ void Tick()
                 // Drop to chest (bone 2) if low health or target bone occluded
                 if (ent.healthKnown && ent.health <= 40.f) {
                     activeBone = 2;
-                } else if (bvhLoaded && RobRunReader::IsCameraOccluded(BonePoint(ent, activeBone))) {
+                } else if (bvhLoaded &&
+                           RobRunReader::IsCameraOccluded(BonePoint(ent, activeBone), 0.20f, true, ent.inVehicle, ent.vehicleId)) {
                     activeBone = 2;
                 }
             }
 
             point = BonePoint(ent, activeBone);
             if (cfg.VisibleBonesOnly && bvhLoaded) {
-                if (RobRunReader::IsCameraOccluded(point)) {
+                if (RobRunReader::IsCameraOccluded(point, 0.20f, true, ent.inVehicle, ent.vehicleId)) {
                     bool altFound = false;
                     static const int altBones[] = { 0, 1, 2, 3 }; // Head, Neck, Chest, Pelvis
                     for (int b : altBones) {
                         if (b == activeBone) continue;
                         Vector3 altPoint = BonePoint(ent, b);
-                        if (!RobRunReader::IsCameraOccluded(altPoint)) {
+                        if (!RobRunReader::IsCameraOccluded(altPoint, 0.20f, true, ent.inVehicle, ent.vehicleId)) {
                             point = altPoint;
                             altFound = true;
                             break;

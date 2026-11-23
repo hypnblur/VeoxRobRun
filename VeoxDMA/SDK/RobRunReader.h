@@ -292,8 +292,10 @@ BvhStatus GetBvhStatus();
 void ReloadBvh();
 std::shared_ptr<const CollisionBVH::Scene> GetBvhScene();
 
-bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);
-bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f, bool checkDynamic = true);
+bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f, bool checkDynamic = true,
+                bool targetInVehicle = false, int targetVehicleId = 0);
+bool IsCameraOccluded(const Vector3& target, float tMin = 0.20f, bool checkDynamic = true,
+                      bool targetInVehicle = false, int targetVehicleId = 0);
 CollisionBVH::DynamicOccluders GetDynamicOccluders();
 
 // High-frequency live fullscreen map pan/zoom camera state (polled on the camera thread).

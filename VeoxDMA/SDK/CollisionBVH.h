@@ -61,6 +61,7 @@ struct Scene {
 
 // Dynamic volume definitions for secondary occlusion passes
 struct VehicleOBB {
+    int entityId = 0;
     Float3 center;
     Float3 halfExtents;
     float yawRad;
@@ -360,7 +361,10 @@ inline bool IsOccluded(
     const Float3& origin, const Float3& target,
     const DynamicOccluders* dyn = nullptr,
     bool carCabinSolid = false,
-    float tMin = 0.20f)
+    float tMin = 0.20f,
+    int skipVehicleId1 = 0,
+    int skipVehicleId2 = 0,
+    bool skipAllVehicles = false)
 {
     const Float3 dir = target - origin;
     const float len = std::sqrt(dot(dir, dir));
@@ -377,29 +381,42 @@ inline bool IsOccluded(
             if (RaySphere(origin, d, smk.center, smk.radius, tMax))
                 return true;
         }
-        for (const auto& v : dyn->vehicles) {
-            // Fast segment-to-bounding-sphere reject before rotating into OBB space
-            const Float3 rel = origin - v.center;
-            const float rSq = v.cacheValid
-                ? v.boundRadiusSq
-                : (v.halfExtents.x * v.halfExtents.x +
-                   v.halfExtents.y * v.halfExtents.y +
-                   v.halfExtents.z * v.halfExtents.z);
-            const float tClosest = std::clamp(-dot(rel, d), 0.0f, tMax);
-            const Float3 closest = rel + d * tClosest;
-            if (dot(closest, closest) > rSq)
-                continue;
+        if (!skipAllVehicles) {
+            for (const auto& v : dyn->vehicles) {
+                if ((skipVehicleId1 > 0 && v.entityId == skipVehicleId1) ||
+                    (skipVehicleId2 > 0 && v.entityId == skipVehicleId2))
+                    continue;
 
-            const float cosY = v.cacheValid ? v.cosNegYaw : std::cos(-v.yawRad);
-            const float sinY = v.cacheValid ? v.sinNegYaw : std::sin(-v.yawRad);
-            const Float3 lo = { rel.x * cosY - rel.z * sinY, rel.y, rel.x * sinY + rel.z * cosY };
-            // Skip vehicles the ray originates inside (self-occlusion)
-            if (std::abs(lo.x) <= v.halfExtents.x &&
-                std::abs(lo.y) <= v.halfExtents.y &&
-                std::abs(lo.z) <= v.halfExtents.z)
-                continue;
-            if (RayVehicleOBBLocal(lo, d, v, cosY, sinY, tMax, carCabinSolid, tMin))
-                return true;
+                // Fast segment-to-bounding-sphere reject before rotating into OBB space
+                const Float3 rel = origin - v.center;
+                const float rSq = v.cacheValid
+                    ? v.boundRadiusSq
+                    : (v.halfExtents.x * v.halfExtents.x +
+                       v.halfExtents.y * v.halfExtents.y +
+                       v.halfExtents.z * v.halfExtents.z);
+                const float tClosest = std::clamp(-dot(rel, d), 0.0f, tMax);
+                const Float3 closest = rel + d * tClosest;
+                if (dot(closest, closest) > rSq)
+                    continue;
+
+                const float cosY = v.cacheValid ? v.cosNegYaw : std::cos(-v.yawRad);
+                const float sinY = v.cacheValid ? v.sinNegYaw : std::sin(-v.yawRad);
+                const Float3 lo = { rel.x * cosY - rel.z * sinY, rel.y, rel.x * sinY + rel.z * cosY };
+                // Skip vehicles the ray originates inside (self-occlusion)
+                if (std::abs(lo.x) <= v.halfExtents.x &&
+                    std::abs(lo.y) <= v.halfExtents.y &&
+                    std::abs(lo.z) <= v.halfExtents.z)
+                    continue;
+                // Skip vehicles the target bone is sitting inside (occupant visibility)
+                const Float3 relT = target - v.center;
+                const Float3 lt = { relT.x * cosY - relT.z * sinY, relT.y, relT.x * sinY + relT.z * cosY };
+                if (std::abs(lt.x) <= v.halfExtents.x + 0.15f &&
+                    std::abs(lt.y) <= v.halfExtents.y + 0.15f &&
+                    std::abs(lt.z) <= v.halfExtents.z + 0.15f)
+                    continue;
+                if (RayVehicleOBBLocal(lo, d, v, cosY, sinY, tMax, carCabinSolid, tMin))
+                    return true;
+            }
         }
     }
 
