@@ -144,8 +144,6 @@ public:
 	bool Prediction = false;
 	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
-	// Prediction mode: 0 = Legacy (fixed linear lead), 1 = Adaptive
-	int PredictionMode = 0;
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
 
@@ -259,7 +257,6 @@ public:
 		j[ConfigName][LIT("Prediction")] = Prediction;
 		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
 		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
-		j[ConfigName][LIT("PredictionMode")] = PredictionMode;
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("TargetSwitchDelay")] = TargetSwitchDelay;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
@@ -342,7 +339,6 @@ public:
 		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
-		PredictionMode = std::clamp(j[ConfigName].value(LIT("PredictionMode"), PredictionMode), 0, 1);
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
