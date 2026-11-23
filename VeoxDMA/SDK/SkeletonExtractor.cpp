@@ -918,7 +918,7 @@ bool BuildLayoutFromView(U view, const Read& read, RigLayout& out)
                out.rightHip < 0 || out.rightKnee < 0 || out.rightFoot < 0 ||
                out.leftShoulder < 0 || out.leftElbow < 0 || out.leftHand < 0 ||
                out.rightShoulder < 0 || out.rightElbow < 0 || out.rightHand < 0 ||
-               out.pelvis < 0 || out.chest < 0;
+               out.pelvis < 0 || out.chest < 0 || out.neck < 0 || out.head < 0;
     };
     if (needAnyLimb()) {
         ReadNamedBones(count, root, parent, rh.reachable, rh.transforms, read, namedBones);

@@ -653,30 +653,65 @@ bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 
 Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
 {
-    static const float heights[] = { 1.62f, 1.45f, 1.25f, 0.95f };
+    static const float standingHeights[] = { 1.62f, 1.45f, 1.25f, 0.95f };
+    static const float crouchHeights[]   = { 1.18f, 1.05f, 0.88f, 0.65f };
+    static const float vehicleHeights[]  = { 1.12f, 0.98f, 0.80f, 0.55f };
+    // Relative vertical offsets between real skeleton anchors (metres)
+    static const float anchorRelY[]      = { 0.62f, 0.48f, 0.28f, 0.00f }; // Head, Neck, Chest, Pelvis vs Pelvis
     const int index = (bone >= 0 && bone < 4) ? bone : 0;
+
+    const Vector3 root(ent.position.x, ent.position.y + 1.f, ent.position.z);
+    const float maxBoneDist = ent.inVehicle ? 12.f : 3.f;
+    auto saneBone = [&](const Vector3& p) {
+        return Finite(p) && Distance(p, root) <= maxBoneDist;
+    };
 
     const auto& points = ent.bonePoints;
     if (points.valid) {
-        Vector3 point{};
-        bool have = false;
-        switch (bone) {
-        case 0: point = points.head;   have = points.hasHead;   break;
-        case 1: point = points.neck;   have = points.hasNeck;   break;
-        case 2: point = points.chest;  have = points.hasChest;  break;
-        case 3: point = points.pelvis; have = points.hasPelvis; break;
-        default: break;
+        const Vector3 anchors[4] = { points.head, points.neck, points.chest, points.pelvis };
+        const bool hasAnchor[4]  = { points.hasHead, points.hasNeck, points.hasChest, points.hasPelvis };
+
+        // 1. Exact requested bone
+        if (hasAnchor[index] && saneBone(anchors[index]))
+            return anchors[index];
+
+        // 2. Requested anchor missing (e.g. head unbound in vehicle): derive from
+        //    the nearest valid real skeleton anchor rather than dropping to ent.position.
+        int bestRef = -1;
+        int bestDelta = 99;
+        for (int r = 0; r < 4; ++r) {
+            if (!hasAnchor[r] || !saneBone(anchors[r])) continue;
+            const int d = std::abs(r - index);
+            if (d < bestDelta) { bestDelta = d; bestRef = r; }
         }
-        // A stale or mis-resolved rig layout can point a bone at the world
-        // origin. Only trust a sample that is finite and actually sits on this
-        // character (feet-to-head is under 2 m).
-        if (have && Finite(point)) {
-            const Vector3 root(ent.position.x, ent.position.y + 1.f, ent.position.z);
-            if (Distance(point, root) <= 3.f) return point;
+        if (bestRef >= 0) {
+            Vector3 derived = anchors[bestRef];
+            derived.y += (anchorRelY[index] - anchorRelY[bestRef]);
+            return derived;
         }
     }
-    // Fallback when the rig could not be sampled: body-relative heights above
-    // the transform root (which sits at the feet).
+
+    // 3. If named anchors were unavailable but raw skeleton segments exist (ESP draws them),
+    //    derive from the highest valid segment endpoint instead of ent.position.
+    if (!ent.bones.empty()) {
+        bool foundTop = false;
+        Vector3 topPt{};
+        for (const auto& seg : ent.bones) {
+            const Vector3 a(seg.a.x, seg.a.y, seg.a.z);
+            const Vector3 b(seg.b.x, seg.b.y, seg.b.z);
+            if (saneBone(a) && (!foundTop || a.y > topPt.y)) { topPt = a; foundTop = true; }
+            if (saneBone(b) && (!foundTop || b.y > topPt.y)) { topPt = b; foundTop = true; }
+        }
+        if (foundTop) {
+            topPt.y -= (anchorRelY[0] - anchorRelY[index]);
+            return topPt;
+        }
+    }
+
+    // 4. Last-resort fallback when no skeleton exists at all.
+    const float* heights = ent.inVehicle
+        ? vehicleHeights
+        : (ent.isCrouching ? crouchHeights : standingHeights);
     return Vector3(ent.position.x, ent.position.y + heights[index], ent.position.z);
 }
 

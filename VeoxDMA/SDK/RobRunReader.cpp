@@ -434,6 +434,14 @@ struct RigCacheEntry {
     int poseHistCount = 0;
     int poseHistCursor = 0;
     int upgradeAttempts = 0;
+    // Vehicle anti-rubber-band anchor filter: suppresses single-frame backward
+    // FixedUpdate vs LateUpdate jumps on moving car skeletons while keeping
+    // 0 ms lag on forward motion.
+    Skeleton::Vec vehAnchor{};
+    Skeleton::Vec vehVel{};
+    std::uint64_t vehAnchorUs = 0;
+    bool vehAnchorValid = false;
+    int vehBackRejects = 0;
 };
 static std::unordered_map<std::int32_t, RigCacheEntry> rigCache;
 
@@ -3956,7 +3964,11 @@ static void UpdateInternal()
         std::size_t poseTotal = 0;
 
         const bool haveLocalPos = !localPosition.IsZero();
-        const float poseCullDist = static_cast<float>(ConfigInstance.Player.MaxDistance) + 25.0f;
+        const float espRange = static_cast<float>(ConfigInstance.Player.MaxDistance);
+        const float aimRange = ConfigInstance.Aim.Enabled
+            ? (std::min)(static_cast<float>(ConfigInstance.Aim.MaxDistance), 300.0f)
+            : 0.0f;
+        const float poseCullDist = (std::max)(espRange, aimRange) + 25.0f;
         const bool fullMapFastMode = g_fullMapFastMode.load(std::memory_order_relaxed);
 
         if (!fullMapFastMode)
@@ -4835,14 +4847,81 @@ static void UpdateInternal()
                     }
                 } else {
                     // Pelvis-relative 3-sample temporal median:
-                    // anchor is taken from the SAME TransformHierarchy read so
-                    // world-space movement has 0 ms lag while any isolated
-                    // 1-frame pre-LateUpdate / torn-DMA flicker is erased.
-                    const Skeleton::Vec anchor = tmpPoints.hasPelvis
+                    // rawAnchor is taken from the SAME TransformHierarchy read so
+                    // relative limb offsets are clean. For moving vehicles, also
+                    // filter single-frame backward FixedUpdate rubber-band jumps
+                    // on the world anchor while keeping 0 ms lag on forward motion.
+                    const Skeleton::Vec rawAnchor = tmpPoints.hasPelvis
                         ? tmpPoints.pelvis
                         : (tmpPoints.hasChest
                             ? tmpPoints.chest
                             : Skeleton::Vec{ entity.position.x, entity.position.y, entity.position.z });
+
+                    Skeleton::Vec anchor = rawAnchor;
+                    if (entity.inVehicle) {
+                        const std::uint64_t nowUs = SteadyMicros();
+                        const float dtSec = (rig.vehAnchorValid && nowUs > rig.vehAnchorUs)
+                            ? static_cast<float>(nowUs - rig.vehAnchorUs) * 1.0e-6f
+                            : 0.f;
+                        if (!rig.vehAnchorValid || dtSec > 0.25f) {
+                            rig.vehAnchor = rawAnchor;
+                            rig.vehVel = { 0.f, 0.f, 0.f };
+                            rig.vehAnchorUs = nowUs;
+                            rig.vehAnchorValid = true;
+                            rig.vehBackRejects = 0;
+                        } else {
+                            const float dx = rawAnchor.x - rig.vehAnchor.x;
+                            const float dy = rawAnchor.y - rig.vehAnchor.y;
+                            const float dz = rawAnchor.z - rig.vehAnchor.z;
+                            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                            const float speed = std::sqrt(
+                                rig.vehVel.x * rig.vehVel.x +
+                                rig.vehVel.y * rig.vehVel.y +
+                                rig.vehVel.z * rig.vehVel.z);
+                            if (dist > 6.0f) {
+                                // Real teleport / respawn
+                                rig.vehAnchor = rawAnchor;
+                                rig.vehVel = { 0.f, 0.f, 0.f };
+                                rig.vehAnchorUs = nowUs;
+                                rig.vehBackRejects = 0;
+                            } else {
+                                const float along = (speed > 2.0f)
+                                    ? (dx * rig.vehVel.x + dy * rig.vehVel.y + dz * rig.vehVel.z) / speed
+                                    : 0.f;
+                                if (speed > 2.0f && along < -0.04f && dist < 2.5f && rig.vehBackRejects < 3) {
+                                    // Backward FixedUpdate snap against travel direction:
+                                    // hold/glide forward smoothly instead of rubber-banding back.
+                                    ++rig.vehBackRejects;
+                                    const float stepSec = std::clamp(dtSec, 0.f, 0.012f);
+                                    anchor = {
+                                        rig.vehAnchor.x + rig.vehVel.x * stepSec,
+                                        rig.vehAnchor.y + rig.vehVel.y * stepSec,
+                                        rig.vehAnchor.z + rig.vehVel.z * stepSec
+                                    };
+                                    rig.vehAnchor = anchor;
+                                    rig.vehAnchorUs = nowUs;
+                                } else {
+                                    rig.vehBackRejects = 0;
+                                    if (dtSec >= 0.002f && dist > 0.005f) {
+                                        const float vx = dx / dtSec;
+                                        const float vy = dy / dtSec;
+                                        const float vz = dz / dtSec;
+                                        constexpr float vAlpha = 0.35f;
+                                        rig.vehVel.x = rig.vehVel.x * (1.f - vAlpha) + vx * vAlpha;
+                                        rig.vehVel.y = rig.vehVel.y * (1.f - vAlpha) + vy * vAlpha;
+                                        rig.vehVel.z = rig.vehVel.z * (1.f - vAlpha) + vz * vAlpha;
+                                    } else if (dtSec >= 0.04f && dist <= 0.005f) {
+                                        rig.vehVel = { 0.f, 0.f, 0.f };
+                                    }
+                                    rig.vehAnchor = rawAnchor;
+                                    rig.vehAnchorUs = nowUs;
+                                }
+                            }
+                        }
+                    } else {
+                        rig.vehAnchorValid = false;
+                        rig.vehBackRejects = 0;
+                    }
 
                     if (rig.poseHistCount > 0 &&
                         rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
@@ -4855,12 +4934,12 @@ static void UpdateInternal()
                     auto& relSegs = rig.relBoneHist[slot];
                     relSegs.resize(tmpBones.size());
                     for (std::size_t i = 0; i < tmpBones.size(); ++i) {
-                        relSegs[i].a = { tmpBones[i].a.x - anchor.x, tmpBones[i].a.y - anchor.y, tmpBones[i].a.z - anchor.z };
-                        relSegs[i].b = { tmpBones[i].b.x - anchor.x, tmpBones[i].b.y - anchor.y, tmpBones[i].b.z - anchor.z };
+                        relSegs[i].a = { tmpBones[i].a.x - rawAnchor.x, tmpBones[i].a.y - rawAnchor.y, tmpBones[i].a.z - rawAnchor.z };
+                        relSegs[i].b = { tmpBones[i].b.x - rawAnchor.x, tmpBones[i].b.y - rawAnchor.y, tmpBones[i].b.z - rawAnchor.z };
                         relSegs[i].visible = tmpBones[i].visible;
                     }
                     auto subVec = [&](const Skeleton::Vec& v) -> Skeleton::Vec {
-                        return { v.x - anchor.x, v.y - anchor.y, v.z - anchor.z };
+                        return { v.x - rawAnchor.x, v.y - rawAnchor.y, v.z - rawAnchor.z };
                     };
                     auto& relPts = rig.relPtsHist[slot];
                     relPts = tmpPoints;
@@ -4983,12 +5062,12 @@ static void UpdateInternal()
                     rig.prevLocalValid = true;
 
                     // Velocity-adaptive smoothing: smoothly scale alpha with movement distance.
-                    // In vehicles, allow responsive smoothing (alpha ~0.55-0.92) for small DMA jitter
-                    // instead of snapping raw frames, while still snapping on real jumps (>1.2 m).
+                    // Vehicles already use the anti-rubber-band anchor filter + 3-sample median,
+                    // so snap directly without adding PoseSmoothing lag/toggle chatter.
                     const float moveDist = Distance(rig.lastSampledPos, entity.position);
                     rig.lastSampledPos = entity.position;
-                    const bool snapPose = entity.inVehicle ? (moveDist > 1.20f) : (moveDist > 0.40f);
-                    const float maxDeltaSq = entity.inVehicle ? 2.25f : 0.25f;
+                    const bool snapPose = entity.inVehicle || (moveDist > 0.40f);
+                    const float maxDeltaSq = 0.25f;
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
                     // the base weight of the new sample: 1 publishes the raw pose,
@@ -4998,9 +5077,7 @@ static void UpdateInternal()
                         rig.smoothedBones.size() == rig.bones.size() &&
                         (rig.worldMatrices.empty() || rig.smoothedWorldMatrices.size() == rig.worldMatrices.size())) {
                         const float baseAlpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.10f, 1.0f);
-                        const float alpha = entity.inVehicle
-                            ? std::clamp((std::max)(baseAlpha, 0.55f) + (moveDist / 0.80f) * 0.35f, 0.55f, 0.92f)
-                            : std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
+                        const float alpha = std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
                         const float inv = 1.0f - alpha;
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];

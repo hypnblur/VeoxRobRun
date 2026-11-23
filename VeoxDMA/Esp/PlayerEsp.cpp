@@ -75,19 +75,19 @@ static bool ProjectWithRadius(const Matrix4x4& vp, const Vector3& world, float w
 	return true;
 }
 
-static inline bool IsValidBone(const Vector3& p, const Vector3& root)
+static inline bool IsValidBone(const Vector3& p, const Vector3& root, float maxDist = 3.0f)
 {
 	if (std::abs(p.x) < 0.1f && std::abs(p.y) < 0.1f && std::abs(p.z) < 0.1f)
 		return false;
 	if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
 		return false;
 	const float d = Distance(p, root);
-	return d <= 3.0f;
+	return d <= maxDist;
 }
 
-static inline bool IsValidBoneSegment(const Vector3& a, const Vector3& b, const Vector3& root)
+static inline bool IsValidBoneSegment(const Vector3& a, const Vector3& b, const Vector3& root, float maxDist = 3.0f)
 {
-	if (!IsValidBone(a, root) || !IsValidBone(b, root))
+	if (!IsValidBone(a, root, maxDist) || !IsValidBone(b, root, maxDist))
 		return false;
 	const float len = Distance(a, b);
 	return len >= 0.02f && len <= 1.25f;
@@ -208,25 +208,26 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	}
 
 	const auto& bp = ent.bonePoints;
+	const float maxBoneDist = ent.inVehicle ? 12.0f : 3.0f;
 
-	const bool haveHead = bp.hasHead && IsValidBone(bp.head, root);
-	const bool haveNeck = bp.hasNeck && IsValidBone(bp.neck, root);
-	const bool haveChest = bp.hasChest && IsValidBone(bp.chest, root);
-	const bool havePelvis = bp.hasPelvis && IsValidBone(bp.pelvis, root);
+	const bool haveHead = bp.hasHead && IsValidBone(bp.head, root, maxBoneDist);
+	const bool haveNeck = bp.hasNeck && IsValidBone(bp.neck, root, maxBoneDist);
+	const bool haveChest = bp.hasChest && IsValidBone(bp.chest, root, maxBoneDist);
+	const bool havePelvis = bp.hasPelvis && IsValidBone(bp.pelvis, root, maxBoneDist);
 
-	const bool haveLS = IsValidBone(bp.leftShoulder, root);
-	const bool haveRS = IsValidBone(bp.rightShoulder, root);
-	const bool haveLE = IsValidBone(bp.leftElbow, root);
-	const bool haveRE = IsValidBone(bp.rightElbow, root);
-	const bool haveLH = IsValidBone(bp.leftHand, root);
-	const bool haveRH = IsValidBone(bp.rightHand, root);
+	const bool haveLS = IsValidBone(bp.leftShoulder, root, maxBoneDist);
+	const bool haveRS = IsValidBone(bp.rightShoulder, root, maxBoneDist);
+	const bool haveLE = IsValidBone(bp.leftElbow, root, maxBoneDist);
+	const bool haveRE = IsValidBone(bp.rightElbow, root, maxBoneDist);
+	const bool haveLH = IsValidBone(bp.leftHand, root, maxBoneDist);
+	const bool haveRH = IsValidBone(bp.rightHand, root, maxBoneDist);
 
-	const bool haveLHip = IsValidBone(bp.leftHip, root);
-	const bool haveRHip = IsValidBone(bp.rightHip, root);
-	const bool haveLKnee = IsValidBone(bp.leftKnee, root);
-	const bool haveRKnee = IsValidBone(bp.rightKnee, root);
-	const bool haveLFoot = IsValidBone(bp.leftFoot, root);
-	const bool haveRFoot = IsValidBone(bp.rightFoot, root);
+	const bool haveLHip = IsValidBone(bp.leftHip, root, maxBoneDist);
+	const bool haveRHip = IsValidBone(bp.rightHip, root, maxBoneDist);
+	const bool haveLKnee = IsValidBone(bp.leftKnee, root, maxBoneDist);
+	const bool haveRKnee = IsValidBone(bp.rightKnee, root, maxBoneDist);
+	const bool haveLFoot = IsValidBone(bp.leftFoot, root, maxBoneDist);
+	const bool haveRFoot = IsValidBone(bp.rightFoot, root, maxBoneDist);
 
 	bool drawnAny = false;
 
@@ -632,9 +633,10 @@ void DrawPlayers()
 		const ImU32 visCol = Esp::D2DColorToImU32(pcfg.VisibleColour);
 		const ImU32 hidCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
 
+		const float maxBoneDist = ent.inVehicle ? 12.0f : 3.0f;
 		for (const auto& seg : ent.bones)
 		{
-			if (!IsValidBoneSegment(seg.a, seg.b, entPos))
+			if (!IsValidBoneSegment(seg.a, seg.b, entPos, maxBoneDist))
 				continue;
 
 			ImVec2 a{}, b{};
@@ -684,8 +686,8 @@ void DrawPlayers()
 
 		if (pcfg.HeadCircle && pcfg.Skeleton &&
 			ent.bonePoints.hasHead && ent.bonePoints.hasNeck &&
-			IsValidBone(ent.bonePoints.head, entPos) &&
-			IsValidBone(ent.bonePoints.neck, entPos))
+			IsValidBone(ent.bonePoints.head, entPos, maxBoneDist) &&
+			IsValidBone(ent.bonePoints.neck, entPos, maxBoneDist))
 		{
 			const Vector3& head = ent.bonePoints.head;
 			const Vector3& neck = ent.bonePoints.neck;
@@ -787,9 +789,9 @@ void DrawPlayers()
 		// --- head dot ---
 		if (pcfg.HeadDot)
 		{
-			Vector3 headPos = ent.bonePoints.hasHead && IsValidBone(ent.bonePoints.head, entPos)
+			Vector3 headPos = ent.bonePoints.hasHead && IsValidBone(ent.bonePoints.head, entPos, maxBoneDist)
 				? ent.bonePoints.head
-				: Vector3(entPos.x, entPos.y + 1.70f, entPos.z);
+				: Vector3(entPos.x, entPos.y + (ent.inVehicle ? 1.12f : 1.70f), entPos.z);
 
 			ImVec2 headScreen{};
 			if (Project(viewProjection, headPos, screenW, screenH, headScreen))
