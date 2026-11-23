@@ -362,6 +362,9 @@ struct DetailCacheEntry {
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
+    std::string nicknameUtf8;
+    std::string clanTagUtf8;
+    std::string weaponNameUtf8;
     int weaponIndex = -1;
     bool isFiring = false;
     bool isReloading = false;
@@ -522,6 +525,12 @@ static std::atomic<std::uint64_t> g_perfRebuilds{ 0 };
 static std::atomic<std::uint64_t> g_perfFallbacks{ 0 };
 static std::atomic<int> g_perfSkels{ 0 };
 static std::atomic<int> g_perfLiving{ 0 };
+static std::atomic<std::uint64_t> g_perfCamReads{ 0 };
+static std::atomic<std::uint64_t> g_perfCamPhys{ 0 };
+static std::atomic<std::uint64_t> g_perfCamChanges{ 0 };
+static std::atomic<std::uint64_t> g_perfCamRttUs{ 0 };
+static std::atomic<std::uint64_t> g_perfCamRttMaxUs{ 0 };
+static bool g_lastPassHadEntities = false;
 static void StartCameraWorker();
 static void StopCameraWorker();
 
@@ -611,6 +620,7 @@ static void UpdateDynamicOccluders(const std::shared_ptr<const RobRunWorld::Stat
             } else {
                 v.halfExtents = { 1.1f, 0.95f, 2.4f };
             }
+            v.InitCache();
             dyn.vehicles.push_back(v);
         }
         else if (e.kind == RobRunWorld::Kind::Grenade) {
@@ -882,7 +892,8 @@ static void MatchViewsToEntities()
 static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
-    snapshot->entities = entities;
+    g_lastPassHadEntities = !entities.empty();
+    snapshot->entities = std::move(entities);
     snapshot->fastVehicles = fastVehicles;
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
@@ -1072,21 +1083,64 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerStop.store(false, std::memory_order_relaxed);
     g_workerThread = std::thread([] {
         DLOG("Worker thread started");
+        std::uint64_t perfWinStartUs = SteadyMicros();
         while (!g_workerStop.load(std::memory_order_relaxed)) {
             const std::uint64_t t0 = SteadyMicros();
             Update();
-            const std::uint64_t dt = SteadyMicros() - t0;
+            const std::uint64_t tEnd = SteadyMicros();
+            const std::uint64_t dt = (tEnd >= t0) ? (tEnd - t0) : 0;
             g_perfWorkerPasses.fetch_add(1, std::memory_order_relaxed);
             g_perfWorkerUs.fetch_add(dt, std::memory_order_relaxed);
             std::uint64_t prevMax = g_perfWorkerMaxUs.load(std::memory_order_relaxed);
             while (dt > prevMax && !g_perfWorkerMaxUs.compare_exchange_weak(prevMax, dt, std::memory_order_relaxed)) {}
+
+            // Emit periodic perf summary from the normal-priority worker thread
+            // instead of blocking the THREAD_PRIORITY_HIGHEST camera thread on console I/O.
+            if (tEnd >= perfWinStartUs && (tEnd - perfWinStartUs) >= 3'000'000ULL) {
+                const std::uint64_t camReads = g_perfCamReads.exchange(0, std::memory_order_relaxed);
+                if (camReads > 0) {
+                    const double sec = static_cast<double>(tEnd - perfWinStartUs) / 1'000'000.0;
+                    const std::uint64_t camPhys = g_perfCamPhys.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t camChg = g_perfCamChanges.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t camRttSum = g_perfCamRttUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t camRttMax = g_perfCamRttMaxUs.exchange(0, std::memory_order_relaxed);
+                    const double camHz = sec > 0.0 ? (camReads / sec) : 0.0;
+                    const double chgHz = sec > 0.0 ? (camChg / sec) : 0.0;
+                    const double physPct = 100.0 * camPhys / camReads;
+                    const std::uint64_t avgUs = camRttSum / camReads;
+                    const std::uint64_t wPasses = g_perfWorkerPasses.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wUs = g_perfWorkerUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t wMaxUs = g_perfWorkerMaxUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p1Us = g_perfP1Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p2Us = g_perfP2Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p3Us = g_perfP3Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t detUs = g_perfDetUs.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t p5Us = g_perfP5Us.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t rebs = g_perfRebuilds.exchange(0, std::memory_order_relaxed);
+                    const std::uint64_t fbs = g_perfFallbacks.exchange(0, std::memory_order_relaxed);
+                    const int skels = g_perfSkels.load(std::memory_order_relaxed);
+                    const int living = g_perfLiving.load(std::memory_order_relaxed);
+                    const double wHz = sec > 0.0 ? (wPasses / sec) : 0.0;
+                    const double wMs = wPasses ? (static_cast<double>(wUs) / wPasses / 1000.0) : 0.0;
+                    const double invP = wPasses ? (1.0 / (wPasses * 1000.0)) : 0.0;
+                    std::printf("[Perf] cam=%.0fHz src=%s (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (avg=%.1fms max=%.1fms p1/p2/p3/det/p5=%.1f/%.1f/%.1f/%.1f/%.1fms reb=%llu fb=%llu skel=%d/%d) | overlay=%.0ffps mode=%s cap=%d\n",
+                        camHz, GetViewProjectionSource(), physPct,
+                        (unsigned long long)avgUs, (unsigned long long)camRttMax, chgHz,
+                        wHz, wMs, wMaxUs / 1000.0,
+                        p1Us * invP, p2Us * invP, p3Us * invP, detUs * invP, p5Us * invP,
+                        (unsigned long long)rebs, (unsigned long long)fbs, skels, living,
+                        Overlay::CurrentFps(), Overlay::PresentModeName(), Overlay::FrameCap());
+                }
+                perfWinStartUs = tEnd;
+            }
+
             // Adaptive sleep: 0 ms (yield only) when fullscreen map is open and
             // 3D ESP is hidden so map positions refresh at 300-500 Hz, 2 ms when
             // normal 3D entities are active, or 10 ms during empty lobbies.
             if (g_fullMapFastMode.load(std::memory_order_relaxed)) {
                 SwitchToThread();
             } else {
-                const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
+                const int sleepMs = (cachedBattleModel > 0x10000 && g_lastPassHadEntities) ? 2 : 10;
                 for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
                     Sleep(1);
             }
@@ -1124,6 +1178,10 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                         DLOG("WorldWorker #%d: Read=%d entities=%zu gen=%llu",
                              wwCount, worldOk, state->entities.size(), (unsigned long long)gen);
                     if (worldOk && sessionGeneration == gen) {
+                        // Resolve each world entity's LootFilter catalog index once here
+                        // (~2 Hz) so the 144-240 Hz render thread never hashes or scans labels.
+                        for (auto& we : state->entities)
+                            we.catalogIndex = LootFilterConfig::FindCatalogIndex(we.kind, we.label);
                         std::lock_guard<std::mutex> lock(g_worldMutex);
                         g_worldState = std::move(state);
                         UpdateDynamicOccluders(g_worldState);
@@ -4565,7 +4623,10 @@ static void UpdateInternal()
                 if (s.weaponDesc > 0x10000) {
                     const auto wit = g_weaponDescCache.find(s.weaponDesc);
                     if (wit != g_weaponDescCache.end() && wit->second.valid) {
-                        det.weaponName = wit->second.name;
+                        if (det.weaponName != wit->second.name) {
+                            det.weaponName = wit->second.name;
+                            det.weaponNameUtf8 = RobRunMemory::WideToUtf8(det.weaponName);
+                        }
                         det.weaponIndex = wit->second.index;
                     } else {
                         const std::uintptr_t nameStr = ReadPtr(s.weaponDesc + rr::Description::Name);
@@ -4578,12 +4639,14 @@ static void UpdateInternal()
                         const std::int32_t idx = RobRunMemory::ReadInt32(
                             s.weaponDesc + rr::InventoryItemDescription::Index);
                         det.weaponName = wn;
+                        det.weaponNameUtf8 = RobRunMemory::WideToUtf8(det.weaponName);
                         det.weaponIndex = idx >= 0 ? idx : -1;
                         if (!wn.empty() || idx >= 0)
                             g_weaponDescCache[s.weaponDesc] = WeaponDescCache{ wn, det.weaponIndex, true };
                     }
                 } else {
                     det.weaponName.clear();
+                    det.weaponNameUtf8.clear();
                     det.weaponIndex = -1;
                 }
 
@@ -4595,6 +4658,8 @@ static void UpdateInternal()
                         ReadSlotIdentity(slotIt->second, slotScratch);
                         det.nickname = std::move(slotScratch.nickname);
                         det.clanTag = std::move(slotScratch.clanTag);
+                        det.nicknameUtf8 = RobRunMemory::WideToUtf8(det.nickname);
+                        det.clanTagUtf8 = RobRunMemory::WideToUtf8(det.clanTag);
                         det.publicId = slotScratch.publicId;
                     }
                 }
@@ -4611,6 +4676,27 @@ static void UpdateInternal()
 
         const std::uint64_t tAfterDet = SteadyMicros();
         tDetUs = tAfterDet - tAfterP3;
+
+        // Hoist per-pass invariants outside the entity loop to avoid redundant
+        // mutex locks, heap allocations, and matrix work when Chams are off.
+        const bool needChamsMatrices = ConfigInstance.Player.Chams;
+        const bool wantVisCheck = ConfigInstance.Player.VisCheck ||
+            ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly;
+        const bool wantOffscreenArrows = ConfigInstance.Player.OffscreenArrows;
+        const float visMaxDist = ConfigInstance.Player.VisMaxDistance;
+        const int visRayCount = ConfigInstance.Player.VisRayCount;
+        const bool haveLocalPosPass = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
+        const auto passBvh = wantVisCheck ? LoadBvhSnapshot() : nullptr;
+        const bool passBvhUsable = passBvh && passBvh->valid && IsBvhActiveForCurrentLocation();
+        RobRunCamera::CameraState liveVisCam = visCamera;
+        if (wantVisCheck && passBvhUsable && !fullMapFastMode) {
+            RobRunCamera::CameraState freshNow{};
+            if (GetFreshCamera(freshNow) && freshNow.valid)
+                liveVisCam = freshNow;
+        }
+        static std::vector<Skeleton::BoneSegment> s_tmpBones;
+        static std::vector<Skeleton::BoneLocal> s_tmpLocal;
+        static std::vector<Matrix4x4> s_tmpWorld;
 
         int fallbackBudget = 1;
         for (auto& w : work) {
@@ -4650,10 +4736,10 @@ static void UpdateInternal()
             entity.publicId = detail.publicId;
             entity.isPartyMember = IsPartyMember(entity.entityId, entity.publicId);
             entity.weaponName = detail.weaponName;
-            // Built once here (worker pass) instead of on every ESP frame.
-            entity.nicknameUtf8 = RobRunMemory::WideToUtf8(entity.nickname);
-            entity.clanTagUtf8 = RobRunMemory::WideToUtf8(entity.clanTag);
-            entity.weaponNameUtf8 = RobRunMemory::WideToUtf8(entity.weaponName);
+            // UTF-8 strings are cached inside detailCache when strings change.
+            entity.nicknameUtf8 = detail.nicknameUtf8;
+            entity.clanTagUtf8 = detail.clanTagUtf8;
+            entity.weaponNameUtf8 = detail.weaponNameUtf8;
             entity.weaponIndex = detail.weaponIndex;
             entity.isFiring = detail.isFiring;
             entity.isReloading = detail.isReloading;
@@ -4688,29 +4774,34 @@ static void UpdateInternal()
                         rig.layout.count, (size_t)w.poseOffset, (size_t)w.poseSize);
                 }
 
-                // Sample into temporaries so a failed read never
-                // overwrites the last good frame (async DMA flicker fix).
-                std::vector<Skeleton::BoneSegment> tmpBones;
+                // Sample into reused scratch buffers so a failed read never
+                // overwrites the last good frame and avoids per-entity allocations.
+                s_tmpBones.clear();
                 Skeleton::BonePoints tmpPoints{};
-                std::vector<Skeleton::BoneLocal> tmpLocal(static_cast<std::size_t>(rig.layout.count));
-                std::vector<Matrix4x4> tmpWorld(static_cast<std::size_t>(rig.layout.count));
+                s_tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
+                if (needChamsMatrices)
+                    s_tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
+                else
+                    s_tmpWorld.clear();
 
                 Skeleton::PoseStats pst{};
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
-                    tmpBones, &tmpPoints, tmpLocal.data(),
-                    tmpWorld.data(), &pst);
+                    s_tmpBones, &tmpPoints, s_tmpLocal.data(),
+                    needChamsMatrices ? s_tmpWorld.data() : nullptr, &pst);
 
                 if (sampled) {
                     ++poseScatterOkAcc;
                 } else {
                     ++poseScatterFailAcc;
                     pst = {};
-                    tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
-                    tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
+                    s_tmpBones.clear();
+                    s_tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
+                    if (needChamsMatrices)
+                        s_tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                        tmpBones, &tmpPoints, tmpLocal.data(),
-                        tmpWorld.data(), &pst);
+                        s_tmpBones, &tmpPoints, s_tmpLocal.data(),
+                        needChamsMatrices ? s_tmpWorld.data() : nullptr, &pst);
                     if (sampled) ++poseFreshOkAcc;
                 }
                 boneTotalAcc += pst.total;
@@ -4758,7 +4849,7 @@ static void UpdateInternal()
                             : Skeleton::Vec{ entity.position.x, entity.position.y, entity.position.z });
 
                     if (rig.poseHistCount > 0 &&
-                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
+                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != s_tmpBones.size())
                     {
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4766,11 +4857,11 @@ static void UpdateInternal()
 
                     const int slot = rig.poseHistCursor;
                     auto& relSegs = rig.relBoneHist[slot];
-                    relSegs.resize(tmpBones.size());
-                    for (std::size_t i = 0; i < tmpBones.size(); ++i) {
-                        relSegs[i].a = { tmpBones[i].a.x - anchor.x, tmpBones[i].a.y - anchor.y, tmpBones[i].a.z - anchor.z };
-                        relSegs[i].b = { tmpBones[i].b.x - anchor.x, tmpBones[i].b.y - anchor.y, tmpBones[i].b.z - anchor.z };
-                        relSegs[i].visible = tmpBones[i].visible;
+                    relSegs.resize(s_tmpBones.size());
+                    for (std::size_t i = 0; i < s_tmpBones.size(); ++i) {
+                        relSegs[i].a = { s_tmpBones[i].a.x - anchor.x, s_tmpBones[i].a.y - anchor.y, s_tmpBones[i].a.z - anchor.z };
+                        relSegs[i].b = { s_tmpBones[i].b.x - anchor.x, s_tmpBones[i].b.y - anchor.y, s_tmpBones[i].b.z - anchor.z };
+                        relSegs[i].visible = s_tmpBones[i].visible;
                     }
                     auto subVec = [&](const Skeleton::Vec& v) -> Skeleton::Vec {
                         return { v.x - anchor.x, v.y - anchor.y, v.z - anchor.z };
@@ -4811,9 +4902,9 @@ static void UpdateInternal()
                         const auto& h0 = rig.relBoneHist[0];
                         const auto& h1 = rig.relBoneHist[1];
                         const auto& h2 = rig.relBoneHist[2];
-                        for (std::size_t i = 0; i < tmpBones.size(); ++i) {
-                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
-                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                        for (std::size_t i = 0; i < s_tmpBones.size(); ++i) {
+                            s_tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
+                            s_tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
                         }
                         const auto& p0 = rig.relPtsHist[0];
                         const auto& p1 = rig.relPtsHist[1];
@@ -4837,10 +4928,15 @@ static void UpdateInternal()
                     }
 
                     // Commit every pass so world position stays at full worker rate.
-                    rig.bones = std::move(tmpBones);
+                    rig.bones.swap(s_tmpBones);
                     rig.points = tmpPoints;
-                    rig.curLocal = std::move(tmpLocal);
-                    rig.worldMatrices = std::move(tmpWorld);
+                    rig.curLocal.swap(s_tmpLocal);
+                    if (needChamsMatrices) {
+                        rig.worldMatrices.swap(s_tmpWorld);
+                    } else {
+                        rig.worldMatrices.clear();
+                        rig.smoothedWorldMatrices.clear();
+                    }
                     rig.poseFailures = 0;
                     rig.poseFailureSince = 0;
                     constexpr float kPosEpsSq  = 1.0e-6f;
@@ -4958,26 +5054,29 @@ static void UpdateInternal()
                         lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
                         lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
 
-                        for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
-                            auto& sm = rig.smoothedWorldMatrices[i];
-                            const auto& rm = rig.worldMatrices[i];
-                            const float dx = rm.matrix[3][0]-sm.matrix[3][0];
-                            const float dy = rm.matrix[3][1]-sm.matrix[3][1];
-                            const float dz = rm.matrix[3][2]-sm.matrix[3][2];
-                            if (dx*dx+dy*dy+dz*dz > 0.25f) {
-                                sm = rm;
-                                continue;
-                            }
-                            for (int r = 0; r < 4; ++r) {
-                                for (int c = 0; c < 4; ++c) {
-                                    sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
+                        if (needChamsMatrices) {
+                            for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
+                                auto& sm = rig.smoothedWorldMatrices[i];
+                                const auto& rm = rig.worldMatrices[i];
+                                const float dx = rm.matrix[3][0]-sm.matrix[3][0];
+                                const float dy = rm.matrix[3][1]-sm.matrix[3][1];
+                                const float dz = rm.matrix[3][2]-sm.matrix[3][2];
+                                if (dx*dx+dy*dy+dz*dz > 0.25f) {
+                                    sm = rm;
+                                    continue;
+                                }
+                                for (int r = 0; r < 4; ++r) {
+                                    for (int c = 0; c < 4; ++c) {
+                                        sm.matrix[r][c] = sm.matrix[r][c] * inv + rm.matrix[r][c] * alpha;
+                                    }
                                 }
                             }
                         }
                     } else {
                         rig.smoothedBones = rig.bones;
                         rig.smoothedPoints = rig.points;
-                        rig.smoothedWorldMatrices = rig.worldMatrices;
+                        if (needChamsMatrices)
+                            rig.smoothedWorldMatrices = rig.worldMatrices;
                         rig.smoothedValid = true;
                     }
                 }
@@ -5029,18 +5128,20 @@ static void UpdateInternal()
                 if (catchCount++ < 10) DLOG("UpdateInternal: skeleton catch(...) fired for entity %d", entity.entityId);
             }
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=E (bones done)", uiCount);
-            const auto& activeWorldMatrices = (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid && !rig.smoothedWorldMatrices.empty())
-                ? rig.smoothedWorldMatrices
-                : rig.worldMatrices;
-            if (!activeWorldMatrices.empty() &&
-                activeWorldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
-                entity.boneWorldMatrices = activeWorldMatrices;
-                entity.boneCount = rig.layout.count;
-                entity.boneMap = rig.layout.boneMap;
-                static bool loggedCopy = false;
-                if (!loggedCopy) {
-                    DLOG("RobRunReader: copied %zu worldMatrices to entity", activeWorldMatrices.size());
-                    loggedCopy = true;
+            if (needChamsMatrices) {
+                const auto& activeWorldMatrices = (ConfigInstance.Player.PoseSmoothing && rig.smoothedValid && !rig.smoothedWorldMatrices.empty())
+                    ? rig.smoothedWorldMatrices
+                    : rig.worldMatrices;
+                if (!activeWorldMatrices.empty() &&
+                    activeWorldMatrices.size() == static_cast<std::size_t>(rig.layout.count)) {
+                    entity.boneWorldMatrices = activeWorldMatrices;
+                    entity.boneCount = rig.layout.count;
+                    entity.boneMap = rig.layout.boneMap;
+                    static bool loggedCopy = false;
+                    if (!loggedCopy) {
+                        DLOG("RobRunReader: copied %zu worldMatrices to entity", activeWorldMatrices.size());
+                        loggedCopy = true;
+                    }
                 }
             }
             entity.visible = rig.animatorActive;
@@ -5050,12 +5151,8 @@ static void UpdateInternal()
             // the aim gate when every bone is occluded. Both need the BVH, so
             // without it the animator fallback above stays in effect and the
             // menu says the occluder file is missing.
-            // Distance gate per item 9:
-            const bool haveLocalPos = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
-            const float entDist = haveLocalPos ? Distance(entity.position, localPosition) : 0.f;
-            const auto bvh = LoadBvhSnapshot();
-            const bool bvhUsable = bvh && bvh->valid && IsBvhActiveForCurrentLocation();
-            if (ConfigInstance.Player.VisMaxDistance > 0.f && entDist > ConfigInstance.Player.VisMaxDistance) {
+            const float entDist = haveLocalPosPass ? Distance(entity.position, localPosition) : 0.f;
+            if (visMaxDist > 0.f && entDist > visMaxDist) {
                 if (!ConfigInstance.Aim.VisibleBonesOnly) {
                     entity.visible = false;
                     for (auto& seg : entity.bones) {
@@ -5063,32 +5160,46 @@ static void UpdateInternal()
                     }
                 }
             }
-            else if (!bvhUsable && ConfigInstance.Aim.VisibleBonesOnly) {
+            else if (!passBvhUsable && ConfigInstance.Aim.VisibleBonesOnly) {
                 // No valid BVH for this map (e.g., Hub/Cottage) — don't falsely reject
                 // standing-still players based on animator motion alone.
                 entity.visible = true;
             }
             else if (!fullMapFastMode &&
-                (ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly) &&
-                bvhUsable &&
+                wantVisCheck &&
+                passBvhUsable &&
                 entity.entityId != localEntityId)
             {
-                // Refresh camera pose right before raycasting so fast peeks/turns
-                // never lag behind the camera sample taken at the start of UpdateInternal.
-                RobRunCamera::CameraState liveVisCam = visCamera;
-                {
-                    RobRunCamera::CameraState freshNow{};
-                    if (GetFreshCamera(freshNow) && freshNow.valid)
-                        liveVisCam = freshNow;
-                }
                 if (liveVisCam.valid) {
                 const CollisionBVH::Float3 cam = {
                     liveVisCam.position.x,
                     liveVisCam.position.y,
                     liveVisCam.position.z };
 
+                // Skip raycasting players well behind the camera unless offscreen
+                // arrows need live visibility tinting.
+                bool behindCamera = false;
+                if (!wantOffscreenArrows && entDist > 3.0f) {
+                    const float tx = entity.position.x - cam.x;
+                    const float ty = (entity.position.y + 1.0f) - cam.y;
+                    const float tz = entity.position.z - cam.z;
+                    const float lenSq = tx * tx + ty * ty + tz * tz;
+                    if (lenSq > 1.0f) {
+                        const float fwdDot = (tx * liveVisCam.forward.x +
+                                              ty * liveVisCam.forward.y +
+                                              tz * liveVisCam.forward.z) / std::sqrt(lenSq);
+                        behindCamera = (fwdDot < -0.25f);
+                    }
+                }
+
+                if (behindCamera) {
+                    entity.visible = false;
+                    for (auto& seg : entity.bones)
+                        seg.visible = false;
+                } else {
+                const auto& bvh = passBvh;
                 bool anyVisible = false;
-                const int rayCount = ConfigInstance.Player.VisRayCount;
+                const int rayCount = visRayCount;
 
                 if (rayCount <= 2 || entity.bones.empty()) {
                     // Level 1 (or fallback when Skeleton ESP is off / bones empty):
@@ -5160,6 +5271,7 @@ static void UpdateInternal()
                     }
                 }
                 entity.visible = anyVisible;
+                }
                 }
             }
 
@@ -5566,13 +5678,6 @@ static void StartCameraWorker()
         HANDLE timer = CreateWaitableTimerExW(
             nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
-        std::uint64_t winStartUs = SteadyMicros();
-        std::uint64_t reads = 0;
-        std::uint64_t physHits = 0;
-        std::uint64_t changes = 0;
-        std::uint64_t rttSumUs = 0;
-        std::uint64_t rttMaxUs = 0;
-
         while (!g_cameraStop.load(std::memory_order_relaxed)) {
             const std::uint64_t tStart = SteadyMicros();
             CameraStepResult res{};
@@ -5604,59 +5709,26 @@ static void StartCameraWorker()
             const std::uint64_t rttUs = (tEnd >= tStart) ? (tEnd - tStart) : 0;
 
             if (res.active) {
-                ++reads;
-                if (res.usedPhysical) ++physHits;
-                if (res.changed) ++changes;
-                rttSumUs += rttUs;
-                if (rttUs > rttMaxUs) rttMaxUs = rttUs;
+                g_perfCamReads.fetch_add(1, std::memory_order_relaxed);
+                if (res.usedPhysical) g_perfCamPhys.fetch_add(1, std::memory_order_relaxed);
+                if (res.changed) g_perfCamChanges.fetch_add(1, std::memory_order_relaxed);
+                g_perfCamRttUs.fetch_add(rttUs, std::memory_order_relaxed);
+                std::uint64_t prevMax = g_perfCamRttMaxUs.load(std::memory_order_relaxed);
+                while (rttUs > prevMax &&
+                       !g_perfCamRttMaxUs.compare_exchange_weak(prevMax, rttUs, std::memory_order_relaxed)) {}
 
-                // Periodic live diagnostics every 3 seconds so real-world DMA
-                // camera RTT, physical-read ratio, and DXGI present mode are visible.
-                if (tEnd - winStartUs >= 3'000'000ULL) {
-                    const double sec = static_cast<double>(tEnd - winStartUs) / 1'000'000.0;
-                    const double camHz = sec > 0.0 ? (reads / sec) : 0.0;
-                    const double chgHz = sec > 0.0 ? (changes / sec) : 0.0;
-                    const double physPct = reads ? (100.0 * physHits / reads) : 0.0;
-                    const std::uint64_t avgUs = reads ? (rttSumUs / reads) : 0;
-                    const std::uint64_t wPasses = g_perfWorkerPasses.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t wUs = g_perfWorkerUs.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t wMaxUs = g_perfWorkerMaxUs.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t p1Us = g_perfP1Us.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t p2Us = g_perfP2Us.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t p3Us = g_perfP3Us.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t detUs = g_perfDetUs.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t p5Us = g_perfP5Us.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t rebs = g_perfRebuilds.exchange(0, std::memory_order_relaxed);
-                    const std::uint64_t fbs = g_perfFallbacks.exchange(0, std::memory_order_relaxed);
-                    const int skels = g_perfSkels.load(std::memory_order_relaxed);
-                    const int living = g_perfLiving.load(std::memory_order_relaxed);
-                    const double wHz = sec > 0.0 ? (wPasses / sec) : 0.0;
-                    const double wMs = wPasses ? (static_cast<double>(wUs) / wPasses / 1000.0) : 0.0;
-                    const double invP = wPasses ? (1.0 / (wPasses * 1000.0)) : 0.0;
-                    std::printf("[Perf] cam=%.0fHz src=%s (phys=%.0f%% avg=%lluus max=%lluus chg=%.0fHz) | worker=%.0fHz (avg=%.1fms max=%.1fms p1/p2/p3/det/p5=%.1f/%.1f/%.1f/%.1f/%.1fms reb=%llu fb=%llu skel=%d/%d) | overlay=%.0ffps mode=%s cap=%d\n",
-                        camHz, GetViewProjectionSource(), physPct,
-                        (unsigned long long)avgUs, (unsigned long long)rttMaxUs, chgHz,
-                        wHz, wMs, wMaxUs / 1000.0,
-                        p1Us * invP, p2Us * invP, p3Us * invP, detUs * invP, p5Us * invP,
-                        (unsigned long long)rebs, (unsigned long long)fbs, skels, living,
-                        Overlay::CurrentFps(), Overlay::PresentModeName(), Overlay::FrameCap());
-                    winStartUs = tEnd;
-                    reads = physHits = changes = rttSumUs = rttMaxUs = 0;
-                }
-
-                // True sub-millisecond start-to-start pacing (~250 us target =
-                // up to 4000 Hz) with zero 1 ms sleep penalty. Always yield
-                // briefly so the entity worker can acquire LeechCore fairly.
-                constexpr std::uint64_t kTargetCycleUs = 250;
-                SwitchToThread();
-                while (!g_cameraStop.load(std::memory_order_relaxed) &&
-                       (SteadyMicros() - tStart) < kTargetCycleUs) {
-                    _mm_pause();
+                // Pace camera polling to ~1000 Hz using the high-resolution waitable
+                // timer (no busy-spin CPU burn, leaves ample FPGA bus headroom for
+                // entity/pose scatter reads and input threads).
+                constexpr std::uint64_t kTargetCycleUs = 1000;
+                const std::uint64_t elapsed = (tEnd >= tStart) ? (tEnd - tStart) : 0;
+                if (elapsed < kTargetCycleUs) {
+                    WaitCameraInterval(timer, static_cast<std::int64_t>(kTargetCycleUs - elapsed));
+                } else {
+                    SwitchToThread();
                 }
             } else {
                 // Back off to 5 ms in menus/lobbies when no camera is active.
-                winStartUs = tEnd;
-                reads = physHits = changes = rttSumUs = rttMaxUs = 0;
                 WaitCameraInterval(timer, 5000);
             }
         }

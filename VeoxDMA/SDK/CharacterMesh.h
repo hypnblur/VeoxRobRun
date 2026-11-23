@@ -206,6 +206,11 @@ inline void Skin(const Mesh& mesh,
     }
 
     constexpr float NAN_VAL = std::numeric_limits<float>::quiet_NaN();
+    const float rootX = boneWorld[0].matrix[3][0];
+    const float rootY = boneWorld[0].matrix[3][1];
+    const float rootZ = boneWorld[0].matrix[3][2];
+    const bool checkSpikes = !(rootX == 0.f && rootY == 0.f && rootZ == 0.f);
+
     for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
         const Vertex& vt = mesh.vertices[v];
         float mw = 0;
@@ -224,20 +229,19 @@ inline void Skin(const Mesh& mesh,
             wz += w * (M[0][2] * vt.x + M[1][2] * vt.y + M[2][2] * vt.z + M[3][2]);
         }
         const float inv = 1.0f / mw;
-        outPos[v] = { wx * inv, wy * inv, wz * inv };
-    }
-    // cull spike vertices: rotational mismatches fling verts far from root
-    const float rootX = boneWorld[0].matrix[3][0];
-    const float rootY = boneWorld[0].matrix[3][1];
-    const float rootZ = boneWorld[0].matrix[3][2];
-    if (rootX == 0.f && rootY == 0.f && rootZ == 0.f) return;
-    for (std::size_t v = 0; v < mesh.vertices.size(); ++v) {
-        if (std::isnan(outPos[v].x)) continue;
-        const float dx = outPos[v].x - rootX;
-        const float dy = outPos[v].y - rootY;
-        const float dz = outPos[v].z - rootZ;
-        if (dx*dx + dy*dy + dz*dz > 9.0f)
-            outPos[v].x = std::numeric_limits<float>::quiet_NaN();
+        const float px = wx * inv;
+        const float py = wy * inv;
+        const float pz = wz * inv;
+        if (checkSpikes) {
+            const float dx = px - rootX;
+            const float dy = py - rootY;
+            const float dz = pz - rootZ;
+            if (dx * dx + dy * dy + dz * dz > 9.0f) {
+                outPos[v] = {NAN_VAL, 0, 0};
+                continue;
+            }
+        }
+        outPos[v] = { px, py, pz };
     }
 }
 
@@ -256,20 +260,21 @@ inline bool Draw(ImDrawList* dl,
 
     // Reusable scratch buffers to eliminate per-entity heap allocations during rendering
     thread_local std::vector<ImVec2> s_screen;
-    thread_local std::vector<float> s_clipW;
     thread_local std::vector<uint8_t> s_visible;
 
     if ((int)s_screen.size() < nv) {
         s_screen.resize(nv);
-        s_clipW.resize(nv);
         s_visible.resize(nv);
     }
-    std::fill_n(s_visible.data(), nv, static_cast<uint8_t>(0));
+    std::memset(s_visible.data(), 0, static_cast<std::size_t>(nv));
+
+    const auto& M = viewProj.matrix;
+    const float halfW = 0.5f * static_cast<float>(screenW);
+    const float halfH = 0.5f * static_cast<float>(screenH);
 
     for (int i = 0; i < nv; ++i) {
         const Vector3& p = worldPos[i];
         if (std::isnan(p.x)) continue;
-        const auto& M = viewProj.matrix;
         const float cw = M[0][3] * p.x + M[1][3] * p.y + M[2][3] * p.z + M[3][3];
         if (cw < 0.1f) continue;
 
@@ -277,14 +282,15 @@ inline bool Draw(ImDrawList* dl,
         const float cy = M[0][1] * p.x + M[1][1] * p.y + M[2][1] * p.z + M[3][1];
 
         const float invW = 1.0f / cw;
-        const float ndcX = cx * invW;
-        const float ndcY = cy * invW;
-
-        s_screen[i].x = (1.0f + ndcX) * 0.5f * (float)screenW;
-        s_screen[i].y = (1.0f - ndcY) * 0.5f * (float)screenH;
-        s_clipW[i] = cw;
+        s_screen[i].x = (1.0f + cx * invW) * halfW;
+        s_screen[i].y = (1.0f - cy * invW) * halfH;
         s_visible[i] = 1;
     }
+
+    const float fScreenW = static_cast<float>(screenW);
+    const float fScreenH = static_cast<float>(screenH);
+    const float maxSpanX = fScreenW * 1.5f;
+    const float maxSpanY = fScreenH * 1.5f;
 
     bool drew = false;
     for (int i = 0; i < ni; i += 3) {
@@ -295,17 +301,21 @@ inline bool Draw(ImDrawList* dl,
         if (!s_visible[a] || !s_visible[b] || !s_visible[c])
             continue;
 
+        const ImVec2& sa = s_screen[a];
+        const ImVec2& sb = s_screen[b];
+        const ImVec2& sc = s_screen[c];
+
         // Cull triangles entirely off-screen
-        const float minX = std::min({s_screen[a].x, s_screen[b].x, s_screen[c].x});
-        const float maxX = std::max({s_screen[a].x, s_screen[b].x, s_screen[c].x});
-        const float minY = std::min({s_screen[a].y, s_screen[b].y, s_screen[c].y});
-        const float maxY = std::max({s_screen[a].y, s_screen[b].y, s_screen[c].y});
-        if (maxX < 0 || minX > screenW || maxY < 0 || minY > screenH)
+        const float minX = (std::min)(sa.x, (std::min)(sb.x, sc.x));
+        const float maxX = (std::max)(sa.x, (std::max)(sb.x, sc.x));
+        if (maxX < 0.f || minX > fScreenW || (maxX - minX) > maxSpanX)
             continue;
-        if (maxX - minX > screenW * 1.5f || maxY - minY > screenH * 1.5f)
+        const float minY = (std::min)(sa.y, (std::min)(sb.y, sc.y));
+        const float maxY = (std::max)(sa.y, (std::max)(sb.y, sc.y));
+        if (maxY < 0.f || minY > fScreenH || (maxY - minY) > maxSpanY)
             continue;
 
-        dl->AddTriangleFilled(s_screen[a], s_screen[b], s_screen[c], fillCol);
+        dl->AddTriangleFilled(sa, sb, sc, fillCol);
         drew = true;
     }
     return drew;

@@ -292,10 +292,16 @@ void DrawWorldEntities()
 			continue;
 
 		if (lf.Enabled) {
-			itemDef = lf.FindItemForEntity(entity.kind, entity.label);
-			if (itemDef) {
-				itemCfg = &lf.GetItem(itemDef->id);
+			if (entity.catalogIndex >= 0) {
+				itemDef = LootFilterConfig::GetCatalogDef(entity.catalogIndex);
+				itemCfg = &lf.GetItemByIndex(entity.catalogIndex);
 				if (!itemCfg->visible) continue;
+			} else if (entity.catalogIndex == -2) {
+				itemDef = lf.FindItemForEntity(entity.kind, entity.label);
+				if (itemDef) {
+					itemCfg = &lf.GetItem(itemDef->id);
+					if (!itemCfg->visible) continue;
+				}
 			}
 		}
 
@@ -306,7 +312,7 @@ void DrawWorldEntities()
 		//                  silently drop loot the catalog simply could not name.
 		if (!lf.Enabled) {
 			if (!IsEnabled(entity.kind)) continue;
-		} else if (!itemDef) {
+		} else if (!itemDef && entity.catalogIndex == -2) {
 			itemDef = lf.FindItemForEntity(entity.kind, "");
 			if (itemDef) itemCfg = &lf.GetItem(itemDef->id);
 		}
@@ -361,7 +367,7 @@ void DrawWorldEntities()
 		const bool outsideRange = haveLocalPosition
 			? maxDist > 0 && distSq > maxDistF * maxDistF
 			: hasItemRange;
-		if (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0)) {
+		if (kProbes && (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0))) {
 			static std::unordered_set<std::string> logged;
 			const std::string key = std::to_string(entity.id) + ":" + std::to_string(maxDist) +
 				":" + rangeOrigin + ":" + std::to_string(hasItemRange) + ":" + std::to_string(outsideRange);

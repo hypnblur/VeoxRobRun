@@ -484,12 +484,20 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 		return true;
 	}
 
-	// 1. Resolve the catalog entry and its per-item settings
-	const LootFilter::ItemDef* itemDef = lf.FindItemForEntity(ent.kind, ent.label);
-	if (!itemDef)
+	// 1. Resolve the catalog entry and its per-item settings (O(1) via pre-resolved index)
+	const LootFilter::ItemDef* itemDef = nullptr;
+	const ItemSettings* itemPtr = nullptr;
+	if (ent.catalogIndex >= 0) {
+		itemDef = LootFilterConfig::GetCatalogDef(ent.catalogIndex);
+		itemPtr = &lf.GetItemByIndex(ent.catalogIndex);
+	} else if (ent.catalogIndex == -2) {
+		itemDef = lf.FindItemForEntity(ent.kind, ent.label);
+		if (itemDef) itemPtr = &lf.GetItem(itemDef->id);
+	}
+	if (!itemDef || !itemPtr)
 		return false;
 
-	const ItemSettings& item = lf.GetItem(itemDef->id);
+	const ItemSettings& item = *itemPtr;
 	if (!item.visible)
 		return false;
 
@@ -1876,7 +1884,9 @@ void DrawInGameMapOverlay()
 			const bool isCargo = IsCargoKind(we.kind);
 			if (isCargo) {
 				if (!cfg.InGameMapCargo) continue;
-				const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+				const LootFilter::ItemDef* def = (we.catalogIndex >= 0)
+					? LootFilterConfig::GetCatalogDef(we.catalogIndex)
+					: (we.catalogIndex == -2 ? lf.FindItemForEntity(we.kind, we.label) : nullptr);
 				const int tier = ResolveItemRarityTier(we, def);
 				const int effectiveCargoTier = (tier > 0) ? tier : 1;
 				if (effectiveCargoTier < minCargoRarityTier) continue;
@@ -1892,7 +1902,9 @@ void DrawInGameMapOverlay()
 			}
 
 			if (cfg.InGameMapValuables && IsMapLootKind(we.kind)) {
-				const LootFilter::ItemDef* def = lf.FindItemForEntity(we.kind, we.label);
+				const LootFilter::ItemDef* def = (we.catalogIndex >= 0)
+					? LootFilterConfig::GetCatalogDef(we.catalogIndex)
+					: (we.catalogIndex == -2 ? lf.FindItemForEntity(we.kind, we.label) : nullptr);
 				const bool isCash = (we.kind == RobRunWorld::Kind::CashLootNode ||
 									 we.kind == RobRunWorld::Kind::SettlementCash);
 				const bool isSafe = (we.kind == RobRunWorld::Kind::SafeDoor);

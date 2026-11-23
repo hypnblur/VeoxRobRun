@@ -6,6 +6,7 @@
 #include "Il2Cpp.h"
 #include "../Config/ConfigInstance.h"
 #include "../Memory/Memory.h"
+#include "../Overlay/Overlay.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -892,6 +893,15 @@ static void Tick()
     Publish(state);
 }
 
+static bool HasAnyActiveSwap()
+{
+    for (const auto& swap : g_swaps)
+        if (swap.active) return true;
+    for (const auto& [key, swap] : g_weaponSwaps)
+        if (swap.active) return true;
+    return false;
+}
+
 static std::mutex g_workerMutex;
 
 void Start()
@@ -903,6 +913,12 @@ void Start()
     g_stop.store(false);
     g_thread = std::thread([] {
         while (!g_stop.load()) {
+            // Skip all DMA reads when the skin changer is off, nothing needs
+            // restoring, and the menu is closed so FPGA bandwidth stays free.
+            if (!ConfigInstance.Skin.Enabled && !HasAnyActiveSwap() && !Overlay::MenuOpen()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                continue;
+            }
             try { Tick(); } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
