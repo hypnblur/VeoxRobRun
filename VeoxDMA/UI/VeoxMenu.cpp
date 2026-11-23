@@ -287,9 +287,7 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Write Camera Angles", 0, 0 }, { "Cursor Fallback", 0, 0 }, { "Response", 0, 0 },
 	{ "Aim FOV", 0, 0 }, { "Smoothing Curve", 0, 0 }, { "Smoothness", 0, 0 },
 	{ "Bezier Arc", 0, 0 }, { "Curve Speed", 0, 0 }, { "Hardware Gain", 0, 0 },
-	{ "Max Distance (Aim)", 0, 0, "Max Distance" }, { "Target Prediction", 0, 0 },
-	{ "Prediction Mode", 0, 0 }, { "Legacy", 0, 0, "Prediction Mode" },
-	{ "Adaptive", 0, 0, "Prediction Mode" }, { "Lead Strength", 0, 0 },
+	{ "Max Distance (Aim)", 0, 0, "Max Distance" }, { "Target Prediction", 0, 0 }, { "Lead Strength", 0, 0 },
 	{ "Vertical Lead", 0, 0 }, { "Hard Lock", 0, 0 }, { "Switch Delay", 0, 0 },
 	// Aim -> Targets & Recoil
 	{ "Visible Bones Only", 0, 1 }, { "Ignore Teammates", 0, 1 }, { "Skip Knocked Players", 0, 1 },
@@ -1612,25 +1610,13 @@ void DrawAimGeneral()
 			SliderFloatRow("Hardware Gain", &ConfigInstance.Aim.HardwareGain, 0.25f, 5.0f, "x");
 		SliderIntRow("Max Distance##aim", &ConfigInstance.Aim.MaxDistance, 10, 1000, " m");
 
-		SectionLabel("Prediction");
+		SectionLabel("Prediction & Lock");
 		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
 		if (ConfigInstance.Aim.Prediction)
 		{
-			static const char* kPredModes[] = { "Legacy", "Adaptive" };
-			ComboRow("Prediction Mode", &ConfigInstance.Aim.PredictionMode, kPredModes, IM_ARRAYSIZE(kPredModes));
-			if (ConfigInstance.Aim.PredictionMode == 0)
-			{
-				SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
-				SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
-			}
-			else
-			{
-				Note("Adaptive: %s", Aim::GetDebug().predictionSource);
-				Note("Automatic strength and full vertical lead; response uses Smoothness or Response.");
-			}
+			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
+			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
 		}
-
-		SectionLabel("Target Lock & Switching");
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
 		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, " ms");
 		EndCard();
