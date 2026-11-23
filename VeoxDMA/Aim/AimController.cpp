@@ -907,21 +907,35 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
         const float len2 = v.x * v.x + v.y * v.y + v.z * v.z;
         return std::isfinite(len2) && len2 > 0.64f && len2 < 1.44f;
     };
-    const auto angleOk = [](float angle) {
-        return std::isfinite(angle) && std::fabs(angle) <= 7.0f;
+    // Yaw in PlayerRotationInputModel / LookDirectionModel can accumulate past
+    // +-2pi across multiple full turns in a match. Rejecting |yaw| > 7.0 rad
+    // silently dropped playerRotInput after ~1.1 turns, leaving the game to
+    // overwrite cameraModel every frame (jitter + locked mouse). Allow large
+    // finite accumulated yaw and unwrap the written yaw to the nearest 2pi turn.
+    const auto yawOk = [](float angle) {
+        return std::isfinite(angle) && std::fabs(angle) <= 10000.0f;
     };
     const auto pitchOk = [](float angle) {
         return std::isfinite(angle) && std::fabs(angle) <= 1.75f;
     };
+    const auto nearestTurnYaw = [](float currentYaw, float targetYawRad) {
+        float d = std::fmod(targetYawRad - currentYaw, 2.f * kPi);
+        if (d > kPi) d -= 2.f * kPi;
+        if (d < -kPi) d += 2.f * kPi;
+        return currentYaw + d;
+    };
     if (lookDirModel > 0x10000 && !unitVector(lookModelValue))
         lookDirModel = 0;
     if (lookDirDirect > 0x10000 &&
-        (!unitVector(lookDirectValue) || !angleOk(lookDirectYaw) ||
+        (!unitVector(lookDirectValue) || !yawOk(lookDirectYaw) ||
          !pitchOk(lookDirectPitch)))
         lookDirDirect = 0;
     if (playerRotInput > 0x10000 &&
-        (!angleOk(rotYaw) || !pitchOk(rotPitch)))
+        (!yawOk(rotYaw) || !pitchOk(rotPitch)))
         playerRotInput = 0;
+
+    float writeLookYaw = (lookDirDirect > 0x10000) ? nearestTurnYaw(lookDirectYaw, yaw) : yaw;
+    float writeRotYaw  = (playerRotInput > 0x10000) ? nearestTurnYaw(rotYaw, yaw) : yaw;
 
     outcome.attempted = true;
 
@@ -947,13 +961,13 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
             TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
             TargetProcess.AddScatterWriteRequest(scatter,
-                lookDirDirect + rr::LookDirectionModel::Yaw, &yaw, sizeof(yaw));
+                lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
             TargetProcess.AddScatterWriteRequest(scatter,
                 lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
         }
         if (playerRotInput > 0x10000) {
             TargetProcess.AddScatterWriteRequest(scatter,
-                playerRotInput + rr::PlayerRotationInputModel::Yaw, &yaw, sizeof(yaw));
+                playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
             TargetProcess.AddScatterWriteRequest(scatter,
                 playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
         }
@@ -978,11 +992,11 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
             lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
     if (lookDirDirect > 0x10000) {
         TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
-        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Yaw, &yaw, sizeof(yaw));
+        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
         TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
     }
     if (playerRotInput > 0x10000) {
-        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Yaw, &yaw, sizeof(yaw));
+        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
         TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
     }
     return ok;
