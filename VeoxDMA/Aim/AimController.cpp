@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AimController.h"
+#include "MotionFit.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "FovChanger.h"
@@ -23,6 +24,7 @@
 #include <limits>
 #include <random>
 #include <unordered_map>
+#include <deque>
 
 namespace Aim {
 
@@ -168,6 +170,23 @@ struct MotionSample {
     bool valid = false;
 };
 std::unordered_map<int, MotionSample> g_motion;
+struct MotionHistoryEntry {
+    Vector3 position{};
+    std::uint64_t tickMs = 0;
+    bool valid = false;
+};
+struct MotionHistory {
+    std::deque<MotionHistoryEntry> samples{};
+    std::uint64_t lastUpdateMs = 0;
+    std::uint64_t lastObservationUs = 0;
+    bool valid = false;
+    bool estimateValid = false;
+    bool quadraticValid = false;
+    bool smoothingInitialized = false;
+    Vector3 smoothedVelocity{};
+    Vector3 smoothedAcceleration{};
+};
+std::unordered_map<int, MotionHistory> g_motionHistory;
 
 struct AimQuat {
     float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
@@ -941,6 +960,208 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 
 } // namespace
 
+
+namespace AdaptiveTuning {
+constexpr int   kMaxLeadMs       = 120;
+constexpr int   kMinHistory      = 3;
+constexpr int   kMaxHistory      = 12;
+constexpr float kVelSmoothing    = 0.4f;
+constexpr float kAccelSmoothing  = 0.3f;
+constexpr bool  kAllowFallback   = true;
+constexpr int   kFallbackStrengthPercent = 100;
+constexpr int   kFallbackYScalePercent = 100;
+constexpr int   kHistoryWindowMs = 260;
+constexpr int   kStaleMs         = 500;
+} // namespace AdaptiveTuning
+
+static int PushMotionSample(int entityId, const Vector3& position,
+    std::uint64_t observationUs, std::uint64_t nowMs, bool& changed)
+{
+    MotionHistory& hist = g_motionHistory[entityId];
+    changed = false;
+    if (observationUs == 0 || observationUs == hist.lastObservationUs)
+        return static_cast<int>(hist.samples.size());
+
+    if (hist.lastObservationUs != 0 && observationUs < hist.lastObservationUs)
+        hist = MotionHistory{};
+
+    const std::uint64_t sampleMs = observationUs / 1000;
+    if (!hist.samples.empty() && sampleMs <= hist.samples.back().tickMs) {
+        if (sampleMs < hist.samples.back().tickMs) {
+            hist = MotionHistory{};
+        } else {
+            hist.samples.back().position = position;
+            hist.lastObservationUs = observationUs;
+            hist.lastUpdateMs = nowMs;
+            changed = true;
+            return static_cast<int>(hist.samples.size());
+        }
+    }
+
+    hist.samples.push_back(MotionHistoryEntry{ position, sampleMs, true });
+    hist.lastObservationUs = observationUs;
+    hist.lastUpdateMs = nowMs;
+    hist.valid = true;
+    changed = true;
+
+    while (static_cast<int>(hist.samples.size()) > AdaptiveTuning::kMaxHistory)
+        hist.samples.pop_front();
+    while (hist.samples.size() > static_cast<size_t>(AdaptiveTuning::kMinHistory) &&
+           sampleMs - hist.samples.front().tickMs > AdaptiveTuning::kHistoryWindowMs)
+        hist.samples.pop_front();
+
+    return static_cast<int>(hist.samples.size());
+}
+
+static bool EstimateMotion(const MotionHistory& hist,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ,
+    bool& quadratic)
+{
+    AimMotionFit::Derivatives fit{};
+    if (!AimMotionFit::FitAdaptive(hist.samples, fit, quadratic)) return false;
+
+    const double speed = std::hypot(fit.vx, fit.vy, fit.vz);
+    const double accel = std::hypot(fit.ax, fit.ay, fit.az);
+    if (!std::isfinite(speed) || !std::isfinite(accel))
+        return false;
+
+    velX = static_cast<float>(fit.vx);
+    velY = static_cast<float>(fit.vy);
+    velZ = static_cast<float>(fit.vz);
+    accX = static_cast<float>(fit.ax);
+    accY = static_cast<float>(fit.ay);
+    accZ = static_cast<float>(fit.az);
+    return std::isfinite(velX) && std::isfinite(velY) && std::isfinite(velZ) &&
+        std::isfinite(accX) && std::isfinite(accY) && std::isfinite(accZ);
+}
+
+static void SmoothMotionEstimate(MotionHistory& hist,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ)
+{
+    const float accelMag = std::sqrt(accX * accX + accY * accY + accZ * accZ);
+    const float rapidChange = std::clamp(accelMag / 25.f, 0.f, 1.f);
+    const float velAlpha = AdaptiveTuning::kVelSmoothing + 0.4f * rapidChange;
+    const float accAlpha = AdaptiveTuning::kAccelSmoothing + 0.45f * rapidChange;
+
+    if (!hist.smoothingInitialized) {
+        hist.smoothedVelocity = Vector3(velX, velY, velZ);
+        hist.smoothedAcceleration = Vector3(accX, accY, accZ);
+        hist.smoothingInitialized = true;
+        return;
+    }
+
+    velX = hist.smoothedVelocity.x = velAlpha * velX + (1.0f - velAlpha) * hist.smoothedVelocity.x;
+    velY = hist.smoothedVelocity.y = velAlpha * velY + (1.0f - velAlpha) * hist.smoothedVelocity.y;
+    velZ = hist.smoothedVelocity.z = velAlpha * velZ + (1.0f - velAlpha) * hist.smoothedVelocity.z;
+    accX = hist.smoothedAcceleration.x = accAlpha * accX + (1.0f - accAlpha) * hist.smoothedAcceleration.x;
+    accY = hist.smoothedAcceleration.y = accAlpha * accY + (1.0f - accAlpha) * hist.smoothedAcceleration.y;
+    accZ = hist.smoothedAcceleration.z = accAlpha * accZ + (1.0f - accAlpha) * hist.smoothedAcceleration.z;
+}
+
+static float ComputeAdaptiveLeadMs(float observationAgeMs, int sampleCount, float responseMs)
+{
+    return static_cast<float>(AimMotionFit::LeadMilliseconds(
+        responseMs, observationAgeMs, sampleCount,
+        AdaptiveTuning::kMinHistory, AdaptiveTuning::kMaxLeadMs));
+}
+
+static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
+    const Vector3& position, std::uint64_t observationUs, std::uint64_t nowMs,
+    float responseMs, float observationAgeMs, Vector3& out, int& leadMs, const char*& mode)
+{
+    bool newObservation = false;
+    const int sampleCount = PushMotionSample(
+        entityId, position, observationUs, nowMs, newObservation);
+    mode = sampleCount < AdaptiveTuning::kMinHistory ? "warming up" : "fit rejected";
+
+    float velX = 0.f, velY = 0.f, velZ = 0.f;
+    float accX = 0.f, accY = 0.f, accZ = 0.f;
+
+    auto it = g_motionHistory.find(entityId);
+    const bool haveHist = it != g_motionHistory.end() && it->second.valid;
+
+    bool accelReliable = false;
+    if (haveHist) {
+        MotionHistory& hist = it->second;
+        if (newObservation) {
+            hist.estimateValid = EstimateMotion(
+                hist, velX, velY, velZ, accX, accY, accZ, hist.quadraticValid);
+            if (hist.estimateValid) {
+                SmoothMotionEstimate(hist, velX, velY, velZ, accX, accY, accZ);
+                if (!hist.quadraticValid) {
+                    hist.smoothedAcceleration = Vector3{};
+                }
+            } else {
+                hist.smoothingInitialized = false;
+            }
+        }
+        accelReliable = hist.estimateValid && hist.smoothingInitialized;
+        if (accelReliable) {
+            velX = hist.smoothedVelocity.x;
+            velY = hist.smoothedVelocity.y;
+            velZ = hist.smoothedVelocity.z;
+            accX = hist.smoothedAcceleration.x;
+            accY = hist.smoothedAcceleration.y;
+            accZ = hist.smoothedAcceleration.z;
+        }
+    }
+
+    float leadMsF = 0.f;
+    if (accelReliable) {
+        leadMsF = ComputeAdaptiveLeadMs(observationAgeMs, sampleCount, responseMs);
+        mode = it->second.quadraticValid ? "adaptive quadratic" : "adaptive linear";
+        const float t = leadMsF * 0.001f;
+        const float halfA = 0.5f;
+        out = Vector3(
+            point.x + velX * t + halfA * accX * t * t,
+            point.y + velY * t + halfA * accY * t * t,
+            point.z + velZ * t + halfA * accZ * t * t);
+    } else if (AdaptiveTuning::kAllowFallback) {
+        if (haveHist && it->second.samples.size() >= 2) {
+            const auto& samples = it->second.samples;
+            const auto& newest = samples.back();
+            const auto& prev = samples[samples.size() - 2];
+            const std::uint64_t sampleMs = newest.tickMs - prev.tickMs;
+            if (sampleMs >= 4 && sampleMs <= 100) {
+                Vector3 lead{};
+                int legacyLeadMs = 0;
+                if (ApplyLeading(point, newest.position, prev.position,
+                        sampleMs, responseMs,
+                        AdaptiveTuning::kFallbackStrengthPercent,
+                        AdaptiveTuning::kFallbackYScalePercent, lead, legacyLeadMs)) {
+                    out = lead;
+                    leadMsF = static_cast<float>(legacyLeadMs);
+                    mode = "linear fallback";
+                }
+            }
+        }
+    }
+
+    if (leadMsF <= 0.f) return false;
+    leadMs = static_cast<int>(leadMsF);
+    return true;
+}
+
+static void PruneMotionHistory(std::uint64_t nowMs)
+{
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(AdaptiveTuning::kStaleMs);
+    for (auto it = g_motionHistory.begin(); it != g_motionHistory.end(); ) {
+        if (nowMs - it->second.lastUpdateMs > staleMs) {
+            it = g_motionHistory.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void ResetMotionHistory()
+{
+    g_motionHistory.clear();
+}
+
+
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
 bool IsAlwaysKey(int keyIndex) { return keyIndex == kAlwaysKeyIndex; }
@@ -1320,6 +1541,8 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    g_motion.clear();
+    ResetMotionHistory();
     ReleaseFireButton();
     g_triggerPhase = TriggerPhase::Idle;
     g_triggerDebugActive.store(false, std::memory_order_relaxed);
@@ -1765,6 +1988,8 @@ void Tick()
     dbg.triggerEnabled = eff.triggerEnabled;
     dbg.triggerActive = g_triggerDebugActive.load(std::memory_order_relaxed);
     dbg.triggerState = g_triggerDebugState.load(std::memory_order_relaxed);
+    dbg.predictionSource = !cfg.Prediction ? "off" :
+        (cfg.PredictionMode == 1 ? "waiting for target" : "legacy");
 
     const auto stopAiming = [] {
         if (g_wasAiming) {
@@ -1841,6 +2066,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         return;
     }
 
@@ -1860,6 +2086,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
 
@@ -1910,10 +2137,12 @@ void Tick()
     Vector2 bestScreen{};
     float bestScore = 0.f;
     int bestLeadMs = 0;
+    const char* bestPredictionSource = "off";
     bool lastValid = false;
     Vector3 lastPoint{};
     Vector2 lastScreen{};
     int lastLeadMs = 0;
+    const char* lastPredictionSource = "off";
     // If the local transform could not be resolved the origin would reject
     // every target on distance, so only apply the range filter when we have a
     // real local position.
@@ -1922,11 +2151,18 @@ void Tick()
     const float responseMs = cfg.ResponseMs > 0
         ? std::clamp(static_cast<float>(cfg.ResponseMs), 1.f, 250.f)
         : ResponseForSmoothness(eff.smoothness);
+    const auto steadyNowUs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    const float observationAgeMs = snapshot->stampUs != 0 && steadyNowUs >= snapshot->stampUs
+        ? std::clamp(static_cast<float>(steadyNowUs - snapshot->stampUs) * 0.001f, 0.f, 80.f)
+        : 0.f;
     const bool bvhLoaded = RobRunReader::GetBvhStatus().loaded;
 
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
     if (g_motion.size() > 512) g_motion.clear();
+    PruneMotionHistory(nowMs);
 
     RejectedDebug closestRejected{};
     auto noteRejected = [&](const RobRunReader::EntityData& e, const char* why) {
@@ -2013,11 +2249,21 @@ void Tick()
             }
         }
         int leadMs = 0;
+        const char* predictionSource = cfg.Prediction ? "legacy" : "off";
 
         // Leading uses the previous feet sample. Update the sample after the
         // prediction step so the next tick differentiates against this one.
         MotionSample& sample = g_motion[ent.entityId];
-        if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
+
+        if (cfg.Prediction && cfg.PredictionMode == 1) {
+            Vector3 adaptivePoint{};
+            int adaptiveLeadMs = 0;
+            if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, snapshot->stampUs, nowMs,
+                    responseMs, observationAgeMs, adaptivePoint, adaptiveLeadMs, predictionSource)) {
+                point = adaptivePoint;
+                leadMs = adaptiveLeadMs;
+            }
+        } else if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
             const std::uint64_t sampleMs = nowMs - sample.tickMs;
             if (sampleMs >= 4 && sampleMs <= 100) {
                 Vector3 lead;
@@ -2041,6 +2287,7 @@ void Tick()
             lastScreen = screen;
             lastPoint = point;
             lastLeadMs = leadMs;
+            lastPredictionSource = predictionSource;
         }
 
         const float dx = screen.x - centerX;
@@ -2059,6 +2306,7 @@ void Tick()
             bestScreen = screen;
             bestPoint = point;
             bestLeadMs = leadMs;
+            bestPredictionSource = predictionSource;
             break;
         }
 
@@ -2079,6 +2327,7 @@ void Tick()
             bestPoint = point;
             bestScore = score;
             bestLeadMs = leadMs;
+            bestPredictionSource = predictionSource;
         }
     }
 
@@ -2113,12 +2362,14 @@ void Tick()
         bestScreen = lastScreen;
         bestPoint = lastPoint;
         bestLeadMs = lastLeadMs;
+        bestPredictionSource = lastPredictionSource;
     }
     if (bestId != g_lastTarget)
         g_lastTargetSwitchMs = nowMs;
     g_lastTarget = bestId;
     dbg.target = bestId;
     dbg.leadMs = bestLeadMs;
+    dbg.predictionSource = bestPredictionSource;
 
     const float dx = bestScreen.x - centerX;
     const float dy = bestScreen.y - centerY;
@@ -2787,8 +3038,8 @@ void DrawDebug()
         d.menuOpen ? "open" : "closed", d.held ? "held" : "up", d.keySource);
     std::snprintf(lines[2], sizeof(lines[2]), "Entities: %d  Candidates: %d  Target: %d",
         d.entities, d.candidates, d.target);
-    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d  Lead: %dms",
-        d.dx, d.dy, d.stepX, d.stepY, d.leadMs);
+    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d  Lead: %dms  Pred: %s",
+        d.dx, d.dy, d.stepX, d.stepY, d.leadMs, d.predictionSource);
     std::snprintf(lines[4], sizeof(lines[4]), "Type: %s  Device: %s",
         d.aimType == 0 ? "memory" : "hardware", d.deviceReady ? "ready" : "not ready");
     std::snprintf(lines[5], sizeof(lines[5]), "Write: %s  %s  yaw %.1f pitch %.1f dist %.0fm",
