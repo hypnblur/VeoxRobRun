@@ -231,21 +231,6 @@ HumanizeState g_humanize{};
 std::uint64_t g_lastSessionGeneration = 0;
 std::uint64_t g_writeBlockedUntil = 0;
 
-// Previous feet position per entity, used for target leading. Kept on the
-// worker thread because the reader snapshot only carries one position.
-// History advances only when the reader publishes a new snapshot (stampUs),
-// never per Tick: positions only change at snapshot rate, so differencing
-// per Tick gave zero velocity on most ticks and a several-fold spike on the
-// one after a refresh.
-struct MotionSample {
-    Vector3 position{};          // position at the newest snapshot
-    Vector3 prevPosition{};      // position at the snapshot before it
-    std::uint64_t stampUs = 0;
-    std::uint64_t prevStampUs = 0;
-    bool valid = false;
-    bool prevValid = false;
-};
-std::unordered_map<int, MotionSample> g_motion;
 struct MotionHistoryEntry {
     Vector3 position{};
     std::uint64_t tickUs = 0;   // snapshot publish time, steady_clock microseconds
@@ -1687,7 +1672,6 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
-    g_motion.clear();
     ResetMotionHistory();
     ReleaseFireButton();
     g_triggerPhase = TriggerPhase::Idle;
@@ -2149,8 +2133,7 @@ void Tick()
     dbg.triggerEnabled = eff.triggerEnabled;
     dbg.triggerActive = g_triggerDebugActive.load(std::memory_order_relaxed);
     dbg.triggerState = g_triggerDebugState.load(std::memory_order_relaxed);
-    dbg.predictionSource = !cfg.Prediction ? "off" :
-        (cfg.PredictionMode == 1 ? "waiting for target" : "legacy");
+    dbg.predictionSource = !cfg.Prediction ? "off" : "waiting for target";
 
     const auto stopAiming = [] {
         if (g_wasAiming) {
@@ -2226,7 +2209,6 @@ void Tick()
         stopAiming();
         resetSmoothing();
         g_lastTarget = -1;
-        g_motion.clear();
         ResetMotionHistory();
         return;
     }
@@ -2246,7 +2228,6 @@ void Tick()
         g_lastSessionGeneration = snapshot->sessionGeneration;
         resetSmoothing();
         g_lastTarget = -1;
-        g_motion.clear();
         ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
@@ -2322,7 +2303,6 @@ void Tick()
 
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
-    if (g_motion.size() > 512) g_motion.clear();
     PruneMotionHistory(nowMs);
 
     RejectedDebug closestRejected{};
@@ -2420,47 +2400,15 @@ void Tick()
             point.z += hOff.z;
         }
         int leadMs = 0;
-        const char* predictionSource = cfg.Prediction ? "legacy" : "off";
+        const char* predictionSource = "off";
 
-        // Leading uses the previous two published snapshots, never raw tick
-        // deltas: positions only change at snapshot rate, so differencing per
-        // Tick produced zero velocity on most ticks and a spike on the next.
-        MotionSample& sample = g_motion[ent.entityId];
-        if (sample.valid && snapshot->stampUs < sample.stampUs)
-            sample = MotionSample{};   // clock restarted (new session)
-        // Advance only when the target actually moved, or periodically for a
-        // standing one. Snapshots publish far faster than positions change, so
-        // pairing consecutive snapshots gave sub-4 ms intervals (leading
-        // silently dropped) and zero-velocity pairs.
-        if (!sample.valid ||
-            (snapshot->stampUs > sample.stampUs &&
-             (MovedEnough(ent.position, sample.position, AdaptiveTuning::kMinMoveMeters) ||
-              snapshot->stampUs - sample.stampUs >= AdaptiveTuning::kHoldSampleUs))) {
-            sample.prevPosition = sample.position;
-            sample.prevStampUs = sample.stampUs;
-            sample.prevValid = sample.valid;
-            sample.position = ent.position;
-            sample.stampUs = snapshot->stampUs;
-            sample.valid = true;
-        }
-
-        if (cfg.Prediction && cfg.PredictionMode == 1) {
+        if (cfg.Prediction) {
             Vector3 adaptivePoint{};
             int adaptiveLeadMs = 0;
             if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, snapshot->stampUs, nowMs,
                     responseMs, observationAgeMs, adaptivePoint, adaptiveLeadMs, predictionSource, ent.inVehicle)) {
                 point = adaptivePoint;
                 leadMs = adaptiveLeadMs;
-            }
-        } else if (cfg.Prediction && sample.prevValid && sample.stampUs > sample.prevStampUs) {
-            const std::uint64_t sampleMs = (sample.stampUs - sample.prevStampUs + 500) / 1000;
-            if (sampleMs >= 4 && sampleMs <= 100) {
-                Vector3 lead;
-                if (ApplyLeading(point, sample.position, sample.prevPosition,
-                        sampleMs, responseMs, cfg.PredictionStrength,
-                        cfg.PredictionYScale, lead, leadMs, ent.inVehicle)) {
-                    point = lead;
-                }
             }
         }
 

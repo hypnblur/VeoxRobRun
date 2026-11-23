@@ -287,8 +287,8 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Write Camera Angles", 0, 0 }, { "Cursor Fallback", 0, 0 }, { "Response", 0, 0 },
 	{ "Aim FOV", 0, 0 }, { "Smoothing Curve", 0, 0 }, { "Smoothness", 0, 0 },
 	{ "Bezier Arc", 0, 0 }, { "Curve Speed", 0, 0 }, { "Hardware Gain", 0, 0 },
-	{ "Max Distance (Aim)", 0, 0, "Max Distance" }, { "Target Prediction", 0, 0 }, { "Lead Strength", 0, 0 },
-	{ "Vertical Lead", 0, 0 }, { "Hard Lock", 0, 0 }, { "Switch Delay", 0, 0 },
+	{ "Max Distance (Aim)", 0, 0, "Max Distance" }, { "Predict Targets", 0, 0 },
+	{ "Hard Lock", 0, 0 }, { "Switch Delay", 0, 0 },
 	// Aim -> Targets & Recoil
 	{ "Visible Bones Only", 0, 1 }, { "Ignore Teammates", 0, 1 }, { "Skip Knocked Players", 0, 1 },
 	{ "Skip Police targets", 0, 1 }, { "Skip Criminal targets", 0, 1 }, { "Skip Civilian targets", 0, 1 },
@@ -352,7 +352,7 @@ constexpr SearchEntry kSearchIndex[] = {
 	// Misc -> Gameplay & Tools
 	{ "Camera Zoom", 4, 0 }, { "Camera Distance", 4, 0 }, { "FOV Changer", 4, 0 },
 	{ "Camera FOV", 4, 0 }, { "Instant Loot", 4, 0 }, { "Instant Safe & Door Unlock", 4, 0 },
-	{ "Mem Write Master Switch", 4, 0 }, { "Ignore Knock (Local)", 4, 0 }, { "Hide Default Crosshair", 4, 0 },
+	{ "Mem Write Master Switch", 4, 0 }, { "Hide Default Crosshair", 4, 0 },
 	{ "Battle Mode", 4, 0 }, { "Battle Mode Key", 4, 0 }, { "Battle Mode Action", 4, 0 },
 	{ "Read Item Catalog", 4, 0 }, { "Dump Item Prices", 4, 0 }, { "Probe Money Models", 4, 0 },
 	// Misc -> Skins
@@ -1636,7 +1636,6 @@ void DrawAimGeneral()
 	static const char* kBones[] = { "Head", "Neck", "Chest", "Pelvis", "Closest", "Head & Body" };
 	static const char* priorities[] = { "Crosshair FOV", "3D Distance", "Lowest Health" };
 	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier" };
-	static const char* kPredModes[] = { "Legacy", "Adaptive" };
 
 	ImGui::BeginGroup();
 	{
@@ -1686,16 +1685,7 @@ void DrawAimGeneral()
 		SliderIntRow("Max Distance##aim", &ConfigInstance.Aim.MaxDistance, 10, 1000, " m");
 
 		SectionLabel("Prediction & Lock");
-		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
-		if (ConfigInstance.Aim.Prediction)
-		{
-			ComboRow("Prediction Mode", &ConfigInstance.Aim.PredictionMode, kPredModes, IM_ARRAYSIZE(kPredModes));
-			if (ConfigInstance.Aim.PredictionMode == 0)
-			{
-				SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
-				SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
-			}
-		}
+		ToggleRow("Predict Targets", &ConfigInstance.Aim.Prediction);
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
 		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, " ms");
 		EndCard();
@@ -2960,7 +2950,6 @@ void DrawMiscGameplay()
 			SliderFloatRow("Camera FOV", &ConfigInstance.Overlay.CameraFov, 30.0f, 140.0f, " deg");
 		ToggleRow("Instant Loot", &ConfigInstance.World.InstantLoot, true);
 		ToggleRow("Instant Safe & Door Unlock", &ConfigInstance.World.InstantUnlock, true);
-		ToggleRow("Ignore Knock (Local)", &ConfigInstance.Aim.IgnoreKnock, true);
 		ToggleRow("Hide Default Crosshair", &ConfigInstance.Aim.HideCrosshair, true);
 		EndCard();
 

@@ -141,10 +141,7 @@ public:
 	int ResponseMs = 0;
 
 	// --- Target leading / sticky lock ----------------------------------
-	bool Prediction = false;
-	int PredictionMode = 1;       // 0 = Legacy, 1 = Adaptive
-	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
-	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
+	bool Prediction = false;      // Adaptive target prediction
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
 
@@ -165,7 +162,6 @@ public:
 	bool ExpIgnoreCivilian = false;
 	bool ExpIgnoreTeammates = true;
 	bool SkipKnocked = true;
-	bool IgnoreKnock = false;
 	bool HideCrosshair = false;
 
 	// Manually trusted players (by publicId / account id). Aimbot skips these
@@ -261,9 +257,6 @@ public:
 		j[ConfigName][LIT("CursorFallback")] = CursorFallback;
 		j[ConfigName][LIT("ResponseMs")] = ResponseMs;
 		j[ConfigName][LIT("Prediction")] = Prediction;
-		j[ConfigName][LIT("PredictionMode")] = PredictionMode;
-		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
-		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("TargetSwitchDelay")] = TargetSwitchDelay;
 		j[ConfigName][LIT("DeadzonePx")] = DeadzonePx;
@@ -278,7 +271,6 @@ public:
 		j[ConfigName][LIT("ExpIgnoreCivilian")] = ExpIgnoreCivilian;
 		j[ConfigName][LIT("ExpIgnoreTeammates")] = ExpIgnoreTeammates;
 		j[ConfigName][LIT("SkipKnocked")] = SkipKnocked;
-		j[ConfigName][LIT("IgnoreKnock")] = IgnoreKnock;
 		j[ConfigName][LIT("HideCrosshair")] = HideCrosshair;
 		{
 			std::lock_guard<std::mutex> lock(TrustedMutex());
@@ -347,9 +339,6 @@ public:
 		CursorFallback = j[ConfigName].value(LIT("CursorFallback"), CursorFallback);
 		ResponseMs = j[ConfigName].value(LIT("ResponseMs"), ResponseMs);
 		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
-		PredictionMode = j[ConfigName].value(LIT("PredictionMode"), PredictionMode);
-		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
-		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
 		DeadzonePx = j[ConfigName].value(LIT("DeadzonePx"), DeadzonePx);
@@ -364,7 +353,6 @@ public:
 		ExpIgnoreCivilian = j[ConfigName].value(LIT("ExpIgnoreCivilian"), ExpIgnoreCivilian);
 		ExpIgnoreTeammates = j[ConfigName].value(LIT("ExpIgnoreTeammates"), ExpIgnoreTeammates);
 		SkipKnocked = j[ConfigName].value(LIT("SkipKnocked"), SkipKnocked);
-		IgnoreKnock = j[ConfigName].value(LIT("IgnoreKnock"), IgnoreKnock);
 		HideCrosshair = j[ConfigName].value(LIT("HideCrosshair"), HideCrosshair);
 		if (j[ConfigName].contains(LIT("TrustedPlayers")) &&
 			j[ConfigName][LIT("TrustedPlayers")].is_array()) {
