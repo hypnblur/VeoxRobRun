@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "AimController.h"
+#include "MotionFit.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
 #include "FovChanger.h"
@@ -20,9 +21,9 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <random>
 #include <unordered_map>
+#include <deque>
 
 namespace Aim {
 
@@ -124,10 +125,21 @@ const char* const kWeaponClassNames[] = {
 constexpr int kWeaponClassCount = static_cast<int>(sizeof(kWeaponClassNames) / sizeof(kWeaponClassNames[0]));
 static_assert(kWeaponClassCount == AimConfig::kWeaponProfileCount, "weapon profile count mismatch");
 
-// The camera block is written as one scatter transaction. Ten milliseconds is
-// slow enough to keep the read worker fed and still fast enough that the
-// exponential response (20-90 ms) does not look steppy.
-constexpr std::uint64_t kWriteIntervalMs = 16;
+// The camera block is written as one scatter transaction (validation read +
+// write). 8 ms (~125 Hz max) keeps the exponential response (20-90 ms) smooth
+// without flooding the DMA bus. All write timing uses steady_clock in
+// microseconds: GetTickCount64 only advances in ~15.6 ms steps, which made a
+// 16 ms gate fire every second step (~32 Hz) and fed dt-based smoothing with
+// wrong time deltas.
+constexpr std::uint64_t kWriteIntervalUs = 8000;
+constexpr std::chrono::milliseconds kTickInterval{ 4 };
+
+inline std::uint64_t SteadyUs()
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 std::uint64_t g_observation = 0;
 int g_lastTarget = -1;
@@ -149,10 +161,69 @@ float g_bezierT = 0.f;
 float g_bezierBendSign = 1.f;
 Base::AimMotion::CurveState g_cursorCurve{};
 std::uint64_t g_lastWriteTick = 0;
+std::uint64_t g_targetLockUs = 0;
 Vector3 g_writtenForward{};
 bool g_haveWrittenForward = false;
 bool g_writeHealthy = false;
 const char* g_lastVerdict = "-";
+
+struct HumanizeState {
+    int entityId = -1;
+    int chosenBone = 2; // 0=Head, 1=Neck, 2=Chest
+    std::uint64_t nextBoneRollUs = 0;
+    Vector3 curOffset{};
+    Vector3 targetOffset{};
+    std::uint64_t nextOffsetRollUs = 0;
+    std::uint64_t lastStepUs = 0;
+    std::uint32_t rng = 0x9E3779B9u;
+
+    float NextUnit() {
+        // xorshift32 -> [-1, 1]
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        return (static_cast<float>(rng & 0xFFFFu) / 32767.5f) - 1.0f;
+    }
+
+    int PickHeadOrBodyBone(int entId, std::uint64_t nowUs) {
+        if (entityId != entId || nowUs >= nextBoneRollUs) {
+            entityId = entId;
+            // Weighted: ~45% Chest, ~25% Neck, ~30% Head
+            const float u = (NextUnit() + 1.0f) * 0.5f;
+            chosenBone = (u < 0.45f) ? 2 : (u < 0.70f ? 1 : 0);
+            const float holdSec = 1.6f + ((NextUnit() + 1.0f) * 0.5f) * 1.0f; // 1.6..2.6 s
+            nextBoneRollUs = nowUs + static_cast<std::uint64_t>(holdSec * 1.0e6f);
+        }
+        return chosenBone;
+    }
+
+    Vector3 SampleOffset(int entId, std::uint64_t nowUs, float maxCm) {
+        if (maxCm <= 0.05f) {
+            curOffset = Vector3{};
+            return curOffset;
+        }
+        const float maxM = std::clamp(maxCm, 0.f, 15.f) * 0.01f;
+        if (entityId != entId || nowUs >= nextOffsetRollUs) {
+            entityId = entId;
+            targetOffset = Vector3(
+                NextUnit() * maxM,
+                NextUnit() * maxM * 0.85f,
+                NextUnit() * maxM);
+            const float holdSec = 0.9f + ((NextUnit() + 1.0f) * 0.5f) * 0.8f; // 0.9..1.7 s
+            nextOffsetRollUs = nowUs + static_cast<std::uint64_t>(holdSec * 1.0e6f);
+        }
+        const float dt = (lastStepUs != 0 && nowUs > lastStepUs)
+            ? std::clamp(static_cast<float>(nowUs - lastStepUs) * 1.0e-6f, 0.001f, 0.05f)
+            : 0.008f;
+        lastStepUs = nowUs;
+        const float a = 1.f - std::exp(-dt * 2.5f); // smooth ~0.4 s wander, zero jitter
+        curOffset.x += (targetOffset.x - curOffset.x) * a;
+        curOffset.y += (targetOffset.y - curOffset.y) * a;
+        curOffset.z += (targetOffset.z - curOffset.z) * a;
+        return curOffset;
+    }
+};
+HumanizeState g_humanize{};
 
 // Memory aim write gate. A level transition destroys the camera/input objects;
 // writes stay blocked for a second after the reader reports a new session so
@@ -162,12 +233,36 @@ std::uint64_t g_writeBlockedUntil = 0;
 
 // Previous feet position per entity, used for target leading. Kept on the
 // worker thread because the reader snapshot only carries one position.
+// History advances only when the reader publishes a new snapshot (stampUs),
+// never per Tick: positions only change at snapshot rate, so differencing
+// per Tick gave zero velocity on most ticks and a several-fold spike on the
+// one after a refresh.
 struct MotionSample {
-    Vector3 position{};
-    std::uint64_t tickMs = 0;
+    Vector3 position{};          // position at the newest snapshot
+    Vector3 prevPosition{};      // position at the snapshot before it
+    std::uint64_t stampUs = 0;
+    std::uint64_t prevStampUs = 0;
     bool valid = false;
+    bool prevValid = false;
 };
 std::unordered_map<int, MotionSample> g_motion;
+struct MotionHistoryEntry {
+    Vector3 position{};
+    std::uint64_t tickUs = 0;   // snapshot publish time, steady_clock microseconds
+    bool valid = false;
+};
+struct MotionHistory {
+    std::deque<MotionHistoryEntry> samples{};
+    std::uint64_t lastUpdateMs = 0;
+    std::uint64_t lastObservationUs = 0;
+    bool valid = false;
+    bool estimateValid = false;
+    bool quadraticValid = false;
+    bool smoothingInitialized = false;
+    Vector3 smoothedVelocity{};
+    Vector3 smoothedAcceleration{};
+};
+std::unordered_map<int, MotionHistory> g_motionHistory;
 
 struct AimQuat {
     float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
@@ -910,7 +1005,8 @@ const char* CompareToWritten(const Vector3& written, const Vector3& live)
 // separately because jump and crouch arcs do not extrapolate linearly.
 bool ApplyLeading(const Vector3& point, const Vector3& position,
     const Vector3& previous, std::uint64_t sampleMs, float responseMs,
-    int strengthPercent, int yScalePercent, Vector3& out, int& leadMs)
+    int strengthPercent, int yScalePercent, Vector3& out, int& leadMs,
+    bool inVehicle = false)
 {
     if (sampleMs == 0) return false;
     const float seconds = static_cast<float>(sampleMs) * 0.001f;
@@ -923,10 +1019,12 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
     if (speedXZ < 0.35f && speedY < 0.35f) return false;
 
     const float speed = std::sqrt(vx * vx + vy * vy + vz * vz);
-    if (!std::isfinite(speed) || speed > 12.f) return false;
+    const float maxSpeed = inVehicle ? 45.f : 12.f;
+    const float maxLeadDist = inVehicle ? 2.5f : 0.55f;
+    if (!std::isfinite(speed) || speed > maxSpeed) return false;
 
-    float lead = std::min(0.065f, responseMs * 0.001f);
-    lead = std::min(lead, 0.55f / speed);
+    float lead = std::min(inVehicle ? 0.085f : 0.065f, responseMs * 0.001f);
+    lead = std::min(lead, maxLeadDist / speed);
     const float strength = std::clamp(static_cast<float>(strengthPercent) / 100.f, 0.f, 2.f);
     lead *= strength;
     const float yScale = std::clamp(static_cast<float>(yScalePercent) / 100.f, 0.f, 1.f);
@@ -940,6 +1038,261 @@ bool ApplyLeading(const Vector3& point, const Vector3& position,
 }
 
 } // namespace
+
+
+namespace AdaptiveTuning {
+constexpr int   kMaxLeadMs       = 120;
+constexpr int   kMinHistory      = 3;
+constexpr int   kMaxHistory      = 12;
+constexpr float kVelSmoothing    = 0.4f;
+constexpr float kAccelSmoothing  = 0.3f;
+constexpr bool  kAllowFallback   = true;
+constexpr int   kFallbackStrengthPercent = 100;
+constexpr int   kFallbackYScalePercent = 100;
+constexpr int   kHistoryWindowMs = 260;
+constexpr int   kStaleMs         = 500;
+// Sanity limits (same scale as ApplyLeading's 12 m/s gate and 0.55 m lead cap).
+constexpr float kMaxSpeed        = 12.0f;  // m/s, faster fits are teleports/glitches
+constexpr float kMaxAccel        = 40.0f;  // m/s^2, beyond this use the straight-line fit
+constexpr float kMaxLeadDistance = 0.55f;  // m, total predicted displacement
+constexpr float kMaxJumpMeters   = 3.0f;   // a bigger step resets the history
+// A sample is recorded when the target actually moved; a standing target is
+// refreshed at this interval so a stop is still seen.
+constexpr float kMinMoveMeters   = 0.001f;
+constexpr std::uint64_t kHoldSampleUs = 90000;
+} // namespace AdaptiveTuning
+
+static bool MovedEnough(const Vector3& a, const Vector3& b, float minMeters)
+{
+    const float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+    return dx * dx + dy * dy + dz * dz > minMeters * minMeters;
+}
+
+static int PushMotionSample(int entityId, const Vector3& position,
+    std::uint64_t observationUs, std::uint64_t nowMs, bool& changed,
+    bool inVehicle = false)
+{
+    MotionHistory& hist = g_motionHistory[entityId];
+    changed = false;
+    if (observationUs == 0 || observationUs == hist.lastObservationUs)
+        return static_cast<int>(hist.samples.size());
+
+    // Clock went backwards (new session) or the target teleported: the old
+    // samples describe a different trajectory.
+    if (hist.lastObservationUs != 0 && observationUs < hist.lastObservationUs)
+        hist = MotionHistory{};
+    const float maxJump = inVehicle ? 6.0f : AdaptiveTuning::kMaxJumpMeters;
+    if (!hist.samples.empty() &&
+        MovedEnough(position, hist.samples.back().position, maxJump))
+        hist = MotionHistory{};
+
+    hist.lastObservationUs = observationUs;
+    hist.lastUpdateMs = nowMs;
+
+    // The reader publishes much faster than entity positions change, so most
+    // snapshots repeat the previous position. Recording those makes the data a
+    // staircase that the fit reads as acceleration. Only record real moves,
+    // plus a periodic hold sample so a target that stopped is noticed.
+    if (!hist.samples.empty()) {
+        const MotionHistoryEntry& back = hist.samples.back();
+        if (observationUs <= back.tickUs) {
+            hist = MotionHistory{};
+            hist.lastObservationUs = observationUs;
+            hist.lastUpdateMs = nowMs;
+        } else {
+            const bool moved = MovedEnough(position, back.position, AdaptiveTuning::kMinMoveMeters);
+            const bool holdDue = observationUs - back.tickUs >= AdaptiveTuning::kHoldSampleUs;
+            if (!moved && !holdDue)
+                return static_cast<int>(hist.samples.size());
+        }
+    }
+
+    hist.samples.push_back(MotionHistoryEntry{ position, observationUs, true });
+    hist.valid = true;
+    changed = true;
+
+    // Drop everything older than the window unconditionally: after an
+    // occlusion gap the old points belong to a different movement.
+    const std::uint64_t windowUs = static_cast<std::uint64_t>(AdaptiveTuning::kHistoryWindowMs) * 1000u;
+    while (hist.samples.size() > 1 && observationUs - hist.samples.front().tickUs > windowUs)
+        hist.samples.pop_front();
+    while (static_cast<int>(hist.samples.size()) > AdaptiveTuning::kMaxHistory)
+        hist.samples.pop_front();
+
+    return static_cast<int>(hist.samples.size());
+}
+
+static bool EstimateMotion(const MotionHistory& hist,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ,
+    bool& quadratic, bool inVehicle = false)
+{
+    AimMotionFit::Derivatives fit{};
+    if (!AimMotionFit::FitAdaptive(hist.samples, fit, quadratic)) return false;
+
+    const float maxSpeed = inVehicle ? 45.0f : AdaptiveTuning::kMaxSpeed;
+    const float maxAccel = inVehicle ? 60.0f : AdaptiveTuning::kMaxAccel;
+
+    // An implausible curvature is almost always sample noise: fall back to the
+    // straight-line fit instead of extrapolating it.
+    if (quadratic && std::hypot(fit.ax, fit.ay, fit.az) > maxAccel) {
+        double intercept[3]{};
+        AimMotionFit::Derivatives lin{};
+        if (!AimMotionFit::FitLinearLatest(hist.samples, lin, intercept)) return false;
+        fit = lin;
+        quadratic = false;
+    }
+
+    const double speed = std::hypot(fit.vx, fit.vy, fit.vz);
+    const double accel = std::hypot(fit.ax, fit.ay, fit.az);
+    if (!std::isfinite(speed) || !std::isfinite(accel))
+        return false;
+    // Reject outliers (teleports, respawns) rather than extrapolating them.
+    if (speed > maxSpeed || accel > maxAccel)
+        return false;
+
+    velX = static_cast<float>(fit.vx);
+    velY = static_cast<float>(fit.vy);
+    velZ = static_cast<float>(fit.vz);
+    accX = static_cast<float>(fit.ax);
+    accY = static_cast<float>(fit.ay);
+    accZ = static_cast<float>(fit.az);
+    return std::isfinite(velX) && std::isfinite(velY) && std::isfinite(velZ) &&
+        std::isfinite(accX) && std::isfinite(accY) && std::isfinite(accZ);
+}
+
+static void SmoothMotionEstimate(MotionHistory& hist,
+    float& velX, float& velY, float& velZ,
+    float& accX, float& accY, float& accZ)
+{
+    // Fixed alphas: boosting them on high acceleration made a single bad
+    // sample pass almost unfiltered.
+    const float velAlpha = AdaptiveTuning::kVelSmoothing;
+    const float accAlpha = AdaptiveTuning::kAccelSmoothing;
+
+    if (!hist.smoothingInitialized) {
+        hist.smoothedVelocity = Vector3(velX, velY, velZ);
+        hist.smoothedAcceleration = Vector3(accX, accY, accZ);
+        hist.smoothingInitialized = true;
+        return;
+    }
+
+    velX = hist.smoothedVelocity.x = velAlpha * velX + (1.0f - velAlpha) * hist.smoothedVelocity.x;
+    velY = hist.smoothedVelocity.y = velAlpha * velY + (1.0f - velAlpha) * hist.smoothedVelocity.y;
+    velZ = hist.smoothedVelocity.z = velAlpha * velZ + (1.0f - velAlpha) * hist.smoothedVelocity.z;
+    accX = hist.smoothedAcceleration.x = accAlpha * accX + (1.0f - accAlpha) * hist.smoothedAcceleration.x;
+    accY = hist.smoothedAcceleration.y = accAlpha * accY + (1.0f - accAlpha) * hist.smoothedAcceleration.y;
+    accZ = hist.smoothedAcceleration.z = accAlpha * accZ + (1.0f - accAlpha) * hist.smoothedAcceleration.z;
+}
+
+static float ComputeAdaptiveLeadMs(float observationAgeMs, int sampleCount, float responseMs)
+{
+    return static_cast<float>(AimMotionFit::LeadMilliseconds(
+        responseMs, observationAgeMs, sampleCount,
+        AdaptiveTuning::kMinHistory, AdaptiveTuning::kMaxLeadMs));
+}
+
+static bool ApplyAdaptivePrediction(const Vector3& point, int entityId,
+    const Vector3& position, std::uint64_t observationUs, std::uint64_t nowMs,
+    float responseMs, float observationAgeMs, Vector3& out, int& leadMs, const char*& mode,
+    bool inVehicle = false)
+{
+    bool newObservation = false;
+    const int sampleCount = PushMotionSample(
+        entityId, position, observationUs, nowMs, newObservation, inVehicle);
+    mode = sampleCount < AdaptiveTuning::kMinHistory ? "warming up" : "fit rejected";
+
+    float velX = 0.f, velY = 0.f, velZ = 0.f;
+    float accX = 0.f, accY = 0.f, accZ = 0.f;
+
+    auto it = g_motionHistory.find(entityId);
+    const bool haveHist = it != g_motionHistory.end() && it->second.valid;
+
+    bool accelReliable = false;
+    if (haveHist) {
+        MotionHistory& hist = it->second;
+        if (newObservation) {
+            hist.estimateValid = EstimateMotion(
+                hist, velX, velY, velZ, accX, accY, accZ, hist.quadraticValid, inVehicle);
+            if (hist.estimateValid) {
+                SmoothMotionEstimate(hist, velX, velY, velZ, accX, accY, accZ);
+                if (!hist.quadraticValid) {
+                    hist.smoothedAcceleration = Vector3{};
+                }
+            } else {
+                hist.smoothingInitialized = false;
+            }
+        }
+        accelReliable = hist.estimateValid && hist.smoothingInitialized;
+        if (accelReliable) {
+            velX = hist.smoothedVelocity.x;
+            velY = hist.smoothedVelocity.y;
+            velZ = hist.smoothedVelocity.z;
+            accX = hist.smoothedAcceleration.x;
+            accY = hist.smoothedAcceleration.y;
+            accZ = hist.smoothedAcceleration.z;
+        }
+    }
+
+    const float maxLeadDist = inVehicle ? 2.5f : AdaptiveTuning::kMaxLeadDistance;
+    float leadMsF = 0.f;
+    if (accelReliable) {
+        leadMsF = ComputeAdaptiveLeadMs(observationAgeMs, sampleCount, responseMs);
+        mode = it->second.quadraticValid ? "adaptive quadratic" : "adaptive linear";
+        const float t = leadMsF * 0.001f;
+        const float halfA = 0.5f;
+        float ox = velX * t + halfA * accX * t * t;
+        float oy = velY * t + halfA * accY * t * t;
+        float oz = velZ * t + halfA * accZ * t * t;
+        const float offsetLen = std::sqrt(ox * ox + oy * oy + oz * oz);
+        if (offsetLen > maxLeadDist) {
+            const float k = maxLeadDist / offsetLen;
+            ox *= k; oy *= k; oz *= k;
+        }
+        out = Vector3(point.x + ox, point.y + oy, point.z + oz);
+    } else if (AdaptiveTuning::kAllowFallback) {
+        if (haveHist && it->second.samples.size() >= 2) {
+            const auto& samples = it->second.samples;
+            const auto& newest = samples.back();
+            const auto& prev = samples[samples.size() - 2];
+            const std::uint64_t sampleMs = (newest.tickUs - prev.tickUs + 500) / 1000;
+            if (sampleMs >= 4 && sampleMs <= 100) {
+                Vector3 lead{};
+                int legacyLeadMs = 0;
+                if (ApplyLeading(point, newest.position, prev.position,
+                        sampleMs, responseMs,
+                        AdaptiveTuning::kFallbackStrengthPercent,
+                        AdaptiveTuning::kFallbackYScalePercent, lead, legacyLeadMs, inVehicle)) {
+                    out = lead;
+                    leadMsF = static_cast<float>(legacyLeadMs);
+                    mode = "linear fallback";
+                }
+            }
+        }
+    }
+
+    if (leadMsF <= 0.f) return false;
+    leadMs = static_cast<int>(leadMsF);
+    return true;
+}
+
+static void PruneMotionHistory(std::uint64_t nowMs)
+{
+    const std::uint64_t staleMs = static_cast<std::uint64_t>(AdaptiveTuning::kStaleMs);
+    for (auto it = g_motionHistory.begin(); it != g_motionHistory.end(); ) {
+        if (nowMs - it->second.lastUpdateMs > staleMs) {
+            it = g_motionHistory.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void ResetMotionHistory()
+{
+    g_motionHistory.clear();
+}
+
 
 const char* const* KeyNames() { return kKeyNames; }
 int KeyCount() { return kKeyCount; }
@@ -1320,6 +1673,8 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    g_motion.clear();
+    ResetMotionHistory();
     ReleaseFireButton();
     g_triggerPhase = TriggerPhase::Idle;
     g_triggerDebugActive.store(false, std::memory_order_relaxed);
@@ -1336,6 +1691,10 @@ void StartAimWorker()
     g_aimWorkerStop.store(false, std::memory_order_relaxed);
     g_aimWorkerThread = std::thread([] {
         using clock = std::chrono::steady_clock;
+        // High-resolution waitable timer: sleep_for(2 ms) rounds up to the
+        // 15.6 ms system tick unless something else raised the timer period.
+        HANDLE paceTimer = CreateWaitableTimerExW(
+            nullptr, nullptr, 0x00000002 /*CREATE_WAITABLE_TIMER_HIGH_RESOLUTION*/, TIMER_ALL_ACCESS);
         auto lastTick = clock::now() - std::chrono::seconds(1);
         auto lastInstantLoot = clock::now() - std::chrono::seconds(1);
         auto lastLoot = clock::now() - std::chrono::seconds(1);
@@ -1347,7 +1706,7 @@ void StartAimWorker()
                 // on RobRunReader's dedicated high-priority camera thread.
                 Keyboard::PollKeysAsync();
                 TickTrigger();
-                if (now - lastTick >= std::chrono::milliseconds(6)) {
+                if (now - lastTick >= kTickInterval) {
                     lastTick = now;
                     Tick();
                     TickRecoilSpread();
@@ -1363,8 +1722,19 @@ void StartAimWorker()
                     FovChanger::Tick();
                 }
             } catch (...) {}
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            bool waited = false;
+            if (paceTimer) {
+                LARGE_INTEGER due{};
+                due.QuadPart = -1000LL * 10; // 1 ms, relative, 100 ns units
+                if (SetWaitableTimer(paceTimer, &due, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(paceTimer, 20);
+                    waited = true;
+                }
+            }
+            if (!waited)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        if (paceTimer) CloseHandle(paceTimer);
     });
 }
 
@@ -1765,6 +2135,8 @@ void Tick()
     dbg.triggerEnabled = eff.triggerEnabled;
     dbg.triggerActive = g_triggerDebugActive.load(std::memory_order_relaxed);
     dbg.triggerState = g_triggerDebugState.load(std::memory_order_relaxed);
+    dbg.predictionSource = !cfg.Prediction ? "off" :
+        (cfg.PredictionMode == 1 ? "waiting for target" : "legacy");
 
     const auto stopAiming = [] {
         if (g_wasAiming) {
@@ -1841,6 +2213,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         return;
     }
 
@@ -1860,6 +2233,7 @@ void Tick()
         resetSmoothing();
         g_lastTarget = -1;
         g_motion.clear();
+        ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
 
@@ -1910,10 +2284,12 @@ void Tick()
     Vector2 bestScreen{};
     float bestScore = 0.f;
     int bestLeadMs = 0;
+    const char* bestPredictionSource = "off";
     bool lastValid = false;
     Vector3 lastPoint{};
     Vector2 lastScreen{};
     int lastLeadMs = 0;
+    const char* lastPredictionSource = "off";
     // If the local transform could not be resolved the origin would reject
     // every target on distance, so only apply the range filter when we have a
     // real local position.
@@ -1922,11 +2298,18 @@ void Tick()
     const float responseMs = cfg.ResponseMs > 0
         ? std::clamp(static_cast<float>(cfg.ResponseMs), 1.f, 250.f)
         : ResponseForSmoothness(eff.smoothness);
+    const auto steadyNowUs = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    const float observationAgeMs = snapshot->stampUs != 0 && steadyNowUs >= snapshot->stampUs
+        ? std::clamp(static_cast<float>(steadyNowUs - snapshot->stampUs) * 0.001f, 0.f, 80.f)
+        : 0.f;
     const bool bvhLoaded = RobRunReader::GetBvhStatus().loaded;
 
     // Bounded sample table: entity ids churn across matches, so drop stale
     // history rather than letting the map grow for the whole session.
     if (g_motion.size() > 512) g_motion.clear();
+    PruneMotionHistory(nowMs);
 
     RejectedDebug closestRejected{};
     auto noteRejected = [&](const RobRunReader::EntityData& e, const char* why) {
@@ -1960,6 +2343,10 @@ void Tick()
             Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) { noteRejected(ent, "max-dist"); continue; }
 
         int activeBone = eff.targetBone;
+        if (activeBone == 5) {
+            // Head & Body (natural random variation per engagement)
+            activeBone = g_humanize.PickHeadOrBodyBone(ent.entityId, SteadyUs());
+        }
         Vector3 point{};
         if (activeBone == 4) {
             // Closest bone to crosshair among Head, Neck, Chest, Pelvis
@@ -2012,25 +2399,56 @@ void Tick()
                 }
             }
         }
+        if (cfg.HumanizeOffsetCm > 0.05f) {
+            const Vector3 hOff = g_humanize.SampleOffset(ent.entityId, SteadyUs(), cfg.HumanizeOffsetCm);
+            point.x += hOff.x;
+            point.y += hOff.y;
+            point.z += hOff.z;
+        }
         int leadMs = 0;
+        const char* predictionSource = cfg.Prediction ? "legacy" : "off";
 
-        // Leading uses the previous feet sample. Update the sample after the
-        // prediction step so the next tick differentiates against this one.
+        // Leading uses the previous two published snapshots, never raw tick
+        // deltas: positions only change at snapshot rate, so differencing per
+        // Tick produced zero velocity on most ticks and a spike on the next.
         MotionSample& sample = g_motion[ent.entityId];
-        if (cfg.Prediction && sample.valid && sample.tickMs != 0) {
-            const std::uint64_t sampleMs = nowMs - sample.tickMs;
+        if (sample.valid && snapshot->stampUs < sample.stampUs)
+            sample = MotionSample{};   // clock restarted (new session)
+        // Advance only when the target actually moved, or periodically for a
+        // standing one. Snapshots publish far faster than positions change, so
+        // pairing consecutive snapshots gave sub-4 ms intervals (leading
+        // silently dropped) and zero-velocity pairs.
+        if (!sample.valid ||
+            (snapshot->stampUs > sample.stampUs &&
+             (MovedEnough(ent.position, sample.position, AdaptiveTuning::kMinMoveMeters) ||
+              snapshot->stampUs - sample.stampUs >= AdaptiveTuning::kHoldSampleUs))) {
+            sample.prevPosition = sample.position;
+            sample.prevStampUs = sample.stampUs;
+            sample.prevValid = sample.valid;
+            sample.position = ent.position;
+            sample.stampUs = snapshot->stampUs;
+            sample.valid = true;
+        }
+
+        if (cfg.Prediction && cfg.PredictionMode == 1) {
+            Vector3 adaptivePoint{};
+            int adaptiveLeadMs = 0;
+            if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, snapshot->stampUs, nowMs,
+                    responseMs, observationAgeMs, adaptivePoint, adaptiveLeadMs, predictionSource, ent.inVehicle)) {
+                point = adaptivePoint;
+                leadMs = adaptiveLeadMs;
+            }
+        } else if (cfg.Prediction && sample.prevValid && sample.stampUs > sample.prevStampUs) {
+            const std::uint64_t sampleMs = (sample.stampUs - sample.prevStampUs + 500) / 1000;
             if (sampleMs >= 4 && sampleMs <= 100) {
                 Vector3 lead;
-                if (ApplyLeading(point, ent.position, sample.position,
+                if (ApplyLeading(point, sample.position, sample.prevPosition,
                         sampleMs, responseMs, cfg.PredictionStrength,
-                        cfg.PredictionYScale, lead, leadMs)) {
+                        cfg.PredictionYScale, lead, leadMs, ent.inVehicle)) {
                     point = lead;
                 }
             }
         }
-        sample.position = ent.position;
-        sample.tickMs = nowMs;
-        sample.valid = true;
 
         Vector2 screen{};
         if (!RobRunReader::ProjectWorld(viewProjection, point, width, height, screen))
@@ -2041,6 +2459,7 @@ void Tick()
             lastScreen = screen;
             lastPoint = point;
             lastLeadMs = leadMs;
+            lastPredictionSource = predictionSource;
         }
 
         const float dx = screen.x - centerX;
@@ -2059,6 +2478,7 @@ void Tick()
             bestScreen = screen;
             bestPoint = point;
             bestLeadMs = leadMs;
+            bestPredictionSource = predictionSource;
             break;
         }
 
@@ -2079,6 +2499,7 @@ void Tick()
             bestPoint = point;
             bestScore = score;
             bestLeadMs = leadMs;
+            bestPredictionSource = predictionSource;
         }
     }
 
@@ -2113,12 +2534,14 @@ void Tick()
         bestScreen = lastScreen;
         bestPoint = lastPoint;
         bestLeadMs = lastLeadMs;
+        bestPredictionSource = lastPredictionSource;
     }
     if (bestId != g_lastTarget)
         g_lastTargetSwitchMs = nowMs;
     g_lastTarget = bestId;
     dbg.target = bestId;
     dbg.leadMs = bestLeadMs;
+    dbg.predictionSource = bestPredictionSource;
 
     const float dx = bestScreen.x - centerX;
     const float dy = bestScreen.y - centerY;
@@ -2179,36 +2602,55 @@ void Tick()
         } else if (now < g_writeBlockedUntil || !sessionSettled) {
             g_writeHealthy = false;
             g_lastVerdict = "level transition";
-        } else if (g_lastWriteTick == 0 || now - g_lastWriteTick >= kWriteIntervalMs) {
+        } else if (const std::uint64_t nowUs = SteadyUs();
+                   g_lastWriteTick == 0 || nowUs - g_lastWriteTick >= kWriteIntervalUs) {
+            // g_lastWriteTick is steady_clock microseconds. dt is the real
+            // elapsed time (a long stall still gets a bounded catch-up step).
             const float dtMs = g_lastWriteTick == 0
-                ? 16.f
-                : std::clamp(static_cast<float>(now - g_lastWriteTick), 0.5f, 24.f);
-            g_lastWriteTick = now;
+                ? 8.f
+                : std::clamp(static_cast<float>(nowUs - g_lastWriteTick) * 0.001f, 0.5f, 25.f);
+            g_lastWriteTick = nowUs;
 
-            const float gain = 1.f - std::exp(-dtMs / responseMs);
-            const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
-
-            if (!g_smoothInit || g_smoothTarget != bestId) {
-                const bool instantSnap = (eff.smoothness <= 1 && cfg.ResponseMs == 0);
-                if (instantSnap) {
-                    g_curYaw = targetYaw;
-                    g_curPitch = targetPitch;
-                } else {
-                    const Vector3 startFwd = haveFreshCamera
-                        ? freshCamera.forward
-                        : (snapshot->camera.valid ? snapshot->camera.forward : EulerToForward(targetYaw, targetPitch));
-                    const float startHoriz = std::hypot(startFwd.x, startFwd.z);
-                    g_curYaw = std::atan2(startFwd.x, startFwd.z);
-                    g_curPitch = std::atan2(-startFwd.y, startHoriz);
-                }
+            const float screenErrPx = std::hypot(dx, dy);
+            const bool targetChanged = (!g_smoothInit || g_smoothTarget != bestId);
+            if (targetChanged) {
                 g_carryYaw = g_carryPitch = 0.f;
                 g_bezierT = 0.f;
                 g_bezierBendSign = ((static_cast<unsigned>(bestId) ^ (static_cast<unsigned>(bestId) >> 2)) & 1u) ? 1.f : -1.f;
                 g_smoothInit = true;
                 g_smoothTarget = bestId;
+                g_targetLockUs = nowUs;
             }
 
-            {
+            // Deadzone: once the crosshair is already within DeadzonePx of the
+            // target point, stop writing micro-corrections so manual aim feels
+            // completely natural with zero micro-stutter.
+            if (cfg.DeadzonePx > 0.1f && screenErrPx <= cfg.DeadzonePx) {
+                g_carryYaw = g_carryPitch = 0.f;
+                dbg.reason = "in deadzone";
+                return;
+            }
+
+            const float gain = 1.f - std::exp(-dtMs / responseMs);
+            const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
+            const bool instantSnap = (eff.smoothness <= 1 && cfg.ResponseMs == 0);
+
+            // Mouse-cooperative live-camera tracking: always step FROM the
+            // game's current live camera orientation rather than an internal
+            // stale angle, so moving your own mouse never fights the aimbot.
+            if (instantSnap) {
+                g_curYaw = targetYaw;
+                g_curPitch = targetPitch;
+            } else {
+                const Vector3 liveFwd = haveFreshCamera
+                    ? freshCamera.forward
+                    : (snapshot->camera.valid ? snapshot->camera.forward : EulerToForward(g_curYaw, g_curPitch));
+                const float liveHoriz = std::hypot(liveFwd.x, liveFwd.z);
+                if (Finite(liveFwd) && liveHoriz > 1.0e-4f) {
+                    g_curYaw = std::atan2(liveFwd.x, liveFwd.z);
+                    g_curPitch = std::atan2(-liveFwd.y, liveHoriz);
+                }
+
                 float dYaw = targetYaw - g_curYaw;
                 while (dYaw > kPi) dYaw -= 2.f * kPi;
                 while (dYaw < -kPi) dYaw += 2.f * kPi;
@@ -2263,6 +2705,23 @@ void Tick()
                     // EMA (0): exponential convergence
                     stepYaw = dYaw * gain + g_carryYaw;
                     stepPitch = dPitch * verticalGain + g_carryPitch;
+                }
+
+                // Soft entry ramp (140 ms smoothstep on new target) + FOV edge falloff
+                // so targets entering the outer FOV ring don't yank suddenly.
+                if (cfg.SoftEntry) {
+                    const float lockMs = (nowUs >= g_targetLockUs)
+                        ? static_cast<float>(nowUs - g_targetLockUs) * 0.001f
+                        : 140.f;
+                    const float u = std::clamp(lockMs / 140.f, 0.f, 1.f);
+                    const float entryScale = 0.20f + 0.80f * (u * u * (3.f - 2.f * u));
+                    const float fovFrac = (radiusPixels > 1.f)
+                        ? std::clamp(screenErrPx / radiusPixels, 0.f, 1.f)
+                        : 0.f;
+                    const float edgeScale = 0.35f + 0.65f * std::pow(1.f - fovFrac, 1.5f);
+                    const float assistScale = entryScale * edgeScale;
+                    stepYaw *= assistScale;
+                    stepPitch *= assistScale;
                 }
 
                 g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
@@ -2529,19 +2988,15 @@ static void TickRecoil()
         g_rcClient + rr::CharacterClientModel::FireModel);
     if (fireModel <= 0x10000) return;
 
-    // Batch both uncached reads into one scatter transaction (1 FPGA round-trip)
+    // Uncached reads — do not use ReadBytes (cached, up to 600ms stale)
     struct { std::uint8_t isFiring; std::uint8_t hasShot; std::uint8_t pad[2]; std::int32_t shotIndex; } fire{};
-    float pitch = std::numeric_limits<float>::quiet_NaN();
-    {
-        Memory::ScopedScatter scatter(TargetProcess);
-        if (!scatter.handle) return;
-        TargetProcess.AddScatterReadRequest(scatter,
-            fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire));
-        TargetProcess.AddScatterReadRequest(scatter,
-            rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
-        if (!TargetProcess.ExecuteReadScatter(scatter))
-            return;
-    }
+    float pitch = 0.f;
+    if (!RobRunMemory::ReadBytesFresh(
+            fireModel + rr::CharacterFireModel::IsFiring, &fire, sizeof(fire)))
+        return;
+    if (!RobRunMemory::ReadBytesFresh(
+            rotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch)))
+        return;
 
     if (!std::isfinite(pitch) || std::fabs(pitch) > 1.75f) {
         g_rcPitchValid = false;
@@ -2625,11 +3080,6 @@ static void StartRecoilWorkerLocked()
     g_recoilStop.store(false, std::memory_order_relaxed);
     g_recoilThread = std::thread([] {
         while (!g_recoilStop.load(std::memory_order_relaxed)) {
-            if (!ConfigInstance.Overlay.MemWriteMaster || !ConfigInstance.Aim.NoRecoil) {
-                g_rcPitchValid = false;
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                continue;
-            }
             try { TickRecoil(); } catch (...) {}
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
@@ -2787,8 +3237,8 @@ void DrawDebug()
         d.menuOpen ? "open" : "closed", d.held ? "held" : "up", d.keySource);
     std::snprintf(lines[2], sizeof(lines[2]), "Entities: %d  Candidates: %d  Target: %d",
         d.entities, d.candidates, d.target);
-    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d  Lead: %dms",
-        d.dx, d.dy, d.stepX, d.stepY, d.leadMs);
+    std::snprintf(lines[3], sizeof(lines[3]), "Delta: %.1f, %.1f  Step: %d, %d  Lead: %dms  Pred: %s",
+        d.dx, d.dy, d.stepX, d.stepY, d.leadMs, d.predictionSource);
     std::snprintf(lines[4], sizeof(lines[4]), "Type: %s  Device: %s",
         d.aimType == 0 ? "memory" : "hardware", d.deviceReady ? "ready" : "not ready");
     std::snprintf(lines[5], sizeof(lines[5]), "Write: %s  %s  yaw %.1f pitch %.1f dist %.0fm",

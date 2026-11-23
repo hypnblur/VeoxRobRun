@@ -78,7 +78,7 @@ public:
 
 	bool Enabled = false;
 	int AimType = 0;        // 0 = Memory Aim, 1 = Hardware Aim
-	int TargetBone = 0;     // 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis, 4 = Closest
+	int TargetBone = 0;     // 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis, 4 = Closest, 5 = Head & Body (Random)
 	int TargetPriority = 0; // 0 = Crosshair FOV, 1 = 3D Distance, 2 = Lowest Health
 	bool DynamicBoneFallback = false; // drop to chest if head is occluded or low health
 	int Smoothness = 6;     // 1 (instant) .. 100 (very slow)
@@ -142,10 +142,16 @@ public:
 
 	// --- Target leading / sticky lock ----------------------------------
 	bool Prediction = false;
+	int PredictionMode = 1;       // 0 = Legacy, 1 = Adaptive
 	int PredictionStrength = 100; // percent, 0..200 => 0..2x lead
 	int PredictionYScale = 50;    // percent, 0..100 of the Y lead
 	bool HardLock = false;        // keep the current target outside the FOV
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
+
+	// --- Natural Aim Assist / Humanization -----------------------------
+	float DeadzonePx = 3.0f;       // 0..25 px: stop pulling once crosshair is already on target
+	float HumanizeOffsetCm = 3.0f; // 0..10 cm: slow wandering offset around the bone
+	bool SoftEntry = true;         // gentle ramp-in + FOV edge falloff on target entry
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
@@ -255,10 +261,14 @@ public:
 		j[ConfigName][LIT("CursorFallback")] = CursorFallback;
 		j[ConfigName][LIT("ResponseMs")] = ResponseMs;
 		j[ConfigName][LIT("Prediction")] = Prediction;
+		j[ConfigName][LIT("PredictionMode")] = PredictionMode;
 		j[ConfigName][LIT("PredictionStrength")] = PredictionStrength;
 		j[ConfigName][LIT("PredictionYScale")] = PredictionYScale;
 		j[ConfigName][LIT("HardLock")] = HardLock;
 		j[ConfigName][LIT("TargetSwitchDelay")] = TargetSwitchDelay;
+		j[ConfigName][LIT("DeadzonePx")] = DeadzonePx;
+		j[ConfigName][LIT("HumanizeOffsetCm")] = HumanizeOffsetCm;
+		j[ConfigName][LIT("SoftEntry")] = SoftEntry;
 		j[ConfigName][LIT("NoRecoil")] = NoRecoil;
 		j[ConfigName][LIT("NoSpread")] = NoSpread;
 		j[ConfigName][LIT("DynamicRecoilCompensation")] = DynamicRecoilCompensation;
@@ -337,10 +347,14 @@ public:
 		CursorFallback = j[ConfigName].value(LIT("CursorFallback"), CursorFallback);
 		ResponseMs = j[ConfigName].value(LIT("ResponseMs"), ResponseMs);
 		Prediction = j[ConfigName].value(LIT("Prediction"), Prediction);
+		PredictionMode = j[ConfigName].value(LIT("PredictionMode"), PredictionMode);
 		PredictionStrength = j[ConfigName].value(LIT("PredictionStrength"), PredictionStrength);
 		PredictionYScale = j[ConfigName].value(LIT("PredictionYScale"), PredictionYScale);
 		HardLock = j[ConfigName].value(LIT("HardLock"), HardLock);
 		TargetSwitchDelay = j[ConfigName].value(LIT("TargetSwitchDelay"), TargetSwitchDelay);
+		DeadzonePx = j[ConfigName].value(LIT("DeadzonePx"), DeadzonePx);
+		HumanizeOffsetCm = j[ConfigName].value(LIT("HumanizeOffsetCm"), HumanizeOffsetCm);
+		SoftEntry = j[ConfigName].value(LIT("SoftEntry"), SoftEntry);
 		NoRecoil = j[ConfigName].value(LIT("NoRecoil"), NoRecoil);
 		NoSpread = j[ConfigName].value(LIT("NoSpread"), NoSpread);
 		DynamicRecoilCompensation = j[ConfigName].value(LIT("DynamicRecoilCompensation"), DynamicRecoilCompensation);

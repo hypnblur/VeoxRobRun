@@ -1633,9 +1633,10 @@ static void RunDumpItemPrices()
 void DrawAimGeneral()
 {
 	static const char* aimTypes[] = { "Memory Aim", "Hardware Aim" };
-	static const char* kBones[] = { "Head", "Neck", "Chest", "Pelvis", "Closest" };
+	static const char* kBones[] = { "Head", "Neck", "Chest", "Pelvis", "Closest", "Head & Body" };
 	static const char* priorities[] = { "Crosshair FOV", "3D Distance", "Lowest Health" };
 	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier" };
+	static const char* kPredModes[] = { "Legacy", "Adaptive" };
 
 	ImGui::BeginGroup();
 	{
@@ -1645,7 +1646,7 @@ void DrawAimGeneral()
 			150.f, ConfigInstance.Aim.AimType == 0);
 		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, kBones, IM_ARRAYSIZE(kBones));
 		ComboRow("Target Priority", &ConfigInstance.Aim.TargetPriority, priorities, IM_ARRAYSIZE(priorities));
-		if (ConfigInstance.Aim.TargetBone != 4)
+		if (ConfigInstance.Aim.TargetBone != 4 && ConfigInstance.Aim.TargetBone != 5)
 			ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
 		ComboRow("Aim Key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(), Aim::KeyCount());
 		EndCard();
@@ -1679,14 +1680,21 @@ void DrawAimGeneral()
 			SliderFloatRow("Curve Speed", &ConfigInstance.Aim.BezierSpeed, 0.25f, 3.0f, "x");
 		if (ConfigInstance.Aim.AimType == 1)
 			SliderFloatRow("Hardware Gain", &ConfigInstance.Aim.HardwareGain, 0.25f, 5.0f, "x");
+		SliderFloatRow("Aim Deadzone", &ConfigInstance.Aim.DeadzonePx, 0.0f, 25.0f, " px");
+		SliderFloatRow("Random Offset", &ConfigInstance.Aim.HumanizeOffsetCm, 0.0f, 10.0f, " cm");
+		ToggleRow("Soft Entry & Falloff", &ConfigInstance.Aim.SoftEntry);
 		SliderIntRow("Max Distance##aim", &ConfigInstance.Aim.MaxDistance, 10, 1000, " m");
 
 		SectionLabel("Prediction & Lock");
 		ToggleRow("Target Prediction", &ConfigInstance.Aim.Prediction);
 		if (ConfigInstance.Aim.Prediction)
 		{
-			SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
-			SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
+			ComboRow("Prediction Mode", &ConfigInstance.Aim.PredictionMode, kPredModes, IM_ARRAYSIZE(kPredModes));
+			if (ConfigInstance.Aim.PredictionMode == 0)
+			{
+				SliderIntRow("Lead Strength", &ConfigInstance.Aim.PredictionStrength, 0, 200, "%");
+				SliderIntRow("Vertical Lead", &ConfigInstance.Aim.PredictionYScale, 0, 100, "%");
+			}
 		}
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
 		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, " ms");

@@ -504,6 +504,7 @@ static std::mutex g_snapshotMutex;
 static std::shared_ptr<const Snapshot> g_snapshot = std::make_shared<Snapshot>();
 static std::atomic<bool> g_workerStop{ false };
 static std::thread g_workerThread;
+static void WaitCameraInterval(HANDLE timer, std::int64_t micros); // defined with the camera worker
 static std::atomic<bool> g_worldWorkerStop{ false };
 static std::thread g_worldWorkerThread;
 
@@ -1082,6 +1083,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
     g_workerThread = std::thread([] {
         DLOG("Worker thread started");
         std::uint64_t perfWinStartUs = SteadyMicros();
+        HANDLE paceTimer = CreateWaitableTimerExW(
+            nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
         while (!g_workerStop.load(std::memory_order_relaxed)) {
             const std::uint64_t t0 = SteadyMicros();
             Update();
@@ -1138,11 +1141,13 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             if (g_fullMapFastMode.load(std::memory_order_relaxed)) {
                 SwitchToThread();
             } else {
-                const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
-                for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
-                    Sleep(1);
+                const bool active = cachedBattleModel > 0x10000 && !entities.empty();
+                // 2 ms waitable timer in live matches (no 15.6 ms Sleep quantization,
+                // while leaving DMA bus headroom for camera + aim), 10 ms in empty lobbies.
+                WaitCameraInterval(paceTimer, active ? 2000 : 10000);
             }
         }
+        if (paceTimer) CloseHandle(paceTimer);
     });
 
     DLOG("RobRunReader::Init: main worker launched");
@@ -4846,6 +4851,16 @@ static void UpdateInternal()
                     loggedPose = true;
                 }
 
+                // Reject single-frame torn DMA poses inside moving vehicles (head-to-pelvis
+                // stretches past 1.25 m when scatter reads split across two car frames).
+                if (sampled && entity.inVehicle && tmpPoints.hasPelvis && tmpPoints.hasHead) {
+                    const float hdx = tmpPoints.head.x - tmpPoints.pelvis.x;
+                    const float hdy = tmpPoints.head.y - tmpPoints.pelvis.y;
+                    const float hdz = tmpPoints.head.z - tmpPoints.pelvis.z;
+                    if (hdx * hdx + hdy * hdy + hdz * hdz > 1.25f * 1.25f)
+                        sampled = false;
+                }
+
                 if (!sampled) {
                     if (rig.poseFailures == 0)
                         rig.poseFailureSince = now;
@@ -5016,11 +5031,13 @@ static void UpdateInternal()
                     rig.prevLocal.swap(rig.curLocal);
                     rig.prevLocalValid = true;
 
-                    // Velocity-adaptive smoothing: smoothly scale alpha with movement distance
-                    // to prevent binary toggle chatter while snapping on high-speed displacement / vehicles.
+                    // Velocity-adaptive smoothing: smoothly scale alpha with movement distance.
+                    // In vehicles, allow responsive smoothing (alpha ~0.55-0.92) for small DMA jitter
+                    // instead of snapping raw frames, while still snapping on real jumps (>1.2 m).
                     const float moveDist = Distance(rig.lastSampledPos, entity.position);
                     rig.lastSampledPos = entity.position;
-                    const bool snapPose = entity.inVehicle || (moveDist > 0.40f);
+                    const bool snapPose = entity.inVehicle ? (moveDist > 1.20f) : (moveDist > 0.40f);
+                    const float maxDeltaSq = entity.inVehicle ? 2.25f : 0.25f;
 
                     // Exponential smoothing on the worker. PoseSmoothAlpha is
                     // the base weight of the new sample: 1 publishes the raw pose,
@@ -5030,15 +5047,17 @@ static void UpdateInternal()
                         rig.smoothedBones.size() == rig.bones.size() &&
                         (rig.worldMatrices.empty() || rig.smoothedWorldMatrices.size() == rig.worldMatrices.size())) {
                         const float baseAlpha = std::clamp(ConfigInstance.Player.PoseSmoothAlpha, 0.10f, 1.0f);
-                        const float alpha = std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
+                        const float alpha = entity.inVehicle
+                            ? std::clamp((std::max)(baseAlpha, 0.55f) + (moveDist / 0.80f) * 0.35f, 0.55f, 0.92f)
+                            : std::clamp(baseAlpha + (moveDist / 0.15f) * (1.0f - baseAlpha), 0.15f, 1.0f);
                         const float inv = 1.0f - alpha;
                         for (std::size_t i = 0; i < rig.bones.size(); ++i) {
                             auto& s = rig.smoothedBones[i];
                             const auto& r = rig.bones[i];
                             const float dax = r.a.x-s.a.x, day = r.a.y-s.a.y, daz = r.a.z-s.a.z;
                             const float dbx = r.b.x-s.b.x, dby = r.b.y-s.b.y, dbz = r.b.z-s.b.z;
-                            if (dax*dax+day*day+daz*daz > 0.25f ||
-                                dbx*dbx+dby*dby+dbz*dbz > 0.25f) {
+                            if (dax*dax+day*day+daz*daz > maxDeltaSq ||
+                                dbx*dbx+dby*dby+dbz*dbz > maxDeltaSq) {
                                 s.a = r.a;
                                 s.b = r.b;
                                 s.visible = r.visible;
