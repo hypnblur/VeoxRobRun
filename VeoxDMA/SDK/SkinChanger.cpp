@@ -169,12 +169,15 @@ static bool ClassContains(std::uintptr_t object, const char* needle)
     return Il2Cpp::ClassNameOf(object).find(needle) != std::string::npos;
 }
 
-static void BumpInt(std::uintptr_t address)
+static void BumpInt(std::uintptr_t address, bool restore = false)
 {
     std::int32_t v = 0;
     if (!Valid(address) || !RobRunMemory::ReadBytesFresh(address, &v, sizeof(v))) return;
     v = (v == INT_MAX) ? 0 : v + 1;
-    TargetProcess.Write(address, v);
+    if (restore)
+        TargetProcess.WriteRestore(address, v);
+    else
+        TargetProcess.Write(address, v);
 }
 
 static std::string ReadId(std::uintptr_t stringObject)
@@ -406,10 +409,10 @@ static bool FindSlots(std::uintptr_t dict, const std::string& idA, DictSlot& a,
 
 // Makes the local character rebuild its look: bump the snapshot and loading
 // versions and mark the view as not customized. All local (not replicated).
-static void RebuildLocalView(const Context& ctx)
+static void RebuildLocalView(const Context& ctx, bool restore = false)
 {
-    BumpInt(ctx.snapshot + off::SnapVersion);
-    BumpInt(ctx.loadingModel + off::LoadingVersion);
+    BumpInt(ctx.snapshot + off::SnapVersion, restore);
+    BumpInt(ctx.loadingModel + off::LoadingVersion, restore);
     std::vector<RobRunMemory::DictEntry> views;
     const std::uintptr_t viewDict = Ptr(ctx.updater + rr::BattleEntitiesUpdater::_characterEntityViews);
     if (!Is(ctx.updater, "BattleEntitiesUpdater") || ctx.localId < 0 ||
@@ -422,7 +425,10 @@ static void RebuildLocalView(const Context& ctx)
             custView = Ptr(Ptr(v.value + off::ViewBattleCustomization) + off::BattleCustView);
         if (Is(custView, "CharacterCustomizationView")) {
             const std::uint8_t notCustomized = 0;
-            TargetProcess.Write(custView + off::CustViewIsCustomized, notCustomized);
+            if (restore)
+                TargetProcess.WriteRestore(custView + off::CustViewIsCustomized, notCustomized);
+            else
+                TargetProcess.Write(custView + off::CustViewIsCustomized, notCustomized);
         }
         break;
     }
@@ -447,7 +453,7 @@ static bool RestoreSwap(Swap& swap)
     if (!swap.active) return false;
     // Only put the original back if the entry still holds our value.
     if (PtrFresh(swap.valueAddress) == swap.applied)
-        TargetProcess.Write(swap.valueAddress, swap.original);
+        TargetProcess.WriteRestore(swap.valueAddress, swap.original);
     swap = Swap{};
     return true;
 }
@@ -588,7 +594,7 @@ static bool RestoreWeaponSwap(WeaponSwap& swap)
     if (!swap.active) return false;
     for (const auto& [address, original] : swap.entries)
         if (PtrFresh(address) == swap.applied)
-            TargetProcess.Write(address, original);
+            TargetProcess.WriteRestore(address, original);
     swap = WeaponSwap{};
     return true;
 }
@@ -888,7 +894,7 @@ static void Tick()
         }
     }
 
-    if (rebuild) RebuildLocalView(ctx);
+    if (rebuild) RebuildLocalView(ctx, !enabled);
     TickWeapons(ctx, enabled, refresh, now, state);
     Publish(state);
 }

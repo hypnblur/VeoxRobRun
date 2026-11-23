@@ -530,7 +530,6 @@ static std::atomic<std::uint64_t> g_perfCamPhys{ 0 };
 static std::atomic<std::uint64_t> g_perfCamChanges{ 0 };
 static std::atomic<std::uint64_t> g_perfCamRttUs{ 0 };
 static std::atomic<std::uint64_t> g_perfCamRttMaxUs{ 0 };
-static bool g_lastPassHadEntities = false;
 static void StartCameraWorker();
 static void StopCameraWorker();
 
@@ -892,8 +891,7 @@ static void MatchViewsToEntities()
 static void PublishSnapshot()
 {
     auto snapshot = std::make_shared<Snapshot>();
-    g_lastPassHadEntities = !entities.empty();
-    snapshot->entities = std::move(entities);
+    snapshot->entities = entities;
     snapshot->fastVehicles = fastVehicles;
     {
         std::lock_guard<std::mutex> lock(g_worldMutex);
@@ -1140,7 +1138,7 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
             if (g_fullMapFastMode.load(std::memory_order_relaxed)) {
                 SwitchToThread();
             } else {
-                const int sleepMs = (cachedBattleModel > 0x10000 && g_lastPassHadEntities) ? 2 : 10;
+                const int sleepMs = (cachedBattleModel > 0x10000 && !entities.empty()) ? 2 : 10;
                 for (int i = 0; i < sleepMs && !g_workerStop.load(std::memory_order_relaxed); ++i)
                     Sleep(1);
             }
@@ -1178,10 +1176,6 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                         DLOG("WorldWorker #%d: Read=%d entities=%zu gen=%llu",
                              wwCount, worldOk, state->entities.size(), (unsigned long long)gen);
                     if (worldOk && sessionGeneration == gen) {
-                        // Resolve each world entity's LootFilter catalog index once here
-                        // (~2 Hz) so the 144-240 Hz render thread never hashes or scans labels.
-                        for (auto& we : state->entities)
-                            we.catalogIndex = LootFilterConfig::FindCatalogIndex(we.kind, we.label);
                         std::lock_guard<std::mutex> lock(g_worldMutex);
                         g_worldState = std::move(state);
                         UpdateDynamicOccluders(g_worldState);
@@ -2451,7 +2445,7 @@ static bool RestoreDefaultCrosshair()
     if (g_crosshairState.updater <= 0x10000)
         return false;
 
-    const bool restored = TargetProcess.Write(
+    const bool restored = TargetProcess.WriteRestore(
         g_crosshairState.updater + 0xD8,
         g_crosshairState.original);
 
@@ -4733,9 +4727,6 @@ static void UpdateInternal()
             if (GetFreshCamera(freshNow) && freshNow.valid)
                 liveVisCam = freshNow;
         }
-        static std::vector<Skeleton::BoneSegment> s_tmpBones;
-        static std::vector<Skeleton::BoneLocal> s_tmpLocal;
-        static std::vector<Matrix4x4> s_tmpWorld;
 
         int fallbackBudget = 1;
         for (auto& w : work) {
@@ -4806,41 +4797,41 @@ static void UpdateInternal()
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=D (rig, needsPose=%d, layoutValid=%d)", uiCount, (int)w.needsPose, (int)rig.layoutValid);
 
             try {
-            if (w.needsPose) {
+            if (w.needsPose && rig.layout.count >= 2) {
                 static bool loggedPose = false;
                 if (!loggedPose) {
                     DLOG("RobRunReader: needsPose, layout.count=%d, poseOffset=%zu, poseSize=%zu",
                         rig.layout.count, (size_t)w.poseOffset, (size_t)w.poseSize);
                 }
 
-                // Sample into reused scratch buffers so a failed read never
-                // overwrites the last good frame and avoids per-entity allocations.
-                s_tmpBones.clear();
+                // Sample into fresh per-entity temporaries so a failed read or
+                // caught SEH fault never overwrites the last good frame or leaves
+                // stale static scratch state across passes/reattaches.
+                std::vector<Skeleton::BoneSegment> tmpBones;
                 Skeleton::BonePoints tmpPoints{};
-                s_tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
+                std::vector<Skeleton::BoneLocal> tmpLocal(static_cast<std::size_t>(rig.layout.count));
+                std::vector<Matrix4x4> tmpWorld;
                 if (needChamsMatrices)
-                    s_tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
-                else
-                    s_tmpWorld.clear();
+                    tmpWorld.resize(static_cast<std::size_t>(rig.layout.count));
 
                 Skeleton::PoseStats pst{};
                 bool sampled = Skeleton::ProcessPoseData(rig.layout,
                     poseBuf.data() + w.poseOffset, w.poseSize,
-                    s_tmpBones, &tmpPoints, s_tmpLocal.data(),
-                    needChamsMatrices ? s_tmpWorld.data() : nullptr, &pst);
+                    tmpBones, &tmpPoints, tmpLocal.data(),
+                    needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
 
                 if (sampled) {
                     ++poseScatterOkAcc;
                 } else {
                     ++poseScatterFailAcc;
                     pst = {};
-                    s_tmpBones.clear();
-                    s_tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
+                    tmpBones.clear();
+                    tmpLocal.assign(static_cast<std::size_t>(rig.layout.count), Skeleton::BoneLocal{});
                     if (needChamsMatrices)
-                        s_tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
+                        tmpWorld.assign(static_cast<std::size_t>(rig.layout.count), Matrix4x4{});
                     sampled = Skeleton::SampleLayout(rig.layout, DmaReadFresh,
-                        s_tmpBones, &tmpPoints, s_tmpLocal.data(),
-                        needChamsMatrices ? s_tmpWorld.data() : nullptr, &pst);
+                        tmpBones, &tmpPoints, tmpLocal.data(),
+                        needChamsMatrices ? tmpWorld.data() : nullptr, &pst);
                     if (sampled) ++poseFreshOkAcc;
                 }
                 boneTotalAcc += pst.total;
@@ -4888,7 +4879,7 @@ static void UpdateInternal()
                             : Skeleton::Vec{ entity.position.x, entity.position.y, entity.position.z });
 
                     if (rig.poseHistCount > 0 &&
-                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != s_tmpBones.size())
+                        rig.relBoneHist[(rig.poseHistCursor + 2) % 3].size() != tmpBones.size())
                     {
                         rig.poseHistCount = 0;
                         rig.poseHistCursor = 0;
@@ -4896,11 +4887,11 @@ static void UpdateInternal()
 
                     const int slot = rig.poseHistCursor;
                     auto& relSegs = rig.relBoneHist[slot];
-                    relSegs.resize(s_tmpBones.size());
-                    for (std::size_t i = 0; i < s_tmpBones.size(); ++i) {
-                        relSegs[i].a = { s_tmpBones[i].a.x - anchor.x, s_tmpBones[i].a.y - anchor.y, s_tmpBones[i].a.z - anchor.z };
-                        relSegs[i].b = { s_tmpBones[i].b.x - anchor.x, s_tmpBones[i].b.y - anchor.y, s_tmpBones[i].b.z - anchor.z };
-                        relSegs[i].visible = s_tmpBones[i].visible;
+                    relSegs.resize(tmpBones.size());
+                    for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                        relSegs[i].a = { tmpBones[i].a.x - anchor.x, tmpBones[i].a.y - anchor.y, tmpBones[i].a.z - anchor.z };
+                        relSegs[i].b = { tmpBones[i].b.x - anchor.x, tmpBones[i].b.y - anchor.y, tmpBones[i].b.z - anchor.z };
+                        relSegs[i].visible = tmpBones[i].visible;
                     }
                     auto subVec = [&](const Skeleton::Vec& v) -> Skeleton::Vec {
                         return { v.x - anchor.x, v.y - anchor.y, v.z - anchor.z };
@@ -4941,9 +4932,9 @@ static void UpdateInternal()
                         const auto& h0 = rig.relBoneHist[0];
                         const auto& h1 = rig.relBoneHist[1];
                         const auto& h2 = rig.relBoneHist[2];
-                        for (std::size_t i = 0; i < s_tmpBones.size(); ++i) {
-                            s_tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
-                            s_tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
+                        for (std::size_t i = 0; i < tmpBones.size(); ++i) {
+                            tmpBones[i].a = med3v(h0[i].a, h1[i].a, h2[i].a);
+                            tmpBones[i].b = med3v(h0[i].b, h1[i].b, h2[i].b);
                         }
                         const auto& p0 = rig.relPtsHist[0];
                         const auto& p1 = rig.relPtsHist[1];
@@ -4967,11 +4958,11 @@ static void UpdateInternal()
                     }
 
                     // Commit every pass so world position stays at full worker rate.
-                    rig.bones.swap(s_tmpBones);
+                    rig.bones = std::move(tmpBones);
                     rig.points = tmpPoints;
-                    rig.curLocal.swap(s_tmpLocal);
+                    rig.curLocal = std::move(tmpLocal);
                     if (needChamsMatrices) {
-                        rig.worldMatrices.swap(s_tmpWorld);
+                        rig.worldMatrices = std::move(tmpWorld);
                     } else {
                         rig.worldMatrices.clear();
                         rig.smoothedWorldMatrices.clear();
@@ -5093,7 +5084,7 @@ static void UpdateInternal()
                         lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
                         lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
 
-                        if (needChamsMatrices) {
+                        if (needChamsMatrices && rig.smoothedWorldMatrices.size() == rig.worldMatrices.size()) {
                             for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
                                 auto& sm = rig.smoothedWorldMatrices[i];
                                 const auto& rm = rig.worldMatrices[i];

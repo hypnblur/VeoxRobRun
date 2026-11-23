@@ -41,8 +41,25 @@ public:
 		std::string_view("LootFilter") != std::string_view("Skin"),
 		"Config section names must be unique — merge_patch silently overwrites on collision");
 
+	void DisableAllMemWriteFeatures()
+	{
+		Aim.MemoryWrite = false;
+		Aim.NoRecoil = false;
+		Aim.NoSpread = false;
+		Aim.DynamicRecoilCompensation = false;
+		Aim.IgnoreKnock = false;
+		Aim.HideCrosshair = false;
+		Overlay.CustomCameraDistance = false;
+		Overlay.FovChanger = false;
+		World.InstantLoot = false;
+		World.InstantUnlock = false;
+		Skin.Enabled = false;
+	}
+
 	json ToJson()
 	{
+		if (!Overlay.MemWriteMaster)
+			DisableAllMemWriteFeatures();
 		json jsoned;
 		jsoned.merge_patch(Player.ToJson());
 		jsoned.merge_patch(Overlay.ToJson());
@@ -63,6 +80,8 @@ public:
 		Radar.FromJson(jsoned);
 		LootFilter.FromJson(jsoned);
 		Skin.FromJson(jsoned);
+		if (!Overlay.MemWriteMaster)
+			DisableAllMemWriteFeatures();
 	}
 };
 inline ConfigInstances ConfigInstance;

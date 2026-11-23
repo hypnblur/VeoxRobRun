@@ -1056,7 +1056,7 @@ void RestoreInstantLoot()
             float cur = 0.f;
             if (RobRunMemory::ReadBytesFresh(entry.addr, &cur, sizeof(cur)) &&
                 std::isfinite(cur) && cur >= 0.f && cur <= 0.05f) {
-                TargetProcess.Write(entry.addr, entry.original);
+                TargetProcess.WriteRestore(entry.addr, entry.original);
             }
         }
     }
@@ -1280,7 +1280,7 @@ static void TickCustomCamera()
             std::uintptr_t liveCam = 0;
             if (ReadPtrFreshSafe(snap->battleModel + rr::BattleModel::BattleCameraModel, liveCam) &&
                 liveCam == g_customCam.cameraModel) {
-                TargetProcess.Write(g_customCam.cameraModel + rr::BattleCameraModelOffsets::Distance,
+                TargetProcess.WriteRestore(g_customCam.cameraModel + rr::BattleCameraModelOffsets::Distance,
                     g_customCam.originalDistance);
             }
         }

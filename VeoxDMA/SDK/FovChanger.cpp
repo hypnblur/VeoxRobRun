@@ -174,7 +174,7 @@ static void RestoreLocked()
         FovTarget* t = &g_fovTargets[i];
         if (!t->used) continue;
         if (IsValidPtr(t->addr) && t->original >= 1.f && t->original <= 179.f) {
-            TargetProcess.Write(t->addr + rr::Fov::VcamLensFov, t->original);
+            TargetProcess.WriteRestore(t->addr + rr::Fov::VcamLensFov, t->original);
         }
         t->used = false;
         t->addr = 0;
@@ -268,7 +268,7 @@ void Tick()
                 if (n > 0) {
                     for (int j = 0; j < n; ++j) {
                         if (targets[j] == t->addr) {
-                            TargetProcess.Write(t->addr + rr::Fov::VcamLensFov, t->original);
+                            TargetProcess.WriteRestore(t->addr + rr::Fov::VcamLensFov, t->original);
                             break;
                         }
                     }

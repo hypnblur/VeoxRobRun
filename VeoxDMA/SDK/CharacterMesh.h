@@ -159,6 +159,8 @@ inline void Skin(const Mesh& mesh,
                  const int* boneMap,
                  Vector3* outPos)
 {
+    if (!boneWorld || skeletonBoneCount <= 0 || !outPos)
+        return;
     // Called once per player per frame; reuse scratch instead of allocating
     // two vectors for every entity. numBones is validated at load time.
     thread_local std::vector<Matrix4x4> s_skin;

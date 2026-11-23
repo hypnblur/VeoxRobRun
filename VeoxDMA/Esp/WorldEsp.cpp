@@ -292,16 +292,10 @@ void DrawWorldEntities()
 			continue;
 
 		if (lf.Enabled) {
-			if (entity.catalogIndex >= 0) {
-				itemDef = LootFilterConfig::GetCatalogDef(entity.catalogIndex);
-				itemCfg = &lf.GetItemByIndex(entity.catalogIndex);
+			itemDef = lf.FindItemForEntity(entity.kind, entity.label);
+			if (itemDef) {
+				itemCfg = &lf.GetItem(itemDef->id);
 				if (!itemCfg->visible) continue;
-			} else if (entity.catalogIndex == -2) {
-				itemDef = lf.FindItemForEntity(entity.kind, entity.label);
-				if (itemDef) {
-					itemCfg = &lf.GetItem(itemDef->id);
-					if (!itemCfg->visible) continue;
-				}
 			}
 		}
 
@@ -312,7 +306,7 @@ void DrawWorldEntities()
 		//                  silently drop loot the catalog simply could not name.
 		if (!lf.Enabled) {
 			if (!IsEnabled(entity.kind)) continue;
-		} else if (!itemDef && entity.catalogIndex == -2) {
+		} else if (!itemDef) {
 			itemDef = lf.FindItemForEntity(entity.kind, "");
 			if (itemDef) itemCfg = &lf.GetItem(itemDef->id);
 		}

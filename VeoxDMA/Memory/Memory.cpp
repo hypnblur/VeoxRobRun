@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Memory.h"
+#include "ConfigInstance.h"
 
 #include <atomic>
 #include <thread>
@@ -842,7 +843,12 @@ static bool ShouldLogWriteFailure()
 	return lastLogMs.compare_exchange_strong(previous, now, std::memory_order_relaxed);
 }
 
-bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
+bool Memory::IsMemWriteMasterEnabled()
+{
+	return ConfigInstance.Overlay.MemWriteMaster;
+}
+
+bool Memory::WriteRestore(uintptr_t address, void* buffer, size_t size) const
 {
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
 		return false;
@@ -855,7 +861,7 @@ bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
 	return true;
 }
 
-bool Memory::Write(uintptr_t address, void* buffer, size_t size, int pid) const
+bool Memory::WriteRestore(uintptr_t address, void* buffer, size_t size, int pid) const
 {
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
 		return false;
@@ -866,6 +872,20 @@ bool Memory::Write(uintptr_t address, void* buffer, size_t size, int pid) const
 		return false;
 	}
 	return true;
+}
+
+bool Memory::Write(uintptr_t address, void* buffer, size_t size) const
+{
+	if (!IsMemWriteMasterEnabled())
+		return false;
+	return WriteRestore(address, buffer, size);
+}
+
+bool Memory::Write(uintptr_t address, void* buffer, size_t size, int pid) const
+{
+	if (!IsMemWriteMasterEnabled())
+		return false;
+	return WriteRestore(address, buffer, size, pid);
 }
 
 bool Memory::Read(uintptr_t address, void* buffer, size_t size) const
@@ -1019,6 +1039,8 @@ void Memory::AddScatterReadRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addres
 
 bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t address, void* buffer, size_t size)
 {
+	if (!IsMemWriteMasterEnabled())
+		return false;
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
 		return false;
 	if (!VMMDLL_Scatter_PrepareWrite(handle, address, (PBYTE)buffer, size))
@@ -1030,6 +1052,11 @@ bool Memory::AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addre
 }
 bool Memory::ExecuteScatterWrite(VMMDLL_SCATTER_HANDLE handle)
 {
+	if (!IsMemWriteMasterEnabled())
+	{
+		VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
+		return false;
+	}
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
 	VMMDLL_Scatter_Clear(handle, this->GetPID(), kFreshReadFlags);
 	return ok;
@@ -1054,6 +1081,12 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 {
 	if (pid == 0)
 		pid = this->GetPID();
+
+	if (!IsMemWriteMasterEnabled())
+	{
+		VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);
+		return false;
+	}
 
 	const bool ok = VMMDLL_Scatter_Execute(handle) != 0;
 	VMMDLL_Scatter_Clear(handle, pid, kFreshReadFlags);

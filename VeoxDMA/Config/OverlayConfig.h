@@ -164,7 +164,7 @@ public:
 		PanicMode = s.value(LIT("PanicMode"), PanicMode);
 		PanicKey = s.value(LIT("PanicKey"), PanicKey);
 		ReattachKey = s.value(LIT("ReattachKey"), ReattachKey);
-		MemWriteMaster = s.value(LIT("MemWriteMaster"), MemWriteMaster);
+		MemWriteMaster = s.value(LIT("MemWriteMaster"), false);
 		CustomCameraDistance = s.value(LIT("CustomCameraDistance"), CustomCameraDistance);
 		CameraDistance = s.value(LIT("CameraDistance"), CameraDistance);
 		FovChanger = s.value(LIT("FovChanger"), FovChanger);

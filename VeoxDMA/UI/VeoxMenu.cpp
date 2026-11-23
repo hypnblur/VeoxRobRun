@@ -628,7 +628,7 @@ void DrawVectorIcon(ImDrawList* dl, IconKind kind, const ImVec2& c, float r, ImU
 	}
 }
 
-inline void MemoryWriteBadge(float rightX, float rowTop, float rowHeight, bool active)
+inline void MemoryWriteBadge(float rightX, float rowTop, float rowHeight, bool active, bool locked = false)
 {
 	const char* text = "MEM WRITE";
 	ImFont* f = font::inter_medium_small;
@@ -639,10 +639,17 @@ inline void MemoryWriteBadge(float rightX, float rowTop, float rowHeight, bool a
 	const ImRect bb(ImVec2(mx.x - tw - 10.f, mx.y), ImVec2(mx.x, mx.y + bh));
 
 	ImDrawList* dl = ImGui::GetWindowDrawList();
-	dl->AddRectFilled(bb.Min, bb.Max, C(kAccent, active ? 0.18f : 0.10f), 3.f);
-	dl->AddText(f, fs,
-		ImVec2(bb.Min.x + 5.f, bb.Min.y + (bh - fs) * 0.5f),
-		C(kAccent, active ? 1.f : 0.7f), text);
+	if (locked) {
+		dl->AddRectFilled(bb.Min, bb.Max, C(kTextFaint, 0.16f), 3.f);
+		dl->AddText(f, fs,
+			ImVec2(bb.Min.x + 5.f, bb.Min.y + (bh - fs) * 0.5f),
+			C(kTextDim, 0.65f), text);
+	} else {
+		dl->AddRectFilled(bb.Min, bb.Max, C(kAccent, active ? 0.18f : 0.10f), 3.f);
+		dl->AddText(f, fs,
+			ImVec2(bb.Min.x + 5.f, bb.Min.y + (bh - fs) * 0.5f),
+			C(kAccent, active ? 1.f : 0.7f), text);
+	}
 }
 
 void Note(const char* fmt, ...)
@@ -838,26 +845,30 @@ bool DrawColourPopup(const char* popupId, const char* title,
 	return changed;
 }
 
-void DrawPillSwitch(ImDrawList* dl, const ImRect& track, float t)
+void DrawPillSwitch(ImDrawList* dl, const ImRect& track, float t, bool locked = false)
 {
 	const float th = track.GetHeight();
-	dl->AddRectFilled(track.Min, track.Max, C(Mix(kTrack, kAccent, t)), th * 0.5f);
+	const float alpha = locked ? 0.42f : 1.f;
+	dl->AddRectFilled(track.Min, track.Max, C(Mix(kTrack, kAccent, t), alpha), th * 0.5f);
 	const float r = (th - 6.f) * 0.5f;
 	const float kx = ImLerp(track.Min.x + 3.f + r, track.Max.x - 3.f - r, t);
 	dl->AddCircleFilled(ImVec2(kx, (track.Min.y + track.Max.y) * 0.5f), r,
-		C(Mix(kTextDim, ImVec4(1, 1, 1, 1), t)));
+		C(Mix(kTextDim, ImVec4(1, 1, 1, 1), t), alpha));
 }
 
 struct PendingMemWritePrompt {
 	bool requestOpen = false;
-	bool* targetFlag = nullptr; // nullptr when triggered directly by Mem Write Master Switch
 	bool tracksDirty = true;
-	std::string featureName;
 };
 static PendingMemWritePrompt g_memWritePrompt{};
 
 bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracksDirty = true)
 {
+	const bool isMasterSwitch = (v == &ConfigInstance.Overlay.MemWriteMaster);
+	const bool lockedByMaster = memoryWrite && !isMasterSwitch && !ConfigInstance.Overlay.MemWriteMaster;
+	if (lockedByMaster && *v)
+		*v = false;
+
 	ImGuiWindow* window = ImGui::GetCurrentWindow();
 	const ImGuiID id = window->GetID(label);
 	const ImVec2 p = window->DC.CursorPos;
@@ -868,21 +879,35 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracks
 	if (!ImGui::ItemAdd(bb, id)) return false;
 
 	bool hov = false, held = false;
-	const bool pressed = ImGui::ButtonBehavior(bb, id, &hov, &held);
-	if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+	const bool pressed = lockedByMaster ? false : ImGui::ButtonBehavior(bb, id, &hov, &held);
+	if (lockedByMaster) {
+		if (ImGui::IsMouseHoveringRect(bb.Min, bb.Max) && ImGui::IsWindowHovered()) {
+			ImGui::PushStyleColor(ImGuiCol_PopupBg, C(kPopup));
+			ImGui::PushStyleColor(ImGuiCol_Border, C(kStroke));
+			ImGui::PushStyleColor(ImGuiCol_Text, C(kTextMid));
+			ImGui::BeginTooltip();
+			ImGui::TextUnformatted("Locked - enable Mem Write Master Switch first.");
+			ImGui::EndTooltip();
+			ImGui::PopStyleColor(3);
+		}
+	} else if (hov) {
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+	}
 
 	bool changed = false;
 	if (pressed) {
 		const bool turningOn = !*v;
-		if (memoryWrite && turningOn && !ConfigInstance.Overlay.MemWriteMaster) {
-			// Gate enabling any MEM WRITE switch behind an explicit confirmation popup.
-			const char* dispEnd = ImGui::FindRenderedTextEnd(label);
+		if (isMasterSwitch && turningOn) {
+			// Gate enabling the Mem Write Master Switch behind an explicit confirmation popup.
 			g_memWritePrompt.requestOpen = true;
-			g_memWritePrompt.targetFlag = (v == &ConfigInstance.Overlay.MemWriteMaster) ? nullptr : v;
 			g_memWritePrompt.tracksDirty = tracksDirty;
-			g_memWritePrompt.featureName.assign(label, dispEnd);
 		} else {
 			*v = !*v;
+			if (isMasterSwitch && !*v) {
+				// Super switch turned OFF: immediately turn off and lock every mem write feature.
+				ConfigInstance.DisableAllMemWriteFeatures();
+				g_memWritePrompt = {};
+			}
 			changed = true;
 			if (tracksDirty) g_dirty = true;
 		}
@@ -890,24 +915,30 @@ bool ToggleRow(const char* label, bool* v, bool memoryWrite = false, bool tracks
 
 	static std::map<ImGuiID, float> anim;
 	auto it = anim.find(id);
-	if (it == anim.end()) it = anim.emplace(id, *v ? 1.f : 0.f).first;
+	const float target = lockedByMaster ? 0.f : (*v ? 1.f : 0.f);
+	if (it == anim.end()) it = anim.emplace(id, target).first;
 	float& t = it->second;
-	t = ImLerp(t, *v ? 1.f : 0.f, ImGui::GetIO().DeltaTime * 15.f);
+	t = ImLerp(t, target, ImGui::GetIO().DeltaTime * 15.f);
 
 	ImDrawList* dl = window->DrawList;
 	MaybeFlashRow(dl, bb, label);
 
 	const char* dispEnd = ImGui::FindRenderedTextEnd(label);
+	const ImU32 labelCol = lockedByMaster
+		? C(kTextDim, 0.72f)
+		: C(Mix(kTextMid, kText, ImMax(t, hov ? 0.6f : 0.f)));
 	dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
 		ImVec2(p.x, RowTextY(p.y, kRow, font::inter_medium_widget)),
-		C(Mix(kTextMid, kText, ImMax(t, hov ? 0.6f : 0.f))), label, dispEnd);
+		labelCol, label, dispEnd);
 
 	constexpr float tw = 32.f, th = 17.f;
 	const ImRect track(ImVec2(p.x + w - tw, p.y + (kRow - th) * 0.5f),
 		ImVec2(p.x + w, p.y + (kRow + th) * 0.5f));
 	if (memoryWrite)
-		MemoryWriteBadge(track.Min.x - 8.f, p.y, kRow, *v && ConfigInstance.Overlay.MemWriteMaster);
-	DrawPillSwitch(dl, track, t);
+		MemoryWriteBadge(track.Min.x - 8.f, p.y, kRow,
+			isMasterSwitch ? *v : (*v && ConfigInstance.Overlay.MemWriteMaster),
+			lockedByMaster);
+	DrawPillSwitch(dl, track, t, lockedByMaster);
 
 	return changed;
 }
@@ -1245,7 +1276,7 @@ bool SliderFloatRow(const char* label, float* v, float lo, float hi, const char*
 }
 
 bool ComboRow(const char* label, int* current, const char* const* items, int count,
-	float fieldW = 152.f, bool memoryWrite = false, bool tracksDirty = true)
+	float fieldW = 152.f, bool memoryWrite = false, bool tracksDirty = true, bool locked = false)
 {
 	if (count <= 0) return false;
 
@@ -1266,8 +1297,20 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 	const ImRect field(ImVec2(p.x + w - fw, p.y + 1.f), ImVec2(p.x + w, p.y + rowH - 1.f));
 
 	bool hov = false, held = false;
-	const bool pressed = ImGui::ButtonBehavior(field, id, &hov, &held);
-	if (hov) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+	const bool pressed = locked ? false : ImGui::ButtonBehavior(field, id, &hov, &held);
+	if (locked) {
+		if (ImGui::IsMouseHoveringRect(bb.Min, bb.Max) && ImGui::IsWindowHovered()) {
+			ImGui::PushStyleColor(ImGuiCol_PopupBg, C(kPopup));
+			ImGui::PushStyleColor(ImGuiCol_Border, C(kStroke));
+			ImGui::PushStyleColor(ImGuiCol_Text, C(kTextMid));
+			ImGui::BeginTooltip();
+			ImGui::TextUnformatted("Locked - enable Mem Write Master Switch first.");
+			ImGui::EndTooltip();
+			ImGui::PopStyleColor(3);
+		}
+	} else if (hov) {
+		ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+	}
 
 	char popup[96];
 	std::snprintf(popup, sizeof(popup), "##cmb_%u", id);
@@ -1276,27 +1319,32 @@ bool ComboRow(const char* label, int* current, const char* const* items, int cou
 	ImDrawList* dl = window->DrawList;
 	MaybeFlashRow(dl, bb, label);
 
+	const float dimAlpha = locked ? 0.55f : 1.f;
 	dl->AddText(font::inter_medium_widget, font::inter_medium_widget->FontSize,
 		ImVec2(p.x, RowTextY(p.y, rowH, font::inter_medium_widget)),
-		C(Mix(kTextMid, kText, hov ? 0.6f : 0.f)), dispLabel.c_str());
+		locked ? C(kTextDim, 0.72f) : C(Mix(kTextMid, kText, hov ? 0.6f : 0.f)), dispLabel.c_str());
 
-	dl->AddRectFilled(field.Min, field.Max, C(kControl), 5.f);
-	dl->AddRect(field.Min, field.Max, C(Mix(kStroke, kAccent, hov ? 0.55f : 0.f)), 5.f, 0, 1.f);
+	dl->AddRectFilled(field.Min, field.Max, C(kControl, dimAlpha), 5.f);
+	dl->AddRect(field.Min, field.Max, C(Mix(kStroke, kAccent, (!locked && hov) ? 0.55f : 0.f), dimAlpha), 5.f, 0, 1.f);
 
 	if (memoryWrite)
-		MemoryWriteBadge(field.Min.x - 8.f, p.y, rowH, true);
+		MemoryWriteBadge(field.Min.x - 8.f, p.y, rowH,
+			ConfigInstance.Overlay.MemWriteMaster,
+			locked || !ConfigInstance.Overlay.MemWriteMaster);
 
 	int sel = ImClamp(*current, 0, count - 1);
 	const char* preview = items[sel] ? items[sel] : "-";
 	dl->PushClipRect(field.Min, ImVec2(field.Max.x - 20.f, field.Max.y), true);
 	dl->AddText(font::inter_medium_small, font::inter_medium_small->FontSize,
 		ImVec2(field.Min.x + 9.f, RowTextY(field.Min.y, field.GetHeight(), font::inter_medium_small)),
-		C(kText), preview);
+		locked ? C(kTextDim, 0.72f) : C(kText), preview);
 	dl->PopClipRect();
 
 	const ImVec2 cv(field.Max.x - 12.f, (field.Min.y + field.Max.y) * 0.5f);
-	dl->AddLine(ImVec2(cv.x - 3.5f, cv.y - 1.5f), ImVec2(cv.x, cv.y + 2.f), C(kTextDim), 1.4f);
-	dl->AddLine(ImVec2(cv.x, cv.y + 2.f), ImVec2(cv.x + 3.5f, cv.y - 1.5f), C(kTextDim), 1.4f);
+	dl->AddLine(ImVec2(cv.x - 3.5f, cv.y - 1.5f), ImVec2(cv.x, cv.y + 2.f), C(kTextDim, dimAlpha), 1.4f);
+	dl->AddLine(ImVec2(cv.x, cv.y + 2.f), ImVec2(cv.x + 3.5f, cv.y - 1.5f), C(kTextDim, dimAlpha), 1.4f);
+
+	if (locked) return false;
 
 	bool changed = false;
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.f, 6.f));
@@ -1605,6 +1653,8 @@ void DrawAimGeneral()
 		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
 		BeginCard("Memory Aim", IconKind::Cpu, kCardW);
 		ToggleRow("Write Camera Angles", &ConfigInstance.Aim.MemoryWrite, true);
+		if (!ConfigInstance.Overlay.MemWriteMaster)
+			Note("Master Switch is OFF - enable Mem Write Master Switch to unlock.");
 		if (ConfigInstance.Aim.MemoryWrite)
 		{
 			ToggleRow("Cursor Fallback", &ConfigInstance.Aim.CursorFallback);
@@ -1680,6 +1730,8 @@ void DrawAimTargetsRecoil()
 		ToggleRow("Dynamic Recoil Curve", &ConfigInstance.Aim.DynamicRecoilCompensation, true);
 		if (ConfigInstance.Aim.DynamicRecoilCompensation)
 			SliderFloatRow("Curve Strength", &ConfigInstance.Aim.RecoilStrength, 0.1f, 2.0f, "x");
+		if (!ConfigInstance.Overlay.MemWriteMaster)
+			Note("Master Switch is OFF - enable Mem Write Master Switch to unlock.");
 		Note("Zeroes weapon vectors over DMA or applies dynamic pattern compensation.");
 		EndCard();
 
@@ -2891,7 +2943,7 @@ void DrawMiscGameplay()
 		BeginCard("Gameplay", IconKind::Sliders, kCardW, 0.f, false, nullptr, true);
 		ToggleRow("Mem Write Master Switch", &ConfigInstance.Overlay.MemWriteMaster, true);
 		if (!ConfigInstance.Overlay.MemWriteMaster)
-			Note("Master Switch is OFF - all MEM WRITE features below are inactive.");
+			Note("Master Switch is OFF - all MEM WRITE features below are turned off and locked.");
 		ToggleRow("Camera Zoom", &ConfigInstance.Overlay.CustomCameraDistance, true);
 		if (ConfigInstance.Overlay.CustomCameraDistance)
 			SliderFloatRow("Camera Distance", &ConfigInstance.Overlay.CameraDistance, 1.0f, 15.0f, " m");
@@ -2986,6 +3038,8 @@ void DrawMiscSkins()
 	{
 		BeginCard("Skin Changer", IconKind::Palette, kCardW);
 		ToggleRow("Enable Skin Changer", &skin.Enabled, true);
+		if (!ConfigInstance.Overlay.MemWriteMaster)
+			Note("Master Switch is OFF - enable Mem Write Master Switch to unlock.");
 		if (state.inMatch)
 			Note("Character: %s", state.female ? "Female" : "Male");
 		else
@@ -3022,7 +3076,7 @@ void DrawMiscSkins()
 				}
 				for (const auto& l : labels[slot]) items[slot].push_back(l.c_str());
 				if (ComboRow(SkinChanger::SlotName(slot), &selected, items[slot].data(),
-					(int)items[slot].size(), 190.f, true))
+					(int)items[slot].size(), 190.f, true, true, !ConfigInstance.Overlay.MemWriteMaster))
 				{
 					SkinChanger::SetWanted(slot, state.female,
 						selected > 0 ? s.options[selected - 1] : std::string());
@@ -3070,7 +3124,7 @@ void DrawMiscSkins()
 				for (const auto& l : labels[w]) items[w].push_back(l.c_str());
 				ImGui::PushID((int)w);
 				if (ComboRow(weapon.name.c_str(), &selected, items[w].data(),
-					(int)items[w].size(), 180.f, true))
+					(int)items[w].size(), 180.f, true, true, !ConfigInstance.Overlay.MemWriteMaster))
 				{
 					SkinChanger::SetWantedWeaponSkin(weapon.key,
 						selected > 0 ? weapon.skins[selected - 1] : std::string());
@@ -3418,7 +3472,7 @@ void DrawSettingsOverlay()
 	{
 		BeginCard("Hotkeys & Safety", IconKind::Shield, kCardW);
 		ToggleRow("Mem Write Master Switch", &ConfigInstance.Overlay.MemWriteMaster, true);
-		Note("Must be enabled for any MEM WRITE feature to operate. Turning it off disables & restores all active writes.");
+		Note("Super switch for all MEM WRITE features. When OFF, all write toggles are turned off and locked.");
 		ComboRow("Menu Key", &ConfigInstance.Overlay.MenuKey, kMenuKeyLabels, IM_ARRAYSIZE(kMenuKeyLabels));
 		ToggleRow("Panic Mode", &ConfigInstance.Overlay.PanicMode);
 		ComboRow("Panic Key", &ConfigInstance.Overlay.PanicKey, panicKeys, IM_ARRAYSIZE(panicKeys));
@@ -4154,6 +4208,9 @@ void Draw(bool attached, const std::string& statusText)
 		}
 	}
 
+	if (!ConfigInstance.Overlay.MemWriteMaster)
+		ConfigInstance.DisableAllMemWriteFeatures();
+
 	ImGui::Begin("##ROBRUN", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
 		ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar |
@@ -4269,9 +4326,9 @@ void Draw(bool attached, const std::string& statusText)
 
 		g_lastPos = pos;
 
-		// Confirmation modal whenever a user enables a MEM WRITE feature while the
-		// Mem Write Master Switch is off. Kept inside the ##ROBRUN window scope so
-		// OpenPopup and BeginPopupModal share the exact same ImGui ID stack.
+		// Confirmation modal whenever a user enables the Mem Write Master Switch.
+		// Kept inside the ##ROBRUN window scope so OpenPopup and BeginPopupModal
+		// share the exact same ImGui ID stack.
 		if (g_memWritePrompt.requestOpen) {
 			g_memWritePrompt.requestOpen = false;
 			ImGui::OpenPopup("##memwrite_confirm");
@@ -4300,17 +4357,12 @@ void Draw(bool attached, const std::string& statusText)
 
 				ImGui::PushStyleColor(ImGuiCol_Text, C(kText));
 				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + modalW - 36.f);
-				ImGui::TextUnformatted("You're enabling a mem write feature, do you wish to proceed?");
+				ImGui::TextUnformatted("You're enabling the Mem Write Master Switch, do you wish to proceed?");
 				ImGui::PopTextWrapPos();
 				ImGui::PopStyleColor();
 				ImGui::PopFont();
 
-				if (g_memWritePrompt.targetFlag && !g_memWritePrompt.featureName.empty()) {
-					Note("Enabling \"%s\" will also turn on the Mem Write Master Switch.",
-						g_memWritePrompt.featureName.c_str());
-				} else {
-					Note("Enabling the Mem Write Master Switch allows active MEM WRITE features to modify game memory over DMA.");
-				}
+				Note("This unlocks MEM WRITE toggles so you can enable them. Turning the Master Switch off immediately turns off, locks, and restores all active writes.");
 
 				ImGui::Dummy(ImVec2(0.f, 4.f));
 				const float avail = ImGui::GetContentRegionAvail().x;
@@ -4318,8 +4370,6 @@ void Draw(bool attached, const std::string& statusText)
 
 				if (InlineButton("Yes, Enable", btnW, true)) {
 					ConfigInstance.Overlay.MemWriteMaster = true;
-					if (g_memWritePrompt.targetFlag)
-						*g_memWritePrompt.targetFlag = true;
 					if (g_memWritePrompt.tracksDirty)
 						g_dirty = true;
 					g_memWritePrompt = {};

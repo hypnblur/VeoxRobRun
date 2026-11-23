@@ -67,9 +67,6 @@ struct Entity {
     int rarity = -1;            // RarityItem enum from the description: 0 none, 1..6 tiers
     float yaw = 0.f;
     bool hasYaw = false;
-    // Resolved once per world-worker pass into LootFilter::kItemCatalog
-    // (-2 = unresolved, -1 = resolved with no match, >= 0 = catalog index).
-    std::int16_t catalogIndex = -2;
 };
 
 struct State {

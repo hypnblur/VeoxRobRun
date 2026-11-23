@@ -104,53 +104,12 @@ public:
 
 	std::unordered_map<std::string, ItemSettings> Items;
 
-	// Flat O(1) pointer table into Items, indexed by LootFilter::kItemCatalog
-	// position so render-thread lookups avoid hashing and std::string allocations.
-	std::array<const ItemSettings*, LootFilter::kItemCount> ItemPtrs{};
-
-	static constexpr std::int16_t kInvalidCatalogIndex = -1;
-
-	struct CatalogLookup {
-		std::unordered_map<std::string, const LootFilter::ItemDef*> labelIndex;
-		std::unordered_map<std::string, const LootFilter::ItemDef*> anyLabelIndex;
-		std::array<const LootFilter::ItemDef*, 64> kindFallback{};
-	};
-
-	static const CatalogLookup& GetCatalogLookup()
-	{
-		static const CatalogLookup lookup = [] {
-			CatalogLookup out;
-			out.labelIndex.reserve(LootFilter::kItemCount * 4);
-			out.anyLabelIndex.reserve(LootFilter::kItemCount * 4);
-
-			auto key = [](const LootFilter::ItemDef& def, const std::string& label) {
-				return std::to_string((int)def.kind) + '\x1f' + Lower(label);
-			};
-			auto add = [&](const LootFilter::ItemDef& def, const char* label) {
-				if (!label || !label[0]) return;
-				const std::string plain(label);
-				out.labelIndex.emplace(key(def, plain), &def);
-				out.anyLabelIndex.emplace(Lower(plain), &def);
-				const std::string flat = NormLabel(plain);
-				if (!flat.empty()) {
-					out.labelIndex.emplace(std::to_string((int)def.kind) + "\x1f#" + flat, &def);
-					out.anyLabelIndex.emplace("#" + flat, &def);
-				}
-			};
-
-			for (const auto& def : LootFilter::kItemCatalog) {
-				add(def, def.labelMatch);
-				if (!def.labelMatch[0]) {
-					const std::size_t ki = static_cast<std::size_t>(def.kind);
-					if (ki < out.kindFallback.size() && !out.kindFallback[ki])
-						out.kindFallback[ki] = &def;
-				}
-			}
-			for (const auto& def : LootFilter::kItemCatalog) add(def, def.displayName);
-			return out;
-		}();
-		return lookup;
-	}
+	// Label lookup. Two indexes: one keyed by kind+label so an exact id always
+	// wins for the entity kind that owns it, and one keyed by label alone for
+	// cross-kind hits (a loot object whose id equals an item id).
+	std::unordered_map<std::string, const LootFilter::ItemDef*> LabelIndex;
+	std::unordered_map<std::string, const LootFilter::ItemDef*> AnyLabelIndex;
+	std::array<const LootFilter::ItemDef*, 64> KindFallback{};
 
 	// Per-category overrides; index is LootFilter::Category.
 	std::array<CategorySizing, (std::size_t)LootFilter::Category::COUNT> Sizing{};
@@ -455,7 +414,6 @@ public:
 			}
 		}
 
-		RefreshItemPtrs();
 		return changed > 0;
 	}
 
@@ -481,34 +439,40 @@ public:
 		}
 	}
 
-	void RefreshItemPtrs()
-	{
-		for (std::size_t i = 0; i < LootFilter::kItemCount; ++i) {
-			const auto it = Items.find(LootFilter::kItemCatalog[i].id);
-			ItemPtrs[i] = (it != Items.end()) ? &it->second : nullptr;
-		}
-	}
-
 	void RebuildIndex()
 	{
-		(void)GetCatalogLookup();
-		RefreshItemPtrs();
-	}
+		LabelIndex.clear();
+		AnyLabelIndex.clear();
+		KindFallback.fill(nullptr);
+		LabelIndex.reserve(LootFilter::kItemCount * 2);
+		AnyLabelIndex.reserve(LootFilter::kItemCount * 2);
 
-	static std::int16_t CatalogIndexOf(const LootFilter::ItemDef* def)
-	{
-		if (!def) return kInvalidCatalogIndex;
-		const auto* base = LootFilter::kItemCatalog.data();
-		if (def < base || def >= base + LootFilter::kItemCount)
-			return kInvalidCatalogIndex;
-		return static_cast<std::int16_t>(def - base);
-	}
+		auto key = [](const LootFilter::ItemDef& def, const std::string& label) {
+			return std::to_string((int)def.kind) + '\x1f' + Lower(label);
+		};
+		auto add = [&](const LootFilter::ItemDef& def, const char* label) {
+			if (!label || !label[0]) return;
+			const std::string plain(label);
+			LabelIndex.emplace(key(def, plain), &def);
+			AnyLabelIndex.emplace(Lower(plain), &def);
+			// Underscore-free form, so "ap_scalar_m_1" (world loot object) and
+			// "ap_scalar_m1" (the item) resolve to the same row.
+			const std::string flat = NormLabel(plain);
+			if (!flat.empty()) {
+				LabelIndex.emplace(std::to_string((int)def.kind) + "\x1f#" + flat, &def);
+				AnyLabelIndex.emplace("#" + flat, &def);
+			}
+		};
 
-	static const LootFilter::ItemDef* GetCatalogDef(std::int16_t idx)
-	{
-		if (idx < 0 || static_cast<std::size_t>(idx) >= LootFilter::kItemCount)
-			return nullptr;
-		return &LootFilter::kItemCatalog[static_cast<std::size_t>(idx)];
+		for (const auto& def : LootFilter::kItemCatalog) {
+			add(def, def.labelMatch);
+			if (!def.labelMatch[0]) {
+				const std::size_t ki = static_cast<std::size_t>(def.kind);
+				if (ki < KindFallback.size() && !KindFallback[ki])
+					KindFallback[ki] = &def;
+			}
+		}
+		for (const auto& def : LootFilter::kItemCatalog) add(def, def.displayName);
 	}
 
 	void InitDefaults()
@@ -542,95 +506,79 @@ public:
 		return it != Items.end() ? it->second : kDefault;
 	}
 
-	const ItemSettings& GetItemByIndex(std::int16_t idx) const
-	{
-		static const ItemSettings kDefault{};
-		if (idx >= 0 && static_cast<std::size_t>(idx) < LootFilter::kItemCount) {
-			if (const ItemSettings* p = ItemPtrs[static_cast<std::size_t>(idx)])
-				return *p;
-			return GetItem(LootFilter::kItemCatalog[static_cast<std::size_t>(idx)].id);
-		}
-		return kDefault;
-	}
-
 	ItemSettings& GetItemMut(const char* id)
 	{
 		auto it = Items.find(id);
 		if (it == Items.end()) {
 			ItemSettings s;
-			std::size_t matchedIdx = LootFilter::kItemCount;
-			for (std::size_t i = 0; i < LootFilter::kItemCount; ++i) {
-				const auto& def = LootFilter::kItemCatalog[i];
+			for (const auto& def : LootFilter::kItemCatalog) {
 				if (std::string_view(def.id) == id) {
 					s.color = Colour(def.defaultR, def.defaultG, def.defaultB);
 					s.useGlobalDistance = (s.maxDistance == 0);
-					matchedIdx = i;
 					break;
 				}
 			}
 			it = Items.emplace(id, s).first;
-			if (matchedIdx < LootFilter::kItemCount)
-				ItemPtrs[matchedIdx] = &it->second;
 		}
 		return it->second;
 	}
 
-	// Resolve an entity to its catalog row. Thread-safe: backed by immutable
-	// constexpr-derived lookup tables so the world worker can resolve once per
-	// entity instead of hashing/scanning on every render frame.
-	static const LootFilter::ItemDef* FindItemForEntity(
-		RobRunWorld::Kind kind, const std::string& label)
+	// Resolve an entity to its catalog row. An exact id/name hit wins, but only
+	// when it belongs to the same entity kind; otherwise prefer the longest
+	// label substring among rows of that kind, and fall back to the generic row.
+	// (A loot node called "bank_cash" must not resolve to an inventory item.)
+	const LootFilter::ItemDef* FindItemForEntity(
+		RobRunWorld::Kind kind, const std::string& label) const
 	{
-		const auto& lookup = GetCatalogLookup();
-		const auto& labelIndex = lookup.labelIndex;
-		const auto& anyLabelIndex = lookup.anyLabelIndex;
+		if (LabelIndex.empty())
+			const_cast<LootFilterConfig*>(this)->RebuildIndex();
 
 		if (label.empty()) {
 			const std::size_t ki = static_cast<std::size_t>(kind);
-			return ki < lookup.kindFallback.size() ? lookup.kindFallback[ki] : nullptr;
+			return ki < KindFallback.size() ? KindFallback[ki] : nullptr;
 		}
 
 		if (kind == RobRunWorld::Kind::RandomLoot) {
 			const std::string low = Lower(label);
-			const auto hit = anyLabelIndex.find(low);
-			if (hit != anyLabelIndex.end() &&
+			const auto hit = AnyLabelIndex.find(low);
+			if (hit != AnyLabelIndex.end() &&
 				(hit->second->kind == RobRunWorld::Kind::Loot ||
 				 hit->second->kind == RobRunWorld::Kind::StaticLoot) &&
 				Lower(hit->second->labelMatch) == low)
 				return hit->second;
 			const std::size_t ki = static_cast<std::size_t>(kind);
-			return ki < lookup.kindFallback.size() ? lookup.kindFallback[ki] : nullptr;
+			return ki < KindFallback.size() ? KindFallback[ki] : nullptr;
 		}
 
 		const LootFilter::ItemDef* exact = nullptr;
 		// 1. The row of this exact kind that carries this id/name.
 		const std::string low = Lower(label);
-		auto hit = labelIndex.find(std::to_string((int)kind) + '\x1f' + low);
-		if (hit != labelIndex.end())
+		auto hit = LabelIndex.find(std::to_string((int)kind) + '\x1f' + low);
+		if (hit != LabelIndex.end())
 			return hit->second;
 
 		// 2. Same id with separators removed ("ap_scalar_m_1" -> "ap_scalarm1"),
 		//    which is how the world loot object points at the item.
 		const std::string flat = NormLabel(label);
 		if (!flat.empty()) {
-			auto normKind = labelIndex.find(std::to_string((int)kind) + "\x1f#" + flat);
-			if (normKind != labelIndex.end())
+			auto normKind = LabelIndex.find(std::to_string((int)kind) + "\x1f#" + flat);
+			if (normKind != LabelIndex.end())
 				return normKind->second;
 		}
 
 		// 3. Same label, another kind (loot object vs item), last resort.
-		auto any = anyLabelIndex.find(low);
-		if (any != anyLabelIndex.end())
+		auto any = AnyLabelIndex.find(low);
+		if (any != AnyLabelIndex.end())
 			exact = any->second;
 		if (!exact && !flat.empty()) {
-			auto anyNorm = anyLabelIndex.find("#" + flat);
-			if (anyNorm != anyLabelIndex.end())
+			auto anyNorm = AnyLabelIndex.find("#" + flat);
+			if (anyNorm != AnyLabelIndex.end())
 				exact = anyNorm->second;
 		}
 
 		const std::size_t ki = static_cast<std::size_t>(kind);
 		const LootFilter::ItemDef* fallback =
-			ki < lookup.kindFallback.size() ? lookup.kindFallback[ki] : nullptr;
+			ki < KindFallback.size() ? KindFallback[ki] : nullptr;
 		const LootFilter::ItemDef* best = nullptr;
 		std::size_t bestLen = 0;
 
@@ -648,7 +596,7 @@ public:
 		// identified from the field instead of guessed at.
 		{
 			static std::atomic<int> s_missCount{ 0 };
-			if (s_missCount.load(std::memory_order_relaxed) < 200) {
+			if (s_missCount.load(std::memory_order_relaxed) < 200 && !label.empty()) {
 				static std::mutex s_missMutex;
 				static std::unordered_set<std::string> s_logged;
 				std::lock_guard<std::mutex> lock(s_missMutex);
@@ -659,12 +607,6 @@ public:
 			}
 		}
 		return fallback;
-	}
-
-	static std::int16_t FindCatalogIndex(
-		RobRunWorld::Kind kind, const std::string& label)
-	{
-		return CatalogIndexOf(FindItemForEntity(kind, label));
 	}
 
 	bool IsItemVisible(const char* id) const
@@ -818,7 +760,6 @@ public:
 				item.color.a = val.value(LIT("a"), item.color.a);
 			}
 		}
-		RefreshItemPtrs();
 	}
 
 	json ExportFilterJson() const
@@ -866,7 +807,6 @@ public:
 			item.color.b = val.value("b", item.color.b);
 			item.color.a = val.value("a", item.color.a);
 		}
-		RefreshItemPtrs();
 	}
 
 	std::string ExportCode() const

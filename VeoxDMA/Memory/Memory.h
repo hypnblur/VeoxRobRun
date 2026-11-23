@@ -158,31 +158,53 @@ public:
 	 */
 	uint64_t FindSignature(const char* signature, uint64_t range_start, uint64_t range_end, int PID = 0);
 
+	// Hard low-level master gate checked by Write / AddScatterWriteRequest /
+	// ExecuteWriteScatter / ExecuteScatterWrite.
+	static bool IsMemWriteMasterEnabled();
+
 	/**
-	 * \brief Writes memory to the process
+	 * \brief Writes memory to the process (blocked unless MemWriteMaster is on)
 	 * \param address The address to write to
-	 * \param buffer The buffer to writeze of the buffer
-	 * \return
-	 * \param size The si
+	 * \param buffer The buffer to write
+	 * \param size The size of the buffer
 	 */
 	bool Write(uintptr_t address, void* buffer, size_t size) const;
 	bool Write(uintptr_t address, void* buffer, size_t size, int pid) const;
 
 	/**
-	 * \brief Writes memory to the process using a template
+	 * \brief Writes memory to the process using a template (blocked unless MemWriteMaster is on)
 	 * \param address to write to
 	 * \param value the value you'll write to the address
 	 */
 	template <typename T>
 	bool Write(void* address, T value)
 	{
-		return Write(address, &value, sizeof(T));
+		return Write(reinterpret_cast<uintptr_t>(address), &value, sizeof(T));
 	}
 
 	template <typename T>
 	bool Write(uintptr_t address, T value)
 	{
 		return Write(address, &value, sizeof(T));
+	}
+
+	/**
+	 * \brief Explicit teardown/restore write path used only to revert previously
+	 *        written values when MemWriteMaster is turned off.
+	 */
+	bool WriteRestore(uintptr_t address, void* buffer, size_t size) const;
+	bool WriteRestore(uintptr_t address, void* buffer, size_t size, int pid) const;
+
+	template <typename T>
+	bool WriteRestore(void* address, T value)
+	{
+		return WriteRestore(reinterpret_cast<uintptr_t>(address), &value, sizeof(T));
+	}
+
+	template <typename T>
+	bool WriteRestore(uintptr_t address, T value)
+	{
+		return WriteRestore(address, &value, sizeof(T));
 	}
 
 	/**
@@ -290,6 +312,10 @@ public:
 	template <typename T>
 	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addr, T value) const
 	{
+		if (!IsMemWriteMasterEnabled())
+			return false;
+		if (!(addr > 0x2000000 && addr < 0x7FFFFFFFFFFF))
+			return false;
 		const bool ok = VMMDLL_Scatter_PrepareWrite(handle, addr, reinterpret_cast<PBYTE>(&value), sizeof(value)) != 0;
 		if (!ok)
 		{
