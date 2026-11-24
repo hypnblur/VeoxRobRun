@@ -164,18 +164,33 @@ std::uint64_t g_lastWriteTick = 0;
 std::uint64_t g_targetLockUs = 0;
 Vector3 g_writtenForward{};
 bool g_haveWrittenForward = false;
+float g_lastWrittenRotYaw = 0.f;
+float g_lastWrittenRotPitch = 0.f;
+bool g_haveLastInputAngles = false;
 bool g_writeHealthy = false;
 const char* g_lastVerdict = "-";
 
 struct HumanizeState {
-    int entityId = -1;
-    int chosenBone = 2; // 0=Head, 1=Neck, 2=Chest
-    std::uint64_t nextBoneRollUs = 0;
+    struct BoneRoll {
+        int chosenBone = 2; // 0=Head, 1=Neck, 2=Chest
+        std::uint64_t nextRollUs = 0;
+    };
+    std::unordered_map<int, BoneRoll> boneRolls;
+    int offsetEntityId = -1;
     Vector3 curOffset{};
     Vector3 targetOffset{};
     std::uint64_t nextOffsetRollUs = 0;
     std::uint64_t lastStepUs = 0;
     std::uint32_t rng = 0x9E3779B9u;
+
+    void Reset() {
+        boneRolls.clear();
+        offsetEntityId = -1;
+        curOffset = Vector3{};
+        targetOffset = Vector3{};
+        nextOffsetRollUs = 0;
+        lastStepUs = 0;
+    }
 
     float NextUnit() {
         // xorshift32 -> [-1, 1]
@@ -186,25 +201,32 @@ struct HumanizeState {
     }
 
     int PickHeadOrBodyBone(int entId, std::uint64_t nowUs) {
-        if (entityId != entId || nowUs >= nextBoneRollUs) {
-            entityId = entId;
+        if (boneRolls.size() > 128) boneRolls.clear();
+        BoneRoll& roll = boneRolls[entId];
+        if (roll.nextRollUs == 0 || nowUs >= roll.nextRollUs) {
             // Weighted: ~45% Chest, ~25% Neck, ~30% Head
             const float u = (NextUnit() + 1.0f) * 0.5f;
-            chosenBone = (u < 0.45f) ? 2 : (u < 0.70f ? 1 : 0);
+            roll.chosenBone = (u < 0.45f) ? 2 : (u < 0.70f ? 1 : 0);
             const float holdSec = 1.6f + ((NextUnit() + 1.0f) * 0.5f) * 1.0f; // 1.6..2.6 s
-            nextBoneRollUs = nowUs + static_cast<std::uint64_t>(holdSec * 1.0e6f);
+            roll.nextRollUs = nowUs + static_cast<std::uint64_t>(holdSec * 1.0e6f);
         }
-        return chosenBone;
+        return roll.chosenBone;
     }
 
     Vector3 SampleOffset(int entId, std::uint64_t nowUs, float maxCm) {
         if (maxCm <= 0.05f) {
             curOffset = Vector3{};
+            targetOffset = Vector3{};
+            offsetEntityId = -1;
             return curOffset;
         }
         const float maxM = std::clamp(maxCm, 0.f, 15.f) * 0.01f;
-        if (entityId != entId || nowUs >= nextOffsetRollUs) {
-            entityId = entId;
+        if (offsetEntityId != entId || nowUs >= nextOffsetRollUs) {
+            if (offsetEntityId != entId) {
+                curOffset = Vector3{};
+                lastStepUs = 0;
+            }
+            offsetEntityId = entId;
             targetOffset = Vector3(
                 NextUnit() * maxM,
                 NextUnit() * maxM * 0.85f,
@@ -839,19 +861,24 @@ struct WriteOutcome {
     bool scatter = false;
 };
 
-bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
-    float yaw, float pitch,
-    WriteOutcome& outcome, Vector3* liveForwardOut = nullptr,
-    std::uintptr_t lookDirModel = 0, std::uintptr_t lookDirDirect = 0,
-    std::uintptr_t playerRotInput = 0)
-{
-    outcome = WriteOutcome{};
-    if (cameraModel <= 0x10000 || battleModel <= 0x10000) return false;
+struct ValidatedCameraState {
+    bool valid = false;
+    std::uintptr_t cameraModel = 0;
+    std::uintptr_t lookDirModel = 0;
+    std::uintptr_t lookDirDirect = 0;
+    std::uintptr_t playerRotInput = 0;
+    Vector3 liveForward{};
+    float lookDirectYaw = 0.f;
+    float rotYaw = 0.f;
+    float rotPitch = 0.f;
+};
 
-    Vector3 forward = EulerToForward(yaw, pitch);
-    Vector3 right = RightFromYaw(yaw);
-    Vector3 up = UpFromYawPitch(yaw, pitch);
-    AimQuat q = QuatFromBasis(right, up, forward);
+ValidatedCameraState ReadAndValidateCameraState(std::uintptr_t battleModel,
+    std::uintptr_t cameraModel, std::uintptr_t lookDirModel,
+    std::uintptr_t lookDirDirect, std::uintptr_t playerRotInput)
+{
+    ValidatedCameraState st{};
+    if (cameraModel <= 0x10000 || battleModel <= 0x10000) return st;
 
     // Validate every target in one scatter transaction before writing a byte.
     // After a level change the cached pointers can still satisfy the old
@@ -869,7 +896,7 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
     float rotPitch = 0.f;
     {
         Memory::ScopedScatter scatter(TargetProcess);
-        if (!scatter.handle) return false;
+        if (!scatter.handle) return st;
         TargetProcess.AddScatterReadRequest(scatter,
             battleModel + rr::BattleModel::BattleCameraModel, &liveCamera,
             sizeof(liveCamera));
@@ -904,21 +931,21 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
         }
         TargetProcess.ExecuteReadScatter(scatter);
     }
-    if (liveForwardOut) *liveForwardOut = liveForward;
+    st.liveForward = liveForward;
 
     // The camera object must still be the one BattleModel currently owns. This
     // is the hard gate that stops writes into a camera freed by a level change.
-    if (liveCamera != cameraModel) return false;
+    if (liveCamera != cameraModel) return st;
 
     const float quatLength2 = liveQuat[0] * liveQuat[0] + liveQuat[1] * liveQuat[1] +
         liveQuat[2] * liveQuat[2] + liveQuat[3] * liveQuat[3];
-    if (!std::isfinite(quatLength2) || std::fabs(quatLength2 - 1.f) > 0.15f) return false;
-    if (!Finite(liveForward)) return false;
+    if (!std::isfinite(quatLength2) || std::fabs(quatLength2 - 1.f) > 0.15f) return st;
+    if (!Finite(liveForward)) return st;
     const float forwardLength = std::sqrt(
         liveForward.x * liveForward.x + liveForward.y * liveForward.y +
         liveForward.z * liveForward.z);
     if (!std::isfinite(forwardLength) || forwardLength < 0.9f || forwardLength > 1.1f)
-        return false;
+        return st;
 
     // Auxiliary input models are optional. If one no longer looks valid, drop
     // that target instead of writing into a reused object.
@@ -928,21 +955,13 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
         return std::isfinite(len2) && len2 > 0.64f && len2 < 1.44f;
     };
     // Yaw in PlayerRotationInputModel / LookDirectionModel can accumulate past
-    // +-2pi across multiple full turns in a match. Rejecting |yaw| > 7.0 rad
-    // silently dropped playerRotInput after ~1.1 turns, leaving the game to
-    // overwrite cameraModel every frame (jitter + locked mouse). Allow large
-    // finite accumulated yaw and unwrap the written yaw to the nearest 2pi turn.
+    // +-2pi across multiple full turns in a match. Allow large finite accumulated
+    // yaw and unwrap the written yaw to the nearest 2pi turn on commit.
     const auto yawOk = [](float angle) {
         return std::isfinite(angle) && std::fabs(angle) <= 10000.0f;
     };
     const auto pitchOk = [](float angle) {
         return std::isfinite(angle) && std::fabs(angle) <= 1.75f;
-    };
-    const auto nearestTurnYaw = [](float currentYaw, float targetYawRad) {
-        float d = std::fmod(targetYawRad - currentYaw, 2.f * kPi);
-        if (d > kPi) d -= 2.f * kPi;
-        if (d < -kPi) d += 2.f * kPi;
-        return currentYaw + d;
     };
     if (lookDirModel > 0x10000 && !unitVector(lookModelValue))
         lookDirModel = 0;
@@ -954,42 +973,72 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
         (!yawOk(rotYaw) || !pitchOk(rotPitch)))
         playerRotInput = 0;
 
-    float writeLookYaw = (lookDirDirect > 0x10000) ? nearestTurnYaw(lookDirectYaw, yaw) : yaw;
-    float writeRotYaw  = (playerRotInput > 0x10000) ? nearestTurnYaw(rotYaw, yaw) : yaw;
+    st.valid = true;
+    st.cameraModel = cameraModel;
+    st.lookDirModel = lookDirModel;
+    st.lookDirDirect = lookDirDirect;
+    st.playerRotInput = playerRotInput;
+    st.lookDirectYaw = lookDirectYaw;
+    st.rotYaw = rotYaw;
+    st.rotPitch = rotPitch;
+    return st;
+}
+
+bool CommitCameraAngles(const ValidatedCameraState& st, float yaw, float pitch,
+    WriteOutcome& outcome, float* writtenRotYawOut = nullptr)
+{
+    outcome = WriteOutcome{};
+    if (!st.valid || st.cameraModel <= 0x10000) return false;
+
+    Vector3 forward = EulerToForward(yaw, pitch);
+    Vector3 right = RightFromYaw(yaw);
+    Vector3 up = UpFromYawPitch(yaw, pitch);
+    AimQuat q = QuatFromBasis(right, up, forward);
+
+    const auto nearestTurnYaw = [](float currentYaw, float targetYawRad) {
+        float d = std::fmod(targetYawRad - currentYaw, 2.f * kPi);
+        if (d > kPi) d -= 2.f * kPi;
+        if (d < -kPi) d += 2.f * kPi;
+        return currentYaw + d;
+    };
+
+    float writeLookYaw = (st.lookDirDirect > 0x10000) ? nearestTurnYaw(st.lookDirectYaw, yaw) : yaw;
+    float writeRotYaw  = (st.playerRotInput > 0x10000) ? nearestTurnYaw(st.rotYaw, yaw) : yaw;
+    if (writtenRotYawOut) *writtenRotYawOut = writeRotYaw;
 
     outcome.attempted = true;
 
     Memory::ScopedScatter scatter(TargetProcess);
     if (scatter.handle) {
         TargetProcess.AddScatterWriteRequest(scatter,
-            cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
+            st.cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
         TargetProcess.AddScatterWriteRequest(scatter,
-            cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q));
+            st.cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q));
         TargetProcess.AddScatterWriteRequest(scatter,
-            cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward));
+            st.cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward));
         TargetProcess.AddScatterWriteRequest(scatter,
-            cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right));
+            st.cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right));
         TargetProcess.AddScatterWriteRequest(scatter,
-            cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up));
+            st.cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up));
         // Write the forward vector to the LookDirection model so the game's
         // input pipeline reads the same direction we set on the camera.
-        if (lookDirModel > 0x10000)
+        if (st.lookDirModel > 0x10000)
             TargetProcess.AddScatterWriteRequest(scatter,
-                lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
+                st.lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
         // BCM+0x70 LookDirectionModel: _value(+0x10), _yaw(+0x1C), _pitch(+0x20)
-        if (lookDirDirect > 0x10000) {
+        if (st.lookDirDirect > 0x10000) {
             TargetProcess.AddScatterWriteRequest(scatter,
-                lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
+                st.lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
             TargetProcess.AddScatterWriteRequest(scatter,
-                lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
+                st.lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
             TargetProcess.AddScatterWriteRequest(scatter,
-                lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
+                st.lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
         }
-        if (playerRotInput > 0x10000) {
+        if (st.playerRotInput > 0x10000) {
             TargetProcess.AddScatterWriteRequest(scatter,
-                playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
+                st.playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
             TargetProcess.AddScatterWriteRequest(scatter,
-                playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
+                st.playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
         }
         if (TargetProcess.ExecuteScatterWrite(scatter)) {
             outcome.scatter = true;
@@ -998,26 +1047,26 @@ bool WriteCameraAngles(std::uintptr_t battleModel, std::uintptr_t cameraModel,
     }
 
     bool ok = TargetProcess.Write(
-        cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
+        st.cameraModel + rr::BattleCameraModelOffsets::Orientation, &q, sizeof(q));
     ok = TargetProcess.Write(
-        cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q)) && ok;
+        st.cameraModel + rr::BattleCameraModelOffsets::LookQuat, &q, sizeof(q)) && ok;
     ok = TargetProcess.Write(
-        cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward)) && ok;
+        st.cameraModel + rr::BattleCameraModelOffsets::Forward, &forward, sizeof(forward)) && ok;
     ok = TargetProcess.Write(
-        cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right)) && ok;
+        st.cameraModel + rr::BattleCameraModelOffsets::Right, &right, sizeof(right)) && ok;
     ok = TargetProcess.Write(
-        cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up)) && ok;
-    if (lookDirModel > 0x10000)
+        st.cameraModel + rr::BattleCameraModelOffsets::Up, &up, sizeof(up)) && ok;
+    if (st.lookDirModel > 0x10000)
         TargetProcess.Write(
-            lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
-    if (lookDirDirect > 0x10000) {
-        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
-        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
-        TargetProcess.Write(lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
+            st.lookDirModel + rr::ReferenceData::Value, &forward, sizeof(forward));
+    if (st.lookDirDirect > 0x10000) {
+        TargetProcess.Write(st.lookDirDirect + rr::LookDirectionModel::Value, &forward, sizeof(forward));
+        TargetProcess.Write(st.lookDirDirect + rr::LookDirectionModel::Yaw, &writeLookYaw, sizeof(writeLookYaw));
+        TargetProcess.Write(st.lookDirDirect + rr::LookDirectionModel::Pitch, &pitch, sizeof(pitch));
     }
-    if (playerRotInput > 0x10000) {
-        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
-        TargetProcess.Write(playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
+    if (st.playerRotInput > 0x10000) {
+        TargetProcess.Write(st.playerRotInput + rr::PlayerRotationInputModel::Yaw, &writeRotYaw, sizeof(writeRotYaw));
+        TargetProcess.Write(st.playerRotInput + rr::PlayerRotationInputModel::Pitch, &pitch, sizeof(pitch));
     }
     return ok;
 }
@@ -2172,6 +2221,7 @@ void Tick()
         g_cursorCurve.Reset();
         g_lastWriteTick = 0;
         g_haveWrittenForward = false;
+        g_haveLastInputAngles = false;
         g_writeHealthy = false;
         g_lastVerdict = "-";
     };
@@ -2250,6 +2300,7 @@ void Tick()
     if (snapshot->sessionGeneration != g_lastSessionGeneration) {
         g_lastSessionGeneration = snapshot->sessionGeneration;
         resetSmoothing();
+        g_humanize.Reset();
         g_lastTarget = -1;
         ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
@@ -2418,12 +2469,6 @@ void Tick()
                 }
             }
         }
-        if (cfg.HumanizeOffsetCm > 0.05f) {
-            const Vector3 hOff = g_humanize.SampleOffset(ent.entityId, SteadyUs(), cfg.HumanizeOffsetCm);
-            point.x += hOff.x;
-            point.y += hOff.y;
-            point.z += hOff.z;
-        }
         int leadMs = 0;
         const char* predictionSource = "off";
 
@@ -2530,6 +2575,18 @@ void Tick()
     dbg.leadMs = bestLeadMs;
     dbg.predictionSource = bestPredictionSource;
 
+    // Apply slow humanized bone wander ONLY to the chosen target (never inside
+    // the candidate loop, where multiple entities would overwrite state at 250 Hz).
+    if (cfg.HumanizeOffsetCm > 0.05f) {
+        const Vector3 hOff = g_humanize.SampleOffset(bestId, SteadyUs(), cfg.HumanizeOffsetCm);
+        bestPoint.x += hOff.x;
+        bestPoint.y += hOff.y;
+        bestPoint.z += hOff.z;
+        Vector2 shiftedScreen{};
+        if (RobRunReader::ProjectWorld(viewProjection, bestPoint, width, height, shiftedScreen))
+            bestScreen = shiftedScreen;
+    }
+
     const float dx = bestScreen.x - centerX;
     const float dy = bestScreen.y - centerY;
     dbg.dx = dx;
@@ -2580,15 +2637,34 @@ void Tick()
         const bool sessionSettled =
             snapshot->sessionChangedMs == 0 ||
             (now >= snapshot->sessionChangedMs && now - snapshot->sessionChangedMs >= 2000);
+        const bool instantSnap = (eff.smoothness <= 1 && cfg.ResponseMs == 0);
+        const float screenErrPx = std::hypot(dx, dy);
+
         if (!validRoots) {
             g_writeHealthy = false;
+            g_haveLastInputAngles = false;
             g_lastVerdict = "waiting for session";
         } else if (!freshSnapshot) {
             g_writeHealthy = false;
+            g_haveLastInputAngles = false;
             g_lastVerdict = "stale snapshot";
         } else if (now < g_writeBlockedUntil || !sessionSettled) {
             g_writeHealthy = false;
+            g_haveLastInputAngles = false;
             g_lastVerdict = "level transition";
+        } else if (!instantSnap && cfg.DeadzonePx > 0.1f && screenErrPx <= cfg.DeadzonePx) {
+            // Deadzone: once the crosshair is already within DeadzonePx of the
+            // target point, pause writes cleanly without falling through to
+            // CursorFallback (SendRelative). Clear input tracking so resuming
+            // outside the deadzone picks up smoothly from the live camera.
+            g_carryYaw = g_carryPitch = 0.f;
+            g_smoothInit = false;
+            g_haveLastInputAngles = false;
+            g_haveWrittenForward = false;
+            dbg.writeOk = true;
+            dbg.writeState = "in deadzone";
+            dbg.reason = "in deadzone";
+            return;
         } else if (const std::uint64_t nowUs = SteadyUs();
                    g_lastWriteTick == 0 || nowUs - g_lastWriteTick >= kWriteIntervalUs) {
             // g_lastWriteTick is steady_clock microseconds. dt is the real
@@ -2598,7 +2674,6 @@ void Tick()
                 : std::clamp(static_cast<float>(nowUs - g_lastWriteTick) * 0.001f, 0.5f, 25.f);
             g_lastWriteTick = nowUs;
 
-            const float screenErrPx = std::hypot(dx, dy);
             const bool targetChanged = (!g_smoothInit || g_smoothTarget != bestId);
             if (targetChanged) {
                 g_carryYaw = g_carryPitch = 0.f;
@@ -2607,138 +2682,161 @@ void Tick()
                 g_smoothInit = true;
                 g_smoothTarget = bestId;
                 g_targetLockUs = nowUs;
+                g_haveLastInputAngles = false;
             }
 
-            // Deadzone: once the crosshair is already within DeadzonePx of the
-            // target point, stop writing micro-corrections so manual aim feels
-            // completely natural with zero micro-stutter.
-            if (cfg.DeadzonePx > 0.1f && screenErrPx <= cfg.DeadzonePx) {
-                g_carryYaw = g_carryPitch = 0.f;
-                dbg.reason = "in deadzone";
-                return;
-            }
-
-            const float gain = 1.f - std::exp(-dtMs / responseMs);
-            const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
-            const bool instantSnap = (eff.smoothness <= 1 && cfg.ResponseMs == 0);
-
-            // Mouse-cooperative live-camera tracking: always step FROM the
-            // game's current live camera orientation rather than an internal
-            // stale angle, so moving your own mouse never fights the aimbot.
-            if (instantSnap) {
-                g_curYaw = targetYaw;
-                g_curPitch = targetPitch;
-            } else {
-                const Vector3 liveFwd = haveFreshCamera
-                    ? freshCamera.forward
-                    : (snapshot->camera.valid ? snapshot->camera.forward : EulerToForward(g_curYaw, g_curPitch));
-                const float liveHoriz = std::hypot(liveFwd.x, liveFwd.z);
-                if (Finite(liveFwd) && liveHoriz > 1.0e-4f) {
-                    g_curYaw = std::atan2(liveFwd.x, liveFwd.z);
-                    g_curPitch = std::atan2(-liveFwd.y, liveHoriz);
-                }
-
-                float dYaw = targetYaw - g_curYaw;
-                while (dYaw > kPi) dYaw -= 2.f * kPi;
-                while (dYaw < -kPi) dYaw += 2.f * kPi;
-                const float dPitch = targetPitch - g_curPitch;
-                const float dtSec = dtMs * 0.001f;
-                const float speedMul = std::clamp(cfg.BezierSpeed, 0.25f, 3.f);
-
-                if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
-                if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
-
-                float stepYaw = 0.f;
-                float stepPitch = 0.f;
-
-                if (eff.smoothAlgorithm == 1) {
-                    // Linear: constant angular velocity clamped to exact target arrival.
-                    const float angDist = std::hypot(dYaw, dPitch);
-                    if (angDist > 1e-6f) {
-                        const float radPerSec = (65.f / (std::max)(8.f, responseMs)) * speedMul;
-                        const float step = (std::min)(angDist, radPerSec * dtSec);
-                        stepYaw = (dYaw / angDist) * step + g_carryYaw;
-                        stepPitch = (dPitch / angDist) * step + g_carryPitch;
-                    }
-                } else if (eff.smoothAlgorithm == 2) {
-                    // Bezier: cubic S-curve progress with lateral perpendicular arc.
-                    const float angDist = std::hypot(dYaw, dPitch);
-                    if (angDist > 1e-6f) {
-                        const float durationSec = std::clamp((responseMs * 0.0045f) / speedMul, 0.035f, 0.90f);
-                        const float prevT = g_bezierT;
-                        g_bezierT = (std::min)(1.f, g_bezierT + dtSec / durationSec);
-                        auto cubicP = [](float u) -> float {
-                            const float inv = 1.f - u;
-                            return 3.f * inv * inv * u * 0.15f + 3.f * inv * u * u * 0.85f + u * u * u;
-                        };
-                        const float pPrev = cubicP(prevT);
-                        const float pCur = cubicP(g_bezierT);
-                        const float remFrac = (std::max)(1e-3f, 1.f - pPrev);
-                        const float stepFrac = (g_bezierT >= 0.999f)
-                            ? (std::min)(1.f, 1.f - std::exp(-dtMs / (std::max)(6.f, responseMs * 0.6f)))
-                            : std::clamp((pCur - pPrev) / remFrac, 0.f, 1.f);
-
-                        const float bend = std::clamp(cfg.BezierBend, 0.f, 1.f);
-                        const float inv = 1.f - g_bezierT;
-                        const float arc = 3.f * inv * inv * g_bezierT + 3.f * inv * g_bezierT * g_bezierT * 0.65f;
-                        const float nyaw = -dPitch / angDist;
-                        const float npitch = dYaw / angDist;
-                        const float lat = g_bezierBendSign * bend * 0.35f * angDist * arc * (1.f - g_bezierT);
-
-                        stepYaw = (dYaw + nyaw * lat) * stepFrac + g_carryYaw;
-                        stepPitch = (dPitch + npitch * lat) * stepFrac + g_carryPitch;
-                    }
-                } else {
-                    // EMA (0): exponential convergence
-                    stepYaw = dYaw * gain + g_carryYaw;
-                    stepPitch = dPitch * verticalGain + g_carryPitch;
-                }
-
-                // Soft entry ramp (140 ms smoothstep on new target) + FOV edge falloff
-                // so targets entering the outer FOV ring don't yank suddenly.
-                if (cfg.SoftEntry) {
-                    const float lockMs = (nowUs >= g_targetLockUs)
-                        ? static_cast<float>(nowUs - g_targetLockUs) * 0.001f
-                        : 140.f;
-                    const float u = std::clamp(lockMs / 140.f, 0.f, 1.f);
-                    const float entryScale = 0.20f + 0.80f * (u * u * (3.f - 2.f * u));
-                    const float fovFrac = (radiusPixels > 1.f)
-                        ? std::clamp(screenErrPx / radiusPixels, 0.f, 1.f)
-                        : 0.f;
-                    const float edgeScale = 0.35f + 0.65f * std::pow(1.f - fovFrac, 1.5f);
-                    const float assistScale = entryScale * edgeScale;
-                    stepYaw *= assistScale;
-                    stepPitch *= assistScale;
-                }
-
-                g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
-                g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
-                g_curYaw += stepYaw;
-                g_curPitch += stepPitch;
-                g_curPitch = std::clamp(g_curPitch, -1.55f, 1.55f);
-            }
-
-            WriteOutcome outcome;
-            Vector3 liveForward{};
-            g_writeHealthy = WriteCameraAngles(battleModel, cameraModel, g_curYaw,
-                g_curPitch, outcome, &liveForward,
+            // Single scatter validation read (same DMA budget as before). Reading
+            // PlayerRotationInputModel here lets us apply genuine user mouse deltas
+            // without resetting to the 1-2 frame lagged native GPU camera.
+            const ValidatedCameraState camState = ReadAndValidateCameraState(
+                battleModel, cameraModel,
                 snapshot->lookDirectionModel, snapshot->lookDirDirect,
                 snapshot->playerRotationInput);
-            dbg.tgtYawDeg = g_curYaw * 180.f / kPi;
-            dbg.tgtPitchDeg = g_curPitch * 180.f / kPi;
 
-            // Verdict on the previous write using the forward the scatter
-            // validation read fetched (before the new write replaced it).
-            if (g_haveWrittenForward && Finite(liveForward))
-                g_lastVerdict = CompareToWritten(g_writtenForward, liveForward);
-
-            if (!g_writeHealthy) {
+            if (!camState.valid) {
+                g_writeHealthy = false;
+                g_haveLastInputAngles = false;
                 g_lastVerdict = "write failed";
             } else {
-                g_writtenForward = EulerToForward(g_curYaw, g_curPitch);
-                g_haveWrittenForward = true;
-                if (g_lastVerdict[0] == '-' || g_lastVerdict[0] == '\0')
-                    g_lastVerdict = "writing";
+                const float gain = 1.f - std::exp(-dtMs / responseMs);
+                const float verticalGain = 1.f - std::exp(-dtMs / (responseMs * 0.8f));
+
+                if (instantSnap) {
+                    g_curYaw = targetYaw;
+                    g_curPitch = targetPitch;
+                } else {
+                    if (targetChanged) {
+                        const Vector3 initFwd = Finite(camState.liveForward)
+                            ? camState.liveForward
+                            : (haveFreshCamera ? freshCamera.forward
+                                               : (snapshot->camera.valid ? snapshot->camera.forward
+                                                                         : EulerToForward(targetYaw, targetPitch)));
+                        const float initHoriz = std::hypot(initFwd.x, initFwd.z);
+                        if (Finite(initFwd) && initHoriz > 1.0e-4f) {
+                            g_curYaw = std::atan2(initFwd.x, initFwd.z);
+                            g_curPitch = std::atan2(-initFwd.y, initHoriz);
+                        }
+                    } else if (camState.playerRotInput > 0x10000 && g_haveLastInputAngles) {
+                        // Mouse-cooperative delta tracking: only fold in real user
+                        // mouse movement written to PlayerRotationInputModel since
+                        // our last write (zero GPU/Cinemachine frame lag).
+                        float userDeltaYaw = std::fmod(camState.rotYaw - g_lastWrittenRotYaw, 2.f * kPi);
+                        if (userDeltaYaw > kPi) userDeltaYaw -= 2.f * kPi;
+                        if (userDeltaYaw < -kPi) userDeltaYaw += 2.f * kPi;
+                        const float userDeltaPitch = camState.rotPitch - g_lastWrittenRotPitch;
+                        if (std::isfinite(userDeltaYaw) && std::fabs(userDeltaYaw) < 1.5f)
+                            g_curYaw += userDeltaYaw;
+                        if (std::isfinite(userDeltaPitch) && std::fabs(userDeltaPitch) < 1.0f)
+                            g_curPitch = std::clamp(g_curPitch + userDeltaPitch, -1.55f, 1.55f);
+                    }
+
+                    float dYaw = targetYaw - g_curYaw;
+                    while (dYaw > kPi) dYaw -= 2.f * kPi;
+                    while (dYaw < -kPi) dYaw += 2.f * kPi;
+                    const float dPitch = targetPitch - g_curPitch;
+                    const float dtSec = dtMs * 0.001f;
+                    const float speedMul = std::clamp(cfg.BezierSpeed, 0.25f, 3.f);
+
+                    if (dYaw * g_carryYaw < 0.f) g_carryYaw = 0.f;
+                    if (dPitch * g_carryPitch < 0.f) g_carryPitch = 0.f;
+
+                    float stepYaw = 0.f;
+                    float stepPitch = 0.f;
+
+                    if (eff.smoothAlgorithm == 1) {
+                        // Linear: constant angular velocity clamped to exact target arrival.
+                        const float angDist = std::hypot(dYaw, dPitch);
+                        if (angDist > 1e-6f) {
+                            const float radPerSec = (65.f / (std::max)(8.f, responseMs)) * speedMul;
+                            const float step = (std::min)(angDist, radPerSec * dtSec);
+                            stepYaw = (dYaw / angDist) * step + g_carryYaw;
+                            stepPitch = (dPitch / angDist) * step + g_carryPitch;
+                        }
+                    } else if (eff.smoothAlgorithm == 2) {
+                        // Bezier: cubic S-curve progress with lateral perpendicular arc.
+                        const float angDist = std::hypot(dYaw, dPitch);
+                        if (angDist > 1e-6f) {
+                            const float durationSec = std::clamp((responseMs * 0.0045f) / speedMul, 0.035f, 0.90f);
+                            const float prevT = g_bezierT;
+                            g_bezierT = (std::min)(1.f, g_bezierT + dtSec / durationSec);
+                            auto cubicP = [](float u) -> float {
+                                const float inv = 1.f - u;
+                                return 3.f * inv * inv * u * 0.15f + 3.f * inv * u * u * 0.85f + u * u * u;
+                            };
+                            const float pPrev = cubicP(prevT);
+                            const float pCur = cubicP(g_bezierT);
+                            const float remFrac = (std::max)(1e-3f, 1.f - pPrev);
+                            const float stepFrac = (g_bezierT >= 0.999f)
+                                ? (std::min)(1.f, 1.f - std::exp(-dtMs / (std::max)(6.f, responseMs * 0.6f)))
+                                : std::clamp((pCur - pPrev) / remFrac, 0.f, 1.f);
+
+                            const float bend = std::clamp(cfg.BezierBend, 0.f, 1.f);
+                            const float inv = 1.f - g_bezierT;
+                            const float arc = 3.f * inv * inv * g_bezierT + 3.f * inv * g_bezierT * g_bezierT * 0.65f;
+                            const float nyaw = -dPitch / angDist;
+                            const float npitch = dYaw / angDist;
+                            const float lat = g_bezierBendSign * bend * 0.35f * angDist * arc * (1.f - g_bezierT);
+
+                            stepYaw = (dYaw + nyaw * lat) * stepFrac + g_carryYaw;
+                            stepPitch = (dPitch + npitch * lat) * stepFrac + g_carryPitch;
+                        }
+                    } else {
+                        // EMA (0): exponential convergence
+                        stepYaw = dYaw * gain + g_carryYaw;
+                        stepPitch = dPitch * verticalGain + g_carryPitch;
+                    }
+
+                    // Soft entry ramp (100 ms smoothstep on new target) + gentle FOV edge falloff.
+                    if (cfg.SoftEntry) {
+                        const float lockMs = (nowUs >= g_targetLockUs)
+                            ? static_cast<float>(nowUs - g_targetLockUs) * 0.001f
+                            : 100.f;
+                        const float u = std::clamp(lockMs / 100.f, 0.f, 1.f);
+                        const float entryScale = 0.45f + 0.55f * (u * u * (3.f - 2.f * u));
+                        const float fovFrac = (radiusPixels > 1.f)
+                            ? std::clamp(screenErrPx / radiusPixels, 0.f, 1.f)
+                            : 0.f;
+                        const float edgeScale = 0.65f + 0.35f * (1.f - fovFrac);
+                        const float assistScale = entryScale * edgeScale;
+                        stepYaw *= assistScale;
+                        stepPitch *= assistScale;
+                    }
+
+                    g_carryYaw = stepYaw - std::trunc(stepYaw * 1.0e4f) / 1.0e4f;
+                    g_carryPitch = stepPitch - std::trunc(stepPitch * 1.0e4f) / 1.0e4f;
+                    g_curYaw += stepYaw;
+                    while (g_curYaw > kPi) g_curYaw -= 2.f * kPi;
+                    while (g_curYaw < -kPi) g_curYaw += 2.f * kPi;
+                    g_curPitch = std::clamp(g_curPitch + stepPitch, -1.55f, 1.55f);
+                }
+
+                WriteOutcome outcome;
+                float writtenRotYaw = 0.f;
+                g_writeHealthy = CommitCameraAngles(camState, g_curYaw, g_curPitch, outcome, &writtenRotYaw);
+                dbg.tgtYawDeg = g_curYaw * 180.f / kPi;
+                dbg.tgtPitchDeg = g_curPitch * 180.f / kPi;
+
+                // Verdict on the previous write using the forward the scatter
+                // validation read fetched (before the new write replaced it).
+                if (g_haveWrittenForward && Finite(camState.liveForward))
+                    g_lastVerdict = CompareToWritten(g_writtenForward, camState.liveForward);
+
+                if (!g_writeHealthy) {
+                    g_haveLastInputAngles = false;
+                    g_lastVerdict = "write failed";
+                } else {
+                    g_writtenForward = EulerToForward(g_curYaw, g_curPitch);
+                    g_haveWrittenForward = true;
+                    if (camState.playerRotInput > 0x10000) {
+                        g_lastWrittenRotYaw = writtenRotYaw;
+                        g_lastWrittenRotPitch = g_curPitch;
+                        g_haveLastInputAngles = true;
+                    } else {
+                        g_haveLastInputAngles = false;
+                    }
+                    if (g_lastVerdict[0] == '-' || g_lastVerdict[0] == '\0')
+                        g_lastVerdict = "writing";
+                }
             }
         }
 

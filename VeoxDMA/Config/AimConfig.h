@@ -146,9 +146,9 @@ public:
 	int TargetSwitchDelay = 200;  // ms before allowing a new target (0 = instant)
 
 	// --- Natural Aim Assist / Humanization -----------------------------
-	float DeadzonePx = 3.0f;       // 0..25 px: stop pulling once crosshair is already on target
-	float HumanizeOffsetCm = 3.0f; // 0..10 cm: slow wandering offset around the bone
-	bool SoftEntry = true;         // gentle ramp-in + FOV edge falloff on target entry
+	float DeadzonePx = 0.0f;       // 0..25 px: stop pulling once crosshair is already on target
+	float HumanizeOffsetCm = 0.0f; // 0..10 cm: slow wandering offset around the bone
+	bool SoftEntry = false;        // gentle ramp-in + FOV edge falloff on target entry
 
 	// --- Recoil / spread suppression ----------------------------------
 	bool NoRecoil = false;
