@@ -2177,8 +2177,10 @@ static bool ReadIntHashSet(std::uintptr_t object, std::vector<std::int32_t>& out
     const std::uintptr_t slots = ReadPtr(object + rr::HashSet::slots);
     const std::int32_t lastIdx = RobRunMemory::ReadInt32(object + rr::HashSet::lastIndex);
     const std::int32_t count = RobRunMemory::ReadInt32(object + rr::HashSet::count);
-    const std::int32_t limit = (lastIdx > 0 && lastIdx <= 64) ? lastIdx : count;
+    std::int32_t limit = (lastIdx > 0 && lastIdx <= 64) ? lastIdx : count;
     if (slots <= 0x10000 || limit <= 0 || limit > 64) return false;
+    const std::int64_t arrLen = RobRunMemory::ReadInt64(slots + rr::Array::max_length);
+    if (arrLen > 0 && arrLen < limit) limit = static_cast<std::int32_t>(arrLen);
     bool any = false;
     for (std::int32_t i = 0; i < limit; ++i) {
         const std::uintptr_t slot = slots + rr::Array::vector +
@@ -2200,8 +2202,10 @@ static bool ReadLongHashSet(std::uintptr_t object, std::vector<std::uint64_t>& o
     const std::uintptr_t slots = ReadPtr(object + rr::HashSet::slots);
     const std::int32_t lastIdx = RobRunMemory::ReadInt32(object + rr::HashSet::lastIndex);
     const std::int32_t count = RobRunMemory::ReadInt32(object + rr::HashSet::count);
-    const std::int32_t limit = (lastIdx > 0 && lastIdx <= 64) ? lastIdx : count;
+    std::int32_t limit = (lastIdx > 0 && lastIdx <= 64) ? lastIdx : count;
     if (slots <= 0x10000 || limit <= 0 || limit > 64) return false;
+    const std::int64_t arrLen = RobRunMemory::ReadInt64(slots + rr::Array::max_length);
+    if (arrLen > 0 && arrLen < limit) limit = static_cast<std::int32_t>(arrLen);
     bool any = false;
     for (std::int32_t i = 0; i < limit; ++i) {
         const std::uintptr_t slot = slots + rr::Array::vector +
@@ -2217,9 +2221,82 @@ static bool ReadLongHashSet(std::uintptr_t object, std::vector<std::uint64_t>& o
     return any;
 }
 
+static bool ReadClientPartyModel(std::uintptr_t partyModel, PartyMemberIds& ids)
+{
+    if (partyModel <= 0x10000) return false;
+    bool found = false;
+
+    // Client PartyModel (TypeDefIndex 10467):
+    //   +0x38: Dictionary<long, PartyMemberModel> _actualPartyMemberModels
+    //   +0x40: List<long> _actualMembersAddedOrderList
+    //   +0x60: bool <HasParty>k__BackingField
+    // First read _actualMembersAddedOrderList (+0x40, List<long>)
+    const std::uintptr_t orderList = ReadPtr(partyModel + 0x40);
+    if (orderList > 0x10000) {
+        const std::uintptr_t items = ReadPtr(orderList + rr::List::items);
+        const std::int32_t count = RobRunMemory::ReadInt32(orderList + rr::List::count);
+        if (items > 0x10000 && count > 0 && count <= 64) {
+            const std::int64_t arrLen = RobRunMemory::ReadInt64(items + rr::Array::max_length);
+            const std::int32_t limit = (arrLen > 0 && arrLen < count) ? static_cast<std::int32_t>(arrLen) : count;
+            for (std::int32_t i = 0; i < limit; ++i) {
+                const std::int64_t pubId = RobRunMemory::ReadInt64(
+                    items + rr::Array::vector + static_cast<std::uintptr_t>(i) * 8);
+                if (pubId > 0) {
+                    ids.publicIds.push_back(static_cast<std::uint64_t>(pubId));
+                    found = true;
+                }
+            }
+        }
+    }
+
+    // Also read _actualPartyMemberModels (+0x38, Dictionary<long, PartyMemberModel>)
+    // for both publicId keys and BattlePartyMemberData.EntityId (+0x38 -> +0x40 -> +0x18).
+    const std::uintptr_t memberDict = ReadPtr(partyModel + 0x38);
+    if (memberDict > 0x10000) {
+        const std::uintptr_t entries = ReadPtr(memberDict + rr::Dict::entries);
+        const std::int32_t count = RobRunMemory::ReadInt32(memberDict + rr::Dict::count);
+        if (entries > 0x10000 && count > 0 && count <= 64) {
+            for (std::int32_t i = 0; i < count; ++i) {
+                const std::uintptr_t entry = entries + rr::Array::vector +
+                    static_cast<std::uintptr_t>(i) * rr::Dict::entry_stride;
+                const std::int32_t next = RobRunMemory::ReadInt32(entry + rr::Dict::entry_next);
+                if (next < rr::Dict::entry_allocated_min) continue;
+                const std::int64_t keyPubId = RobRunMemory::ReadInt64(entry + rr::Dict::entry_key);
+                if (keyPubId > 0) {
+                    ids.publicIds.push_back(static_cast<std::uint64_t>(keyPubId));
+                    found = true;
+                }
+                const std::uintptr_t memberModel = ReadPtr(entry + rr::Dict::entry_value);
+                if (memberModel > 0x10000) {
+                    // PartyMemberModel._battlePartyMemberData (+0x38) -> <EntityId> (+0x40) -> wrapper_value (+0x18)
+                    const std::uintptr_t battleData = ReadPtr(memberModel + 0x38);
+                    if (battleData > 0x10000) {
+                        const std::uintptr_t eidWrap = ReadPtr(battleData + 0x40);
+                        if (eidWrap > 0x10000) {
+                            const std::int32_t eid = RobRunMemory::ReadInt32(
+                                eidWrap + rr::BattleCharacterSlotData::wrapper_value);
+                            if (eid > 0) {
+                                ids.entityIds.push_back(eid);
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
 static bool ReadPartyModel(std::uintptr_t partyModel, PartyMemberIds& ids)
 {
     if (partyModel <= 0x10000) return false;
+    // Try Client PartyModel layout (TypeDefIndex 10467) first
+    if (ReadClientPartyModel(partyModel, ids))
+        return true;
+
+    // Fallback: Server/Battle PartyModel layout (TypeDefIndex 3737)
     bool found = false;
     const std::uintptr_t entSet = ReadPtr(partyModel + rr::PartyModel::Entities);
     if (entSet > 0x10000)
@@ -2380,42 +2457,55 @@ static void RefreshParty(std::uintptr_t battleModel, std::uintptr_t game,
     bool any = false;
 
     // Primary path (verified from dump.cs):
-    // BattleModel.PartyMemberAccessModel (+0x448) -> Parties (+0x18) ->
-    // _partiesByEntity (+0x18, Dictionary<int, PartyModel>) -> local PartyModel
-    // -> _entities (+0x10, HashSet<int>) & _memberPublicIds (+0x18, HashSet<long>).
+    // On client, BattleModel.PartyMemberAccessModel (+0x448) is ClientPartyMemberAccessModel,
+    // whose +0x18 is DIRECTLY the local player's PartyModel*!
+    // On server/shared PartyMemberAccessModel, +0x18 is Parties* (_partiesByEntity at +0x18).
+    // Check the pointed-to object class and handle both cleanly.
     if (battleModel > 0x10000) {
         const std::uintptr_t accessModel = ReadPtr(
             battleModel + rr::BattleModel::PartyMemberAccessModel);
-        const std::uintptr_t parties = (accessModel > 0x10000)
+        const std::uintptr_t field18 = (accessModel > 0x10000)
             ? ReadPtr(accessModel + rr::PartyMemberAccessModel::Parties) : 0;
-        const std::uintptr_t byEntityDict = (parties > 0x10000)
-            ? ReadPtr(parties + rr::Parties::PartiesByEntity) : 0;
-        if (byEntityDict > 0x10000) {
-            std::vector<RobRunMemory::DictEntry> entries;
-            if (RobRunMemory::ReadDictInt(byEntityDict, entries, false)) {
-                std::uintptr_t localPartyModel = 0;
-                if (localId > 0) {
-                    for (const auto& e : entries) {
-                        if (e.key == localId && e.value > 0x10000) {
-                            localPartyModel = e.value;
-                            break;
+        if (field18 > 0x10000) {
+            // ClientPartyMemberAccessModel._partyModel (+0x18) -> PartyModel directly
+            if (IsClass(field18, "PartyModel") || ReadPartyModel(field18, ids)) {
+                if (!ids.entityIds.empty() || !ids.publicIds.empty())
+                    any = true;
+                else if (ReadPartyModel(field18, ids))
+                    any = true;
+            }
+            // Fallback: PartyMemberAccessModel._parties (+0x18) -> Parties._partiesByEntity (+0x18)
+            if (!any) {
+                const std::uintptr_t byEntityDict = ReadPtr(
+                    field18 + rr::Parties::PartiesByEntity);
+                if (byEntityDict > 0x10000) {
+                    std::vector<RobRunMemory::DictEntry> entries;
+                    if (RobRunMemory::ReadDictInt(byEntityDict, entries, false)) {
+                        std::uintptr_t localPartyModel = 0;
+                        if (localId > 0) {
+                            for (const auto& e : entries) {
+                                if (e.key == localId && e.value > 0x10000) {
+                                    localPartyModel = e.value;
+                                    break;
+                                }
+                            }
                         }
-                    }
-                }
-                if (localPartyModel > 0x10000) {
-                    if (ReadPartyModel(localPartyModel, ids))
-                        any = true;
-                } else if (localPublicId > 0) {
-                    std::unordered_set<std::uintptr_t> visited;
-                    for (const auto& e : entries) {
-                        if (e.value <= 0x10000 || !visited.insert(e.value).second) continue;
-                        PartyMemberIds cand;
-                        if (ReadPartyModel(e.value, cand)) {
-                            if (std::find(cand.publicIds.begin(), cand.publicIds.end(),
-                                    localPublicId) != cand.publicIds.end()) {
-                                ids = std::move(cand);
+                        if (localPartyModel > 0x10000) {
+                            if (ReadPartyModel(localPartyModel, ids))
                                 any = true;
-                                break;
+                        } else if (localPublicId > 0) {
+                            std::unordered_set<std::uintptr_t> visited;
+                            for (const auto& e : entries) {
+                                if (e.value <= 0x10000 || !visited.insert(e.value).second) continue;
+                                PartyMemberIds cand;
+                                if (ReadPartyModel(e.value, cand)) {
+                                    if (std::find(cand.publicIds.begin(), cand.publicIds.end(),
+                                            localPublicId) != cand.publicIds.end()) {
+                                        ids = std::move(cand);
+                                        any = true;
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
