@@ -21,6 +21,9 @@ struct EntityData {
     // member ids. Unresolved party data leaves every entity false.
     bool isPartyMember = false;
     bool isClanMate = false;
+    bool isPoliceMate = false;
+    bool isManualTeammate = false;
+    bool IsTeammate() const { return isPartyMember || isClanMate || isPoliceMate || isManualTeammate; }
     Vector3 position{};
     Vector3 lookDirection{};
     float pitch = 0.f;

@@ -161,6 +161,35 @@ inline constexpr std::uintptr_t DelayedUseAction           = 0x610;
 inline constexpr std::uintptr_t BattleSettings             = 0x98;
 inline constexpr std::uintptr_t MapDialogModel             = 0x1D8;
 inline constexpr std::uintptr_t MapConfigModel             = 0x1E8;
+inline constexpr std::uintptr_t ClanBattleTeamsCacheModel  = 0x400;
+inline constexpr std::uintptr_t PartyMemberAccessModel     = 0x448;
+}
+
+namespace PartyMemberAccessModel {
+inline constexpr std::uintptr_t Parties = 0x18; // Parties*
+}
+
+namespace Parties {
+inline constexpr std::uintptr_t PartiesById     = 0x10; // Dictionary<string, PartyModel>
+inline constexpr std::uintptr_t PartiesByEntity = 0x18; // Dictionary<int, PartyModel>
+}
+
+namespace PartyModel {
+inline constexpr std::uintptr_t Entities        = 0x10; // HashSet<int>
+inline constexpr std::uintptr_t MemberPublicIds = 0x18; // HashSet<long>
+inline constexpr std::uintptr_t Id              = 0x20; // string
+inline constexpr std::uintptr_t Data            = 0x28; // BattlePartyData*
+}
+
+namespace HashSet {
+inline constexpr std::uintptr_t slots           = 0x18; // Slot<T>[]
+inline constexpr std::uintptr_t count           = 0x20; // int32
+inline constexpr std::uintptr_t lastIndex       = 0x24; // int32
+inline constexpr std::uintptr_t slot_hashCode   = 0x00; // int32 (< 0 means empty/free)
+inline constexpr std::uintptr_t slot_next       = 0x04; // int32
+inline constexpr std::uintptr_t slot_value      = 0x08; // T
+inline constexpr std::uintptr_t slot_stride_i32 = 0x0C; // 12 bytes for Slot<int>
+inline constexpr std::uintptr_t slot_stride_i64 = 0x10; // 16 bytes for Slot<long>
 }
 
 namespace ScreenModel {

@@ -137,6 +137,43 @@ inline const std::string& GetWebRadarHtml()
   .status-pill.online .status-dot { background: var(--green); }
   .status-pill.waiting .status-dot { background: var(--amber); }
 
+  /* Role Counter Strip */
+  .role-strip {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    height: 28px;
+    padding: 0 11px;
+    border-radius: 999px;
+    background: var(--elevated);
+    border: 1px solid var(--stroke);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: var(--text);
+  }
+  .role-strip.hidden { display: none; }
+  .role-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-mid);
+  }
+  .role-chip.dim { opacity: 0.43; }
+  .role-chip.hidden { display: none; }
+  .role-chip-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .role-chip-val {
+    color: var(--accent-bright);
+    font-variant-numeric: tabular-nums;
+    min-width: 2ch;
+    text-align: right;
+    display: inline-block;
+  }
+
   /* Segmented Mode Switch (Full Map / Minimap) */
   .segmented {
     display: inline-flex;
@@ -659,6 +696,12 @@ inline const std::string& GetWebRadarHtml()
 
     <div class="topbar-center">
       <select id="mapSelect" class="veox-select" title="Active Map"></select>
+      <div id="roleStrip" class="role-strip" title="Live Role Counts">
+        <span class="role-chip"><i id="rcPolDot" class="role-chip-dot" style="background:#4A90E2"></i>Police <span id="rcPolVal" class="role-chip-val">0</span></span>
+        <span class="role-chip"><i id="rcCrmDot" class="role-chip-dot" style="background:#E04A4A"></i>Criminal <span id="rcCrmVal" class="role-chip-val">0</span></span>
+        <span class="role-chip"><i id="rcCivDot" class="role-chip-dot" style="background:#D8D8D8"></i>Civil <span id="rcCivVal" class="role-chip-val">0</span></span>
+        <span id="rcUnkChip" class="role-chip dim hidden"><i class="role-chip-dot" style="background:#aaaeaa"></i>UNK <span id="rcUnkVal" class="role-chip-val">0</span></span>
+      </div>
     </div>
 
     <div class="topbar-right">
@@ -824,6 +867,15 @@ inline const std::string& GetWebRadarHtml()
   const hudPos = document.getElementById("hudPos");
   const hudZoom = document.getElementById("hudZoom");
   const hudRate = document.getElementById("hudRate");
+  const roleStrip = document.getElementById("roleStrip");
+  const rcPolDot = document.getElementById("rcPolDot");
+  const rcCivDot = document.getElementById("rcCivDot");
+  const rcCrmDot = document.getElementById("rcCrmDot");
+  const rcPolVal = document.getElementById("rcPolVal");
+  const rcCivVal = document.getElementById("rcCivVal");
+  const rcCrmVal = document.getElementById("rcCrmVal");
+  const rcUnkChip = document.getElementById("rcUnkChip");
+  const rcUnkVal = document.getElementById("rcUnkVal");
 
   // -------------------------------------------------------------------------
   // Exact 2-pass embedded sprite loader + offscreen tint cache
@@ -1183,6 +1235,30 @@ inline const std::string& GetWebRadarHtml()
       document.documentElement.style.setProperty("--accent", data.accent);
       if (data.accentBright)
         document.documentElement.style.setProperty("--accent-bright", data.accentBright);
+    }
+
+    // Update live role counter strip
+    if (data.roleCounters && data.roleCounters.enabled === false) {
+      roleStrip.classList.add("hidden");
+    } else {
+      roleStrip.classList.remove("hidden");
+      if (data.roleCounters) {
+        if (data.roleCounters.policeColor) rcPolDot.style.background = data.roleCounters.policeColor;
+        if (data.roleCounters.civilianColor) rcCivDot.style.background = data.roleCounters.civilianColor;
+        if (data.roleCounters.criminalColor) rcCrmDot.style.background = data.roleCounters.criminalColor;
+      }
+      if (data.roleCounts) {
+        rcPolVal.textContent = String(data.roleCounts.police || 0);
+        rcCivVal.textContent = String(data.roleCounts.civilian || 0);
+        rcCrmVal.textContent = String(data.roleCounts.criminal || 0);
+        const unk = data.roleCounts.unknown || 0;
+        if (unk > 0) {
+          rcUnkVal.textContent = String(unk);
+          rcUnkChip.classList.remove("hidden");
+        } else {
+          rcUnkChip.classList.add("hidden");
+        }
+      }
     }
 
     // Apply VeoxMenu In-Game Map defaults once on first connect

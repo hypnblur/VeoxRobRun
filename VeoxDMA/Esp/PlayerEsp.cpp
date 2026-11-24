@@ -147,8 +147,10 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	if (!std::isfinite(rootClipW) || rootClipW < 0.40f)
 		return;
 
-	ImU32 chamsCol = Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
-	if (pcfg.ChamsVisCheck) {
+	ImU32 chamsCol = ent.IsTeammate()
+		? Esp::ShadeColour(pcfg.TeammateColour, pcfg.ChamsAlpha)
+		: Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
+	if (!ent.IsTeammate() && pcfg.ChamsVisCheck) {
 		chamsCol = ent.visible
 			? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
 			: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
@@ -419,7 +421,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 				continue;
 
 			ImU32 segChamsCol = chamsCol;
-			if (pcfg.ChamsVisCheck) {
+			if (!ent.IsTeammate() && pcfg.ChamsVisCheck) {
 				segChamsCol = seg.visible
 					? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
 					: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
@@ -537,7 +539,8 @@ void DrawPlayers()
 			continue;
 		if (ent.isDead)
 			continue;
-		if (pcfg.HideTeammates && (ent.isPartyMember || ent.isClanMate))
+		const bool isTeammate = ent.IsTeammate();
+		if (pcfg.HideTeammates && isTeammate)
 			continue;
 
 		const Vector3 entPos = ent.position;
@@ -568,8 +571,10 @@ void DrawPlayers()
 		{
 			if (pcfg.OffscreenArrows && snapshot->camera.valid)
 			{
-				ImU32 offCol = Esp::D2DColorToImU32(pcfg.OffscreenColour);
-				if (pcfg.VisCheck || pcfg.WallCheck) {
+				ImU32 offCol = isTeammate
+					? Esp::D2DColorToImU32(pcfg.TeammateColour)
+					: Esp::D2DColorToImU32(pcfg.OffscreenColour);
+				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 					offCol = ent.visible
 						? Esp::D2DColorToImU32(pcfg.VisibleColour)
 						: Esp::D2DColorToImU32(pcfg.HiddenColour);
@@ -580,27 +585,33 @@ void DrawPlayers()
 			continue;
 		}
 
-		anyEnemyOnScreen = true;
-		if (haveLocalPosition && distF < nearestOnScreenDist)
-			nearestOnScreenDist = distF;
+		if (!isTeammate) {
+			anyEnemyOnScreen = true;
+			if (haveLocalPosition && distF < nearestOnScreenDist)
+				nearestOnScreenDist = distF;
+		}
 
 		// Only dim to HiddenAlpha when visibility/wall checking is actually
 		// enabled; otherwise the fallback animator-motion heuristic dims idle
 		// or LOD-throttled players to grey and causes a white/grey strobe.
-		const bool visActive = pcfg.VisCheck || pcfg.WallCheck;
+		// Teammates skip VisCheck completely and render at full brightness.
+		const bool visActive = !isTeammate && (pcfg.VisCheck || pcfg.WallCheck);
 		const float alphaMult = (!visActive || ent.visible) ? 1.0f : std::clamp(pcfg.HiddenAlpha, 0.05f, 0.60f);
-		const ImU32 boxCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.BoxColour), alphaMult);
-		const ImU32 nameCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.NameColour), alphaMult);
+		const ImU32 teamCol = Esp::D2DColorToImU32(pcfg.TeammateColour);
+		const ImU32 teamBoxCol = Esp::D2DColorToImU32(pcfg.TeammateBoxColour);
+		const ImU32 teamSkelCol = Esp::D2DColorToImU32(pcfg.TeammateSkeletonColour);
+		const ImU32 boxCol = isTeammate ? teamBoxCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.BoxColour), alphaMult);
+		const ImU32 nameCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.NameColour), alphaMult);
 		const ImU32 distCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.DistanceColour), alphaMult);
 		const ImU32 hpTxtCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HealthTextColour), alphaMult);
 		const ImU32 weapCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.WeaponColour), alphaMult);
-		const ImU32 roleCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.RoleColour), alphaMult);
+		const ImU32 roleCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.RoleColour), alphaMult);
 		const ImU32 lookCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.LookingColour), alphaMult);
 		const ImU32 stateCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.StateColour), alphaMult);
-		const ImU32 espCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.TextColour), alphaMult);
+		const ImU32 espCol = isTeammate ? teamSkelCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.TextColour), alphaMult);
 
 		// Status Ring: Subtle screen-space halo around torso/head centroid when visible (item 8)
-		if (pcfg.StatusRing && ent.visible)
+		if (!isTeammate && pcfg.StatusRing && ent.visible)
 		{
 			const Vector3 centroid = ent.bonePoints.hasChest ? ent.bonePoints.chest : Vector3(entPos.x, entPos.y + 1.25f, entPos.z);
 			ImVec2 screenCentroid;
@@ -625,7 +636,9 @@ void DrawPlayers()
 		bool boxValid = false;
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
 
+		const bool drawSkeleton = isTeammate ? pcfg.TeammateSkeleton : pcfg.Skeleton;
 		const bool livePartialBoneVis =
+			!isTeammate &&
 			(pcfg.VisCheck || pcfg.WallCheck) &&
 			pcfg.VisRayCount >= 8 &&
 			RobRunReader::GetBvhStatus().loaded &&
@@ -643,7 +656,7 @@ void DrawPlayers()
 			if (!Project(viewProjection, seg.a, screenW, screenH, a)) continue;
 			if (!Project(viewProjection, seg.b, screenW, screenH, b)) continue;
 
-			if (pcfg.Skeleton)
+			if (drawSkeleton)
 			{
 				if (livePartialBoneVis) {
 					const bool visA = !RobRunReader::IsCameraOccluded(seg.a);
@@ -671,7 +684,7 @@ void DrawPlayers()
 					}
 				} else {
 					ImU32 segCol = espCol;
-					if (pcfg.VisCheck || pcfg.WallCheck) {
+					if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 						segCol = seg.visible ? visCol : hidCol;
 					}
 					dl->AddLine(a, b, segCol, pcfg.SkeletonThickness);
@@ -684,7 +697,7 @@ void DrawPlayers()
 			boxValid = true;
 		}
 
-		if (pcfg.HeadCircle && pcfg.Skeleton &&
+		if (pcfg.HeadCircle && drawSkeleton &&
 			ent.bonePoints.hasHead && ent.bonePoints.hasNeck &&
 			IsValidBone(ent.bonePoints.head, entPos, maxBoneDist) &&
 			IsValidBone(ent.bonePoints.neck, entPos, maxBoneDist))
@@ -702,7 +715,7 @@ void DrawPlayers()
 					screenW, screenH, sc, sr))
 			{
 				ImU32 headCol = espCol;
-				if (pcfg.VisCheck || pcfg.WallCheck) {
+				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 					const bool headVis = livePartialBoneVis
 						? !RobRunReader::IsCameraOccluded(center)
 						: ent.visible;
@@ -733,10 +746,11 @@ void DrawPlayers()
 			}
 		}
 
-		if (boxValid && pcfg.BoxEsp)
+		const bool drawBox = isTeammate ? pcfg.TeammateBox : pcfg.BoxEsp;
+		if (boxValid && drawBox)
 		{
 			ImU32 currentBoxCol = boxCol;
-			if (pcfg.VisCheck || pcfg.WallCheck) {
+			if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 				currentBoxCol = ent.visible
 					? Esp::D2DColorToImU32(pcfg.VisibleColour)
 					: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
@@ -777,8 +791,8 @@ void DrawPlayers()
 				? ImVec2((minX + maxX) * 0.5f, maxY + 4.f)
 				: screenPos;
 
-			ImU32 snapCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.SnaplineColour), alphaMult);
-			if (pcfg.VisCheck || pcfg.WallCheck) {
+			ImU32 snapCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.SnaplineColour), alphaMult);
+			if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 				snapCol = ent.visible
 					? Esp::D2DColorToImU32(pcfg.VisibleColour)
 					: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
@@ -796,8 +810,8 @@ void DrawPlayers()
 			ImVec2 headScreen{};
 			if (Project(viewProjection, headPos, screenW, screenH, headScreen))
 			{
-				ImU32 headCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HeadDotColour), alphaMult);
-				if (pcfg.VisCheck || pcfg.WallCheck) {
+				ImU32 headCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HeadDotColour), alphaMult);
+				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
 					headCol = ent.visible
 						? Esp::D2DColorToImU32(pcfg.VisibleColour)
 						: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
@@ -844,7 +858,7 @@ void DrawPlayers()
 		const std::string roleLabel =
 			RobRunReader::RoleLabel(ent.role, ent.roleName);
 		ImU32 roleBasedCol = nameCol;
-		if (pcfg.NameByRole && !roleLabel.empty()) {
+		if (!isTeammate && pcfg.NameByRole && !roleLabel.empty()) {
 			if (roleLabel == "Criminal")
 				roleBasedCol = Esp::D2DColorToImU32(pcfg.CriminalColour);
 			else if (roleLabel == "Police Officer")
@@ -996,8 +1010,8 @@ void DrawPlayers()
 		if (!stateSegs.empty())
 			botY = drawSegLine(stateSegs, botY);
 
-		// Looking-at-you detection
-		if ((pcfg.LookingAtYou || pcfg.LookingAlert) && haveLocalPosition)
+		// Looking-at-you detection (skip teammates)
+		if (!isTeammate && (pcfg.LookingAtYou || pcfg.LookingAlert) && haveLocalPosition)
 		{
 			const float dx = localPos.x - entPos.x;
 			const float dy = localPos.y - entPos.y;
