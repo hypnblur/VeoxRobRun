@@ -402,6 +402,10 @@ bool Keyboard::InitKeyboard()
 		INPUT_LOG("[Input] game process session %lu\n", targetSession);
 	}
 
+	// Refresh the VMM process table under -norefresh so winlogon.exe and its
+	// export directory resolve reliably on Windows 10.
+	TargetProcess.RefreshProcessesFast();
+
 	int chosenPid = 0;
 	for (int pid : TargetProcess.GetPidListFromName("winlogon.exe"))
 	{
