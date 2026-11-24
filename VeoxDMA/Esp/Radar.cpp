@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "Radar.h"
+#include "RoleCounts.h"
 #include "MapSpriteData.h"
 #include "EspDraw.h"
 #include "IconSprites.h"
@@ -847,12 +848,18 @@ void Draw()
 		}
 
 		if (cfg.ShowPlayers) {
+			const auto& pcfg = ConfigInstance.Player;
+			const ImU32 teamCol = IM_COL32(
+				static_cast<int>(pcfg.TeammateColour.r * 255.f),
+				static_cast<int>(pcfg.TeammateColour.g * 255.f),
+				static_cast<int>(pcfg.TeammateColour.b * 255.f), 255);
 			for (const auto& ent : snapshot->entities) {
 				if (ent.entityId == snapshot->localEntityId) continue;
 				if (ent.isDead) continue;
-				// All players allowed on radar; party members receive a distinct friendly perimeter
+				const bool isTeammate = ent.IsTeammate();
+				if (pcfg.HideTeammates && isTeammate) continue;
 				const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
-				const ImU32 ringColor = ent.isPartyMember ? IM_COL32(50, 220, 100, 255) : marker.color;
+				const ImU32 ringColor = isTeammate ? teamCol : marker.color;
 
 				ImVec2 pos = WorldToRadar(ent.position, localPos, localYaw,
 					cfg.RotateWithCamera, side, radarCenter, cfg.Zoom);
@@ -1201,14 +1208,21 @@ void DrawFullMap()
 
 	// Draw players
 	if (snapshot && cfg.ShowPlayers) {
+		const auto& pcfg = ConfigInstance.Player;
+		const ImU32 teamCol = IM_COL32(
+			static_cast<int>(pcfg.TeammateColour.r * 255.f),
+			static_cast<int>(pcfg.TeammateColour.g * 255.f),
+			static_cast<int>(pcfg.TeammateColour.b * 255.f), 255);
 		for (const auto& ent : snapshot->entities) {
 			if (ent.isDead) continue;
 			const bool isLocal = ent.entityId == snapshot->localEntityId;
+			const bool isTeammate = !isLocal && ent.IsTeammate();
+			if (pcfg.HideTeammates && isTeammate) continue;
 
 			const RoleMarker marker = GetRoleMarker(ent.role, ent.roleName);
 			ImU32 badgeCol = marker.color;
 			if (isLocal) badgeCol = IM_COL32(50, 255, 120, 255);
-			else if (ent.isPartyMember) badgeCol = IM_COL32(50, 220, 100, 255);
+			else if (isTeammate) badgeCol = teamCol;
 
 			ImVec2 sp = worldToScreen(ent.position.x, ent.position.z);
 			if (sp.x < clipMin.x - 16.f || sp.x > clipMax.x + 16.f ||
@@ -1263,16 +1277,23 @@ namespace {
 
 ImU32 GetInGameMapRoleColor(int role, const std::string& roleName, bool isTeammate)
 {
+	auto toCol = [](const D2D1::ColorF& c) -> ImU32 {
+		return IM_COL32(
+			static_cast<int>(c.r * 255.f),
+			static_cast<int>(c.g * 255.f),
+			static_cast<int>(c.b * 255.f), 255);
+	};
 	if (isTeammate)
-		return IM_COL32(75, 235, 235, 255);
+		return toCol(ConfigInstance.Player.TeammateColour);
+	const auto& rcfg = ConfigInstance.Radar;
 	const std::string label = RobRunReader::RoleLabel(role, roleName);
 	if (label == "Criminal")
-		return IM_COL32(255, 68, 68, 255);
+		return toCol(rcfg.MapCriminalColour);
 	if (label == "Police Officer")
-		return IM_COL32(55, 145, 255, 255);
+		return toCol(rcfg.MapPoliceColour);
 	if (label == "Civilian" || label == "Hubber")
-		return IM_COL32(70, 225, 90, 255);
-	return IM_COL32(255, 68, 68, 255);
+		return toCol(rcfg.MapCivilianColour);
+	return toCol(rcfg.MapCriminalColour);
 }
 
 int RolePriority(int role, const std::string& roleName, bool isTeammate)
@@ -2069,7 +2090,7 @@ void DrawInGameMapOverlay()
 			if (!ent.inVehicle && ent.vehicleId <= 0) continue;
 
 			const bool isLocal = (ent.entityId == localId);
-			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			const bool isTeammate = ent.IsTeammate();
 			if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
 
 			int matchedIdx = -1;
@@ -2235,6 +2256,16 @@ void DrawInGameMapOverlay()
 				(!occ.occupied && remembered && RobRunReader::RoleLabel(remembered->role, remembered->roleName) == "Police Officer") ||
 				(!occ.occupied && !remembered && !mv.ownerRoleName.empty() && RobRunReader::RoleLabel(0, mv.ownerRoleName) == "Police Officer");
 
+			// Always keep police cars in their configured police car color (even when teammates/local are Police Officers)
+			if (isPoliceVeh && mv.kind != RobRunWorld::Kind::Helicopter) {
+				const auto& pc = ConfigInstance.Radar.MapPoliceCarColour;
+				const ImU32 policeBlue = IM_COL32(
+					static_cast<int>(pc.r * 255.f),
+					static_cast<int>(pc.g * 255.f),
+					static_cast<int>(pc.b * 255.f), 255);
+				vehCol = (occ.occupied || activeRemoteVeh) ? policeBlue : muteRoleColor(policeBlue);
+			}
+
 			const float vehScale = scale * 0.90f;
 			if (mv.kind == RobRunWorld::Kind::Helicopter) {
 				if (!DrawMapSprite(dl, MapSpriteSlot::Helicopter, pt, 12.0f * vehScale, vehCol))
@@ -2278,7 +2309,7 @@ void DrawInGameMapOverlay()
 			if (ent.entityId == localId || ent.isDead)
 				continue;
 
-			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			const bool isTeammate = ent.IsTeammate();
 			if (pcfg.HideTeammates && isTeammate)
 				continue;
 
@@ -2333,6 +2364,145 @@ void DrawInGameMapOverlay()
 					ImVec2(textPos.x + sz.x + padX, textPos.y + sz.y + padY),
 					IM_COL32(26, 28, 32, 225), 3.5f);
 				Esp::DrawOutlinedText(dl, textPos, col, font, fontSize, ent.nicknameUtf8.c_str());
+			}
+		}
+	}
+
+	// Top-center role counter strip (drawn after map markers, cached per snapshot)
+	if (font && cfg.RoleCounters && (isFull ? cfg.RoleCountersOnFullMap : cfg.RoleCountersOnMinimap)) {
+		struct CachedRoleStrip {
+			std::uint64_t stampUs = 0;
+			int scope = -1;
+			bool valid = false;
+			int unknown = 0;
+			char polBuf[24]{};
+			char civBuf[24]{};
+			char crmBuf[24]{};
+			char unkBuf[24]{};
+			char fullBuf[128]{};
+		};
+		static CachedRoleStrip s_roleCache;
+		if (!s_roleCache.valid || s_roleCache.stampUs != snapshot->stampUs || s_roleCache.scope != cfg.RoleCounterScope) {
+			Esp::RemoteDriverHint hints[64]{};
+			std::size_t hintCount = 0;
+			auto findOrAddHint = [&](int vehId) -> Esp::RemoteDriverHint* {
+				for (std::size_t i = 0; i < hintCount; ++i)
+					if (hints[i].vehicleId == vehId) return &hints[i];
+				if (hintCount >= 64) return nullptr;
+				hints[hintCount] = Esp::RemoteDriverHint{};
+				hints[hintCount].vehicleId = vehId;
+				return &hints[hintCount++];
+			};
+			for (const auto& kv : s_vehMotion) {
+				const bool moving = (kv.second.lastMovedMs != 0) &&
+					(vehNowMs - kv.second.lastMovedMs <= kVehRecentMoveMs);
+				if (!moving) continue;
+				if (auto* h = findOrAddHint(kv.first))
+					h->isMoving = true;
+			}
+			for (const auto& kv : s_lastVehDriver) {
+				if (vehNowMs - kv.second.stampMs > kLastDriverMaxAgeMs) continue;
+				if (auto* h = findOrAddHint(kv.first)) {
+					h->entityId = kv.second.entityId;
+					h->role = kv.second.role;
+					h->roleName = kv.second.roleName;
+				}
+			}
+			const Esp::RoleCounts rc = Esp::CountRoles(*snapshot, cfg.RoleCounterScope, hints, hintCount);
+			s_roleCache.stampUs = snapshot->stampUs;
+			s_roleCache.scope = cfg.RoleCounterScope;
+			s_roleCache.valid = true;
+			s_roleCache.unknown = rc.unknown;
+			std::snprintf(s_roleCache.polBuf, sizeof(s_roleCache.polBuf), "Police %d", rc.police);
+			std::snprintf(s_roleCache.crmBuf, sizeof(s_roleCache.crmBuf), "Criminal %d", rc.criminal);
+			std::snprintf(s_roleCache.civBuf, sizeof(s_roleCache.civBuf), "Civil %d", rc.civilian);
+			std::snprintf(s_roleCache.unkBuf, sizeof(s_roleCache.unkBuf), "UNK %d", rc.unknown);
+			if (rc.unknown > 0) {
+				std::snprintf(s_roleCache.fullBuf, sizeof(s_roleCache.fullBuf),
+					"Police %d  Criminal %d  Civil %d  UNK %d",
+					rc.police, rc.criminal, rc.civilian, rc.unknown);
+			} else {
+				std::snprintf(s_roleCache.fullBuf, sizeof(s_roleCache.fullBuf),
+					"Police %d  Criminal %d  Civil %d",
+					rc.police, rc.criminal, rc.civilian);
+			}
+		}
+
+		auto toImCol = [](const D2D1::ColorF& c, int alpha) -> ImU32 {
+			return IM_COL32(
+				static_cast<int>(std::clamp(c.r * 255.f, 0.f, 255.f)),
+				static_cast<int>(std::clamp(c.g * 255.f, 0.f, 255.f)),
+				static_cast<int>(std::clamp(c.b * 255.f, 0.f, 255.f)),
+				alpha);
+		};
+
+		struct StripEntry {
+			const char* text;
+			ImU32 dotCol;
+			ImU32 textCol;
+		};
+		const StripEntry entries[4] = {
+			{ s_roleCache.polBuf, toImCol(cfg.RoleCounterPoliceColour, 245),   IM_COL32(232, 236, 244, 245) },
+			{ s_roleCache.crmBuf, toImCol(cfg.RoleCounterCriminalColour, 245), IM_COL32(232, 236, 244, 245) },
+			{ s_roleCache.civBuf, toImCol(cfg.RoleCounterCivilianColour, 245), IM_COL32(232, 236, 244, 245) },
+			{ s_roleCache.unkBuf, IM_COL32(170, 174, 186, 110),                IM_COL32(200, 204, 214, 110) }
+		};
+		const int entryCount = (s_roleCache.unknown > 0) ? 4 : 3;
+
+		const float stripScale = std::clamp(cfg.InGameMapScale, 0.5f, 2.0f);
+		float stripFont = std::max(12.f, (isFull ? 15.f : 14.5f) * stripScale);
+		float dotR = std::max(2.8f, stripFont * 0.27f);
+		float dotGap = (isFull ? 5.f : 4.5f) * stripScale;
+		float itemGap = (isFull ? 13.f : 10.f) * stripScale;
+		float padX = (isFull ? 10.f : 8.f) * stripScale;
+		float padY = (isFull ? 4.5f : 4.f) * stripScale;
+
+		float widths[4]{};
+		float maxH = stripFont;
+		float totalW = 0.f;
+		auto measureStrip = [&]() {
+			maxH = stripFont;
+			totalW = padX * 2.f;
+			for (int i = 0; i < entryCount; ++i) {
+				const ImVec2 sz = font->CalcTextSizeA(stripFont, FLT_MAX, 0.f, entries[i].text);
+				widths[i] = dotR * 2.f + dotGap + sz.x;
+				if (sz.y > maxH) maxH = sz.y;
+				totalW += widths[i];
+				if (i + 1 < entryCount)
+					totalW += itemGap;
+			}
+		};
+		measureStrip();
+
+		const float availW = std::min(rectW, clipMaxX - clipMinX) - 10.f;
+		if (totalW > availW && availW > 40.f) {
+			const float fit = std::clamp(availW / totalW, 0.72f, 1.f);
+			stripFont *= fit;
+			dotR *= fit;
+			dotGap *= fit;
+			itemGap *= fit;
+			padX *= fit;
+			padY *= fit;
+			measureStrip();
+		}
+		if (totalW <= availW + 4.f && totalW > 0.f) {
+			const float stripCx = (clipMinX + clipMaxX) * 0.5f;
+			const float bgX0 = stripCx - totalW * 0.5f;
+			const float bgY0 = std::max(minY, clipMinY) + 8.f;
+			const float bgX1 = bgX0 + totalW;
+			const float bgY1 = bgY0 + maxH + padY * 2.f;
+
+			dl->AddRectFilled(ImVec2(bgX0, bgY0), ImVec2(bgX1, bgY1), IM_COL32(20, 22, 28, 222), 6.f);
+			dl->AddRect(ImVec2(bgX0, bgY0), ImVec2(bgX1, bgY1), IM_COL32(48, 52, 66, 220), 6.f, 0, 1.f);
+
+			float curX = bgX0 + padX;
+			const float textY = bgY0 + padY;
+			const float dotY = bgY0 + padY + maxH * 0.5f;
+			for (int i = 0; i < entryCount; ++i) {
+				dl->AddCircleFilled(ImVec2(curX + dotR, dotY), dotR, entries[i].dotCol, 12);
+				Esp::DrawOutlinedText(dl, ImVec2(curX + dotR * 2.f + dotGap, textY),
+					entries[i].textCol, font, stripFont, entries[i].text);
+				curX += widths[i] + itemGap;
 			}
 		}
 	}

@@ -664,6 +664,8 @@ const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig&
     if (cfg.ExpIgnoreCivilian && role == "Civilian") return "role:civilian";
     if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return "team:party";
     if (cfg.ExpIgnoreTeammates && ent.isClanMate) return "team:clan";
+    if (cfg.ExpIgnoreTeammates && ent.isPoliceMate) return "team:police";
+    if (cfg.ExpIgnoreTeammates && ent.isManualTeammate) return "team:manual";
     if (cfg.IsTrusted(ent.publicId)) return "trusted";
     return nullptr;
 }

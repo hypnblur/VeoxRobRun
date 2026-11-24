@@ -64,6 +64,42 @@ public:
 	int InGameMapCargoMinRarity = 1; // 0=All, 1=Uncommon+, 2=Rare+, 3=Epic+, 4=Legendary+, 5=Mythical
 	float InGameMapScale = 1.0f;
 
+	// Live role counters (Police / Civilian / Criminal)
+	bool RoleCounters = true;
+	bool RoleCountersOnFullMap = true;
+	bool RoleCountersOnMinimap = false;
+	bool RoleCountersOnWebRadar = true;
+	int RoleCounterScope = 0; // 0 = Full Map, 1 = In 300m Radius
+	D2D1::ColorF RoleCounterPoliceColour = Colour(74, 144, 226);     // #4A90E2
+	D2D1::ColorF RoleCounterCivilianColour = Colour(216, 216, 216); // #D8D8D8
+	D2D1::ColorF RoleCounterCriminalColour = Colour(224, 74, 74);   // #E04A4A
+
+	// Map marker colors (In-Game Map & Web Radar)
+	D2D1::ColorF MapCriminalColour = Colour(255, 68, 68);
+	D2D1::ColorF MapPoliceColour = Colour(55, 145, 255);
+	D2D1::ColorF MapCivilianColour = Colour(175, 182, 192);
+	D2D1::ColorF MapPoliceCarColour = Colour(55, 145, 255);
+
+	void ToJsonColour(json* j, const std::string& name, const D2D1::ColorF* colour)
+	{
+		(*j)[ConfigName][name][LIT("r")] = colour->r;
+		(*j)[ConfigName][name][LIT("g")] = colour->g;
+		(*j)[ConfigName][name][LIT("b")] = colour->b;
+		(*j)[ConfigName][name][LIT("a")] = colour->a;
+	}
+
+	void FromJsonColour(const json& j, const std::string& name, D2D1::ColorF* colour)
+	{
+		if (j[ConfigName].contains(name))
+		{
+			const auto& c = j[ConfigName][name];
+			colour->r = c.value(LIT("r"), colour->r);
+			colour->g = c.value(LIT("g"), colour->g);
+			colour->b = c.value(LIT("b"), colour->b);
+			colour->a = c.value(LIT("a"), colour->a);
+		}
+	}
+
 	json ToJson()
 	{
 		json j;
@@ -111,6 +147,18 @@ public:
 		j[ConfigName][LIT("InGameMapMinRarity")] = InGameMapMinRarity;
 		j[ConfigName][LIT("InGameMapCargoMinRarity")] = InGameMapCargoMinRarity;
 		j[ConfigName][LIT("InGameMapScale")] = InGameMapScale;
+		j[ConfigName][LIT("RoleCounters")] = RoleCounters;
+		j[ConfigName][LIT("RoleCountersOnFullMap")] = RoleCountersOnFullMap;
+		j[ConfigName][LIT("RoleCountersOnMinimap")] = RoleCountersOnMinimap;
+		j[ConfigName][LIT("RoleCountersOnWebRadar")] = RoleCountersOnWebRadar;
+		j[ConfigName][LIT("RoleCounterScope")] = RoleCounterScope;
+		ToJsonColour(&j, LIT("RoleCounterPoliceColour"), &RoleCounterPoliceColour);
+		ToJsonColour(&j, LIT("RoleCounterCivilianColour"), &RoleCounterCivilianColour);
+		ToJsonColour(&j, LIT("RoleCounterCriminalColour"), &RoleCounterCriminalColour);
+		ToJsonColour(&j, LIT("MapCriminalColour"), &MapCriminalColour);
+		ToJsonColour(&j, LIT("MapPoliceColour"), &MapPoliceColour);
+		ToJsonColour(&j, LIT("MapCivilianColour"), &MapCivilianColour);
+		ToJsonColour(&j, LIT("MapPoliceCarColour"), &MapPoliceCarColour);
 		return j;
 	}
 
@@ -163,5 +211,17 @@ public:
 		InGameMapMinRarity = s.value(LIT("InGameMapMinRarity"), InGameMapMinRarity);
 		InGameMapCargoMinRarity = s.value(LIT("InGameMapCargoMinRarity"), InGameMapCargoMinRarity);
 		InGameMapScale = s.value(LIT("InGameMapScale"), InGameMapScale);
+		RoleCounters = s.value(LIT("RoleCounters"), RoleCounters);
+		RoleCountersOnFullMap = s.value(LIT("RoleCountersOnFullMap"), RoleCountersOnFullMap);
+		RoleCountersOnMinimap = s.value(LIT("RoleCountersOnMinimap"), RoleCountersOnMinimap);
+		RoleCountersOnWebRadar = s.value(LIT("RoleCountersOnWebRadar"), RoleCountersOnWebRadar);
+		RoleCounterScope = s.value(LIT("RoleCounterScope"), RoleCounterScope);
+		FromJsonColour(j, LIT("RoleCounterPoliceColour"), &RoleCounterPoliceColour);
+		FromJsonColour(j, LIT("RoleCounterCivilianColour"), &RoleCounterCivilianColour);
+		FromJsonColour(j, LIT("RoleCounterCriminalColour"), &RoleCounterCriminalColour);
+		FromJsonColour(j, LIT("MapCriminalColour"), &MapCriminalColour);
+		FromJsonColour(j, LIT("MapPoliceColour"), &MapPoliceColour);
+		FromJsonColour(j, LIT("MapCivilianColour"), &MapCivilianColour);
+		FromJsonColour(j, LIT("MapPoliceCarColour"), &MapPoliceCarColour);
 	}
 };

@@ -1,5 +1,9 @@
 #pragma once
 #include "pch.h"
+#include <algorithm>
+#include <cctype>
+#include <mutex>
+#include <set>
 class PlayerConfig
 {
 	std::string ConfigName;
@@ -49,6 +53,119 @@ public:
 	bool SpectatorAlert = true;
 	bool WeaponSprite = true;
 	bool HideTeammates = false;
+	bool TeammateBox = true;
+	D2D1::ColorF TeammateBoxColour = Colour(0, 255, 80);
+	bool TeammateSkeleton = true;
+	D2D1::ColorF TeammateSkeletonColour = Colour(0, 255, 80);
+	D2D1::ColorF TeammateColour = Colour(0, 255, 80);
+
+	// Manually marked teammates (persisted by publicId and/or nickname; entityId
+	// fallback for players whose publicId has not resolved yet).
+	// Always access through the thread-safe helpers below.
+	std::set<std::uint64_t> ManualTeammates;
+	std::set<std::int32_t> ManualTeammateEntities;
+	std::vector<std::string> ManualTeammateNames;
+
+	static std::mutex& TeamMutex()
+	{
+		static std::mutex m;
+		return m;
+	}
+
+	static std::string NormalizeTeamName(const std::string& s)
+	{
+		size_t start = 0;
+		while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
+		size_t end = s.size();
+		while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+		std::string out;
+		out.reserve(end - start);
+		for (size_t i = start; i < end; ++i)
+			out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(s[i]))));
+		return out;
+	}
+
+	bool IsManualTeammate(std::int32_t entityId, std::uint64_t publicId, const std::string& nicknameUtf8 = {}) const
+	{
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		if (publicId != 0 && ManualTeammates.count(publicId) > 0)
+			return true;
+		if (entityId > 0 && ManualTeammateEntities.count(entityId) > 0)
+			return true;
+		if (!nicknameUtf8.empty() && !ManualTeammateNames.empty()) {
+			const std::string norm = NormalizeTeamName(nicknameUtf8);
+			if (!norm.empty()) {
+				for (const auto& entry : ManualTeammateNames) {
+					if (NormalizeTeamName(entry) == norm)
+						return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	void SetManualTeammate(std::int32_t entityId, std::uint64_t publicId, bool marked)
+	{
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		if (marked) {
+			if (publicId != 0) ManualTeammates.insert(publicId);
+			else if (entityId > 0) ManualTeammateEntities.insert(entityId);
+		} else {
+			if (publicId != 0) ManualTeammates.erase(publicId);
+			if (entityId > 0) ManualTeammateEntities.erase(entityId);
+		}
+	}
+
+	bool AddManualTeammateName(const std::string& rawName)
+	{
+		const std::string norm = NormalizeTeamName(rawName);
+		if (norm.empty()) return false;
+		// Preserve trimmed display text
+		size_t start = 0;
+		while (start < rawName.size() && std::isspace(static_cast<unsigned char>(rawName[start]))) ++start;
+		size_t end = rawName.size();
+		while (end > start && std::isspace(static_cast<unsigned char>(rawName[end - 1]))) --end;
+		const std::string trimmed = rawName.substr(start, end - start);
+
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		for (const auto& entry : ManualTeammateNames) {
+			if (NormalizeTeamName(entry) == norm)
+				return false;
+		}
+		ManualTeammateNames.push_back(trimmed);
+		return true;
+	}
+
+	void RemoveManualTeammateName(const std::string& rawName)
+	{
+		const std::string norm = NormalizeTeamName(rawName);
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		ManualTeammateNames.erase(
+			std::remove_if(ManualTeammateNames.begin(), ManualTeammateNames.end(),
+				[&](const std::string& e) { return NormalizeTeamName(e) == norm; }),
+			ManualTeammateNames.end());
+	}
+
+	std::vector<std::string> GetManualTeammateNames() const
+	{
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		return ManualTeammateNames;
+	}
+
+	void ClearManualTeammates()
+	{
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		ManualTeammates.clear();
+		ManualTeammateEntities.clear();
+		ManualTeammateNames.clear();
+	}
+
+	int ManualTeammateCount() const
+	{
+		std::lock_guard<std::mutex> lock(TeamMutex());
+		return static_cast<int>(ManualTeammates.size() + ManualTeammateEntities.size() + ManualTeammateNames.size());
+	}
+
 	bool HiddenPlayerEsp = true;
 	float HiddenAlpha = 0.35f;
 	float VisMaxDistance = 150.0f;
@@ -205,6 +322,20 @@ public:
         j[ConfigName][LIT("OffscreenRadius")] = OffscreenRadius;
         ToJsonColour(&j, LIT("OffscreenColour"), &OffscreenColour);
         j[ConfigName][LIT("HideTeammates")] = HideTeammates;
+        j[ConfigName][LIT("TeammateBox")] = TeammateBox;
+        ToJsonColour(&j, LIT("TeammateBoxColour"), &TeammateBoxColour);
+        j[ConfigName][LIT("TeammateSkeleton")] = TeammateSkeleton;
+        ToJsonColour(&j, LIT("TeammateSkeletonColour"), &TeammateSkeletonColour);
+        ToJsonColour(&j, LIT("TeammateColour"), &TeammateColour);
+        {
+            std::lock_guard<std::mutex> lock(TeamMutex());
+            json idArr = json::array();
+            for (auto id : ManualTeammates) idArr.push_back(std::to_string(id));
+            j[ConfigName][LIT("ManualTeammates")] = idArr;
+            json nameArr = json::array();
+            for (const auto& nm : ManualTeammateNames) nameArr.push_back(nm);
+            j[ConfigName][LIT("ManualTeammateNames")] = nameArr;
+        }
         j[ConfigName][LIT("HiddenPlayerEsp")] = HiddenPlayerEsp;
         j[ConfigName][LIT("HeadDot")] = HeadDot;
         j[ConfigName][LIT("HeadDotRadius")] = HeadDotRadius;
@@ -289,6 +420,35 @@ public:
         OffscreenRadius = j[ConfigName].value(LIT("OffscreenRadius"), OffscreenRadius);
         FromJsonColour(j, LIT("OffscreenColour"), &OffscreenColour);
         HideTeammates = j[ConfigName].value(LIT("HideTeammates"), HideTeammates);
+        TeammateBox = j[ConfigName].value(LIT("TeammateBox"), TeammateBox);
+        FromJsonColour(j, LIT("TeammateBoxColour"), &TeammateBoxColour);
+        TeammateSkeleton = j[ConfigName].value(LIT("TeammateSkeleton"), TeammateSkeleton);
+        FromJsonColour(j, LIT("TeammateSkeletonColour"), &TeammateSkeletonColour);
+        FromJsonColour(j, LIT("TeammateColour"), &TeammateColour);
+        if (j[ConfigName].contains(LIT("ManualTeammates")) &&
+            j[ConfigName][LIT("ManualTeammates")].is_array()) {
+            std::set<std::uint64_t> parsed;
+            for (const auto& v : j[ConfigName][LIT("ManualTeammates")]) {
+                try {
+                    if (v.is_string()) parsed.insert(std::stoull(v.get<std::string>()));
+                    else if (v.is_number_unsigned()) parsed.insert(v.get<std::uint64_t>());
+                } catch (...) {}
+            }
+            std::lock_guard<std::mutex> lock(TeamMutex());
+            ManualTeammates = std::move(parsed);
+        }
+        if (j[ConfigName].contains(LIT("ManualTeammateNames")) &&
+            j[ConfigName][LIT("ManualTeammateNames")].is_array()) {
+            std::vector<std::string> parsedNames;
+            for (const auto& v : j[ConfigName][LIT("ManualTeammateNames")]) {
+                if (v.is_string()) {
+                    const std::string s = v.get<std::string>();
+                    if (!s.empty()) parsedNames.push_back(s);
+                }
+            }
+            std::lock_guard<std::mutex> lock(TeamMutex());
+            ManualTeammateNames = std::move(parsedNames);
+        }
         HiddenPlayerEsp = j[ConfigName].value(LIT("HiddenPlayerEsp"), HiddenPlayerEsp);
         HeadDot = j[ConfigName].value(LIT("HeadDot"), HeadDot);
         HeadDotRadius = j[ConfigName].value(LIT("HeadDotRadius"), HeadDotRadius);

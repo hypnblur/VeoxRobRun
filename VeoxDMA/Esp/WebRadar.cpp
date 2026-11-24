@@ -3,6 +3,7 @@
 #include "WebRadarHtml.h"
 #include "MapSpriteData.h"
 #include "Radar.h"
+#include "RoleCounts.h"
 #include "RobRunReader.h"
 #include "RobRunSDK.h"
 #include "ConfigInstance.h"
@@ -134,12 +135,21 @@ struct Rgb { int r, g, b; };
 
 Rgb GetInGameMapRoleRgb(int role, const std::string& roleName, bool isTeammate)
 {
-	if (isTeammate) return { 75, 235, 235 };
+	auto toRgb = [](const D2D1::ColorF& c) -> Rgb {
+		return {
+			static_cast<int>(c.r * 255.f),
+			static_cast<int>(c.g * 255.f),
+			static_cast<int>(c.b * 255.f)
+		};
+	};
+	if (isTeammate)
+		return toRgb(ConfigInstance.Player.TeammateColour);
+	const auto& rcfg = ConfigInstance.Radar;
 	const std::string label = RobRunReader::RoleLabel(role, roleName);
-	if (label == "Criminal") return { 255, 68, 68 };
-	if (label == "Police Officer") return { 55, 145, 255 };
-	if (label == "Civilian" || label == "Hubber") return { 70, 225, 90 };
-	return { 255, 68, 68 };
+	if (label == "Criminal") return toRgb(rcfg.MapCriminalColour);
+	if (label == "Police Officer") return toRgb(rcfg.MapPoliceColour);
+	if (label == "Civilian" || label == "Hubber") return toRgb(rcfg.MapCivilianColour);
+	return toRgb(rcfg.MapCriminalColour);
 }
 
 Rgb MuteRoleRgb(Rgb c)
@@ -453,7 +463,7 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 				if (!ent.inVehicle && ent.vehicleId <= 0) continue;
 
 				const bool isLocal = (ent.entityId == localId);
-				const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+				const bool isTeammate = ent.IsTeammate();
 				if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
 
 				int matchedIdx = -1;
@@ -591,6 +601,17 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 				(!occ.occupied && remembered && RobRunReader::RoleLabel(remembered->role, remembered->roleName) == "Police Officer") ||
 				(!occ.occupied && !remembered && !mv.ownerRoleName.empty() && RobRunReader::RoleLabel(0, mv.ownerRoleName) == "Police Officer");
 
+			// Always keep police cars in their configured police car color (even when teammates/local are Police Officers)
+			if (isPoliceVeh && mv.kind != RobRunWorld::Kind::Helicopter) {
+				const auto& pc = ConfigInstance.Radar.MapPoliceCarColour;
+				const Rgb policeBlue{
+					static_cast<int>(pc.r * 255.f),
+					static_cast<int>(pc.g * 255.f),
+					static_cast<int>(pc.b * 255.f)
+				};
+				vehRgb = (occ.occupied || activeRemoteVeh || isOwnVeh) ? policeBlue : MuteRoleRgb(policeBlue);
+			}
+
 			const char* sprite = (mv.kind == RobRunWorld::Kind::Helicopter)
 				? "helicopter"
 				: (isPoliceVeh ? "police_car" : "car");
@@ -613,7 +634,7 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 			if (!std::isfinite(ent.position.x) || !std::isfinite(ent.position.z)) continue;
 
 			const bool isLocal = (ent.entityId == localId);
-			const bool isTeammate = ent.isPartyMember || ent.isClanMate;
+			const bool isTeammate = ent.IsTeammate();
 			if (!isLocal && pcfg.HideTeammates && isTeammate) continue;
 
 			float entYaw = ent.yaw;
@@ -735,6 +756,60 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 				}
 			}
 		}
+	}
+
+	{
+		Esp::RoleCounts rc{};
+		if (snapshot) {
+			const std::uint64_t nowMs = GetTickCount64();
+			constexpr std::uint64_t kVehRecentMoveMs = 10'000ULL;
+			constexpr std::uint64_t kLastDriverMaxAgeMs = 120'000ULL;
+			Esp::RemoteDriverHint hints[64]{};
+			std::size_t hintCount = 0;
+			auto findOrAddHint = [&](int vehId) -> Esp::RemoteDriverHint* {
+				for (std::size_t i = 0; i < hintCount; ++i)
+					if (hints[i].vehicleId == vehId) return &hints[i];
+				if (hintCount >= 64) return nullptr;
+				hints[hintCount] = Esp::RemoteDriverHint{};
+				hints[hintCount].vehicleId = vehId;
+				return &hints[hintCount++];
+			};
+			for (const auto& kv : g_vehMotion) {
+				const bool moving = (kv.second.lastMovedMs != 0) &&
+					(nowMs - kv.second.lastMovedMs <= kVehRecentMoveMs);
+				if (!moving) continue;
+				if (auto* h = findOrAddHint(kv.first))
+					h->isMoving = true;
+			}
+			for (const auto& kv : g_lastVehDriver) {
+				if (nowMs - kv.second.stampMs > kLastDriverMaxAgeMs) continue;
+				if (auto* h = findOrAddHint(kv.first)) {
+					h->entityId = kv.second.entityId;
+					h->role = kv.second.role;
+					h->roleName = kv.second.roleName;
+				}
+			}
+			rc = Esp::CountRoles(*snapshot, cfg.RoleCounterScope, hints, hintCount);
+		}
+		j["roleCounts"] = {
+			{ "police", rc.police },
+			{ "civilian", rc.civilian },
+			{ "criminal", rc.criminal },
+			{ "unknown", rc.unknown },
+			{ "total", rc.total }
+		};
+		auto colorFToHex = [](const D2D1::ColorF& c) -> std::string {
+			return RgbHex(
+				static_cast<int>(std::clamp(c.r * 255.f, 0.f, 255.f)),
+				static_cast<int>(std::clamp(c.g * 255.f, 0.f, 255.f)),
+				static_cast<int>(std::clamp(c.b * 255.f, 0.f, 255.f)));
+		};
+		j["roleCounters"] = {
+			{ "enabled", cfg.RoleCounters && cfg.RoleCountersOnWebRadar },
+			{ "policeColor", colorFToHex(cfg.RoleCounterPoliceColour) },
+			{ "civilianColor", colorFToHex(cfg.RoleCounterCivilianColour) },
+			{ "criminalColor", colorFToHex(cfg.RoleCounterCriminalColour) }
+		};
 	}
 
 	j["players"] = std::move(playersOut);
