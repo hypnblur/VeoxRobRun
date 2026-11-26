@@ -7,9 +7,12 @@ namespace Base::AimMotion {
 struct Vec2 { float x = 0, y = 0; };
 struct Settings {
     int smoothX = 4, smoothY = 4;
-    int smoothAlgorithm = 0; // 0 = EMA, 1 = Linear, 2 = Bezier
+    int smoothAlgorithm = 0; // 0 = EMA, 1 = Linear, 2 = Bezier, 3 = ABCurves
     float bezierBend = 0.35f; // 0.0 .. 1.0 lateral curve arc for Bezier
-    float bezierSpeed = 1.0f; // 0.25 .. 3.0 speed multiplier for Linear / Bezier
+    float bezierSpeed = 1.0f; // 0.25 .. 3.0 speed multiplier for Linear / Bezier / ABCurves
+    bool abcurvesRenderer = false; // 1 kHz GRU packet texture renderer
+    float abcurvesScale = 1.0f; // 0.25 .. 4.0 common-count scale for ABCurves planner
+    std::uint64_t abcurvesSeed = 0; // 0 = random per target, else fixed seed
     int pathVariation = 0, speedVariation = 0;
     int pathRandom = 0;
     float curveBend1 = 0.f, curveBend2 = 0.f;

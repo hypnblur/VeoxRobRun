@@ -28,6 +28,7 @@ static std::wstring PickConfigPath(bool save)
 #include "Il2Cpp.h"
 #include "SkinChanger.h"
 #include "DeviceSession.h"
+#include "ABCurves/ABCurvesPlanner.h"
 #include "InputManager.h"
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
@@ -1637,7 +1638,7 @@ void DrawAimGeneral()
 	static const char* aimTypes[] = { "Memory Aim", "Hardware Aim" };
 	static const char* kBones[] = { "Head", "Neck", "Chest", "Pelvis", "Closest", "Head & Body" };
 	static const char* priorities[] = { "Crosshair FOV", "3D Distance", "Lowest Health" };
-	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier" };
+	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier", "ABCurves" };
 
 	ImGui::BeginGroup();
 	{
@@ -1677,8 +1678,17 @@ void DrawAimGeneral()
 		SliderIntRow("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
 		if (ConfigInstance.Aim.SmoothAlgorithm == 2)
 			SliderFloatRow("Bezier Arc", &ConfigInstance.Aim.BezierBend, 0.0f, 1.0f);
-		if (ConfigInstance.Aim.SmoothAlgorithm == 1 || ConfigInstance.Aim.SmoothAlgorithm == 2)
+		if (ConfigInstance.Aim.SmoothAlgorithm == 1 || ConfigInstance.Aim.SmoothAlgorithm == 2 || ConfigInstance.Aim.SmoothAlgorithm == 3)
 			SliderFloatRow("Curve Speed", &ConfigInstance.Aim.BezierSpeed, 0.25f, 3.0f, "x");
+		if (ConfigInstance.Aim.SmoothAlgorithm == 3) {
+			SliderFloatRow("ABCurves Scale", &ConfigInstance.Aim.ABCurvesScale, 0.25f, 4.0f, "x");
+			Note("ABCurves Planner: %s", Base::ABCurves::ContinuousStream::Available()
+				? "ready (abcurves_continuous.bin)"
+				: "missing abcurves_continuous.bin (Bezier fallback)");
+		}
+		ToggleRow("ABCurves Packet Renderer", &ConfigInstance.Aim.ABCurvesRenderer);
+		if (ConfigInstance.Aim.ABCurvesRenderer)
+			Note("1 kHz GRU packet texture active for Hardware/Cursor output.");
 		if (ConfigInstance.Aim.AimType == 1)
 			SliderFloatRow("Hardware Gain", &ConfigInstance.Aim.HardwareGain, 0.25f, 5.0f, "x");
 		SliderFloatRow("Aim Deadzone", &ConfigInstance.Aim.DeadzonePx, 0.0f, 25.0f, " px");
@@ -1697,7 +1707,7 @@ void DrawAimGeneral()
 
 void DrawAimTargetsRecoil()
 {
-	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier" };
+	static const char* kSmoothAlgos[] = { "EMA", "Linear", "Bezier", "ABCurves" };
 
 	ImGui::BeginGroup();
 	{
@@ -1739,7 +1749,7 @@ void DrawAimTargetsRecoil()
 		BeginCard("Live State", IconKind::Aim, kCardW);
 		{
 			const Aim::DebugInfo info = Aim::GetDebug();
-			const char* curveLabel = (info.smoothAlgorithm >= 0 && info.smoothAlgorithm < 3)
+			const char* curveLabel = (info.smoothAlgorithm >= 0 && info.smoothAlgorithm < 4)
 				? kSmoothAlgos[info.smoothAlgorithm] : "EMA";
 			const char* clsLabel = (info.activeWeaponClass >= 0 && info.activeWeaponClass < Aim::WeaponClassCount())
 				? Aim::WeaponClassNames()[info.activeWeaponClass] : "Default";
@@ -1813,8 +1823,8 @@ void DrawAimTriggerbot()
 			if (ComboRow("Profile Bone", &boneUi, kProfileBones, IM_ARRAYSIZE(kProfileBones)))
 				wp.TargetBone = boneUi - 1;
 
-			static const char* kProfileCurves[] = { "Inherit", "EMA", "Linear", "Bezier" };
-			int curveUi = std::clamp(wp.SmoothAlgorithmOverride + 1, 0, 3);
+			static const char* kProfileCurves[] = { "Inherit", "EMA", "Linear", "Bezier", "ABCurves" };
+			int curveUi = std::clamp(wp.SmoothAlgorithmOverride + 1, 0, 4);
 			if (ComboRow("Profile Curve", &curveUi, kProfileCurves, IM_ARRAYSIZE(kProfileCurves)))
 				wp.SmoothAlgorithmOverride = curveUi - 1;
 

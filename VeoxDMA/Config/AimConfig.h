@@ -12,7 +12,7 @@ struct WeaponProfile
 	int TargetBone = -1;              // -1 = Inherit, 0 = Head, 1 = Neck, 2 = Chest, 3 = Pelvis, 4 = Closest
 	int FovOverride = 0;              // 0 = Inherit global FOV, else 5..180 deg
 	int SmoothnessOverride = 0;       // 0 = Inherit, else 1..100
-	int SmoothAlgorithmOverride = -1; // -1 = Inherit, 0 = EMA, 1 = Linear, 2 = Bezier
+	int SmoothAlgorithmOverride = -1; // -1 = Inherit, 0 = EMA, 1 = Linear, 2 = Bezier, 3 = ABCurves
 	int TriggerKeyOverride = -1;      // -1 = Inherit global trigger key, else index into Aim::KeyNames()
 	bool TriggerEnabled = true;       // allow auto-fire when this profile is active
 	int TriggerMinDelayMs = -1;       // -1 = Inherit, else 0..500 ms
@@ -82,10 +82,17 @@ public:
 	int TargetPriority = 0; // 0 = Crosshair FOV, 1 = 3D Distance, 2 = Lowest Health
 	bool DynamicBoneFallback = false; // drop to chest if head is occluded or low health
 	int Smoothness = 6;     // 1 (instant) .. 100 (very slow)
-	// Multi-curve smoothing algorithm: 0 = EMA, 1 = Linear, 2 = Bezier
+	// Multi-curve smoothing algorithm: 0 = EMA, 1 = Linear, 2 = Bezier, 3 = ABCurves
 	int SmoothAlgorithm = 0;
 	float BezierBend = 0.35f;  // 0.0 .. 1.0 lateral curve factor for Bezier
-	float BezierSpeed = 1.0f;  // 0.25 .. 3.0 travel speed multiplier for Linear / Bezier
+	float BezierSpeed = 1.0f;  // 0.25 .. 3.0 travel speed multiplier for Linear / Bezier / ABCurves
+	// ABCurves options:
+	// - ABCurvesRenderer: 1 kHz fixed-point GRU packet renderer (works with any curve on Hardware/Cursor)
+	// - ABCurvesScale: sensitivity multiplier into ABCurves common angular count space (0.25 .. 4.0)
+	// - ABCurvesSeed: 0 = random seed per target, >0 = fixed seed
+	bool ABCurvesRenderer = false;
+	float ABCurvesScale = 1.0f;
+	int ABCurvesSeed = 0;
 	// Hardware Aim only: multiplies the pixel error before it is sent to the
 	// device, so a low in-game sensitivity (where one mouse count travels less
 	// than one screen pixel) can be compensated without changing Smoothness.
@@ -221,6 +228,9 @@ public:
 		j[ConfigName][LIT("SmoothAlgorithm")] = SmoothAlgorithm;
 		j[ConfigName][LIT("BezierBend")] = BezierBend;
 		j[ConfigName][LIT("BezierSpeed")] = BezierSpeed;
+		j[ConfigName][LIT("ABCurvesRenderer")] = ABCurvesRenderer;
+		j[ConfigName][LIT("ABCurvesScale")] = ABCurvesScale;
+		j[ConfigName][LIT("ABCurvesSeed")] = ABCurvesSeed;
 		j[ConfigName][LIT("HardwareGain")] = HardwareGain;
 		j[ConfigName][LIT("Fov")] = Fov;
 		j[ConfigName][LIT("AimKey")] = AimKey;
@@ -302,6 +312,9 @@ public:
 		SmoothAlgorithm = j[ConfigName].value(LIT("SmoothAlgorithm"), SmoothAlgorithm);
 		BezierBend = j[ConfigName].value(LIT("BezierBend"), BezierBend);
 		BezierSpeed = j[ConfigName].value(LIT("BezierSpeed"), BezierSpeed);
+		ABCurvesRenderer = j[ConfigName].value(LIT("ABCurvesRenderer"), ABCurvesRenderer);
+		ABCurvesScale = j[ConfigName].value(LIT("ABCurvesScale"), ABCurvesScale);
+		ABCurvesSeed = j[ConfigName].value(LIT("ABCurvesSeed"), ABCurvesSeed);
 		HardwareGain = j[ConfigName].value(LIT("HardwareGain"), HardwareGain);
 		Fov = j[ConfigName].value(LIT("Fov"), Fov);
 		AimKey = j[ConfigName].value(LIT("AimKey"), AimKey);
