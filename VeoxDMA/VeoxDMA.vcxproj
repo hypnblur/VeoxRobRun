@@ -96,8 +96,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
-      <Message>Staging OrbitResources.dll next to the overlay</Message>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul
+if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)tools\abcurves_continuous.bin" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll and ABCurves weights next to the overlay</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -117,8 +118,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
-      <Message>Staging OrbitResources.dll next to the overlay</Message>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul
+if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)tools\abcurves_continuous.bin" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll and ABCurves weights next to the overlay</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -140,8 +142,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
-      <Message>Staging OrbitResources.dll next to the overlay</Message>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul
+if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)tools\abcurves_continuous.bin" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll and ABCurves weights next to the overlay</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -168,8 +171,9 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul</Command>
-      <Message>Staging OrbitResources.dll next to the overlay</Message>
+      <Command>copy /y "$(SolutionDir)Lib\OrbitResources.dll" "$(OutDir)" &gt;nul
+if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)tools\abcurves_continuous.bin" "$(OutDir)" &gt;nul</Command>
+      <Message>Staging OrbitResources.dll and ABCurves weights next to the overlay</Message>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -219,6 +223,24 @@
     <ClCompile Include="Input\InputManager.cpp" />
     <ClCompile Include="Input\DeviceBackend.cpp" />
     <ClCompile Include="Input\DeviceSession.cpp" />
+    <ClCompile Include="Input\ABCurves\ABCurvesRendererData.cpp" />
+    <ClCompile Include="Input\ABCurves\ABCurvesRenderer.cpp" />
+    <ClCompile Include="Input\ABCurves\ABCurvesPlanner.cpp" />
+    <ClCompile Include="Input\ABCurves\c\src\abc_fixed.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <AdditionalIncludeDirectories>$(SolutionDir)$(ProjectName)\Input\ABCurves\c\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="Input\ABCurves\c\src\abc_online.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <AdditionalIncludeDirectories>$(SolutionDir)$(ProjectName)\Input\ABCurves\c\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <ClCompile Include="Input\ABCurves\c\src\abc_w5_stream.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <AdditionalIncludeDirectories>$(SolutionDir)$(ProjectName)\Input\ABCurves\c\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="ImGUI\imgui.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -298,6 +320,12 @@
     <ClInclude Include="Input\InputManager.h" />
     <ClInclude Include="Input\AimMotion.h" />
     <ClInclude Include="Input\DeviceSession.h" />
+    <ClInclude Include="Input\ABCurves\ABCurvesRendererData.h" />
+    <ClInclude Include="Input\ABCurves\ABCurvesRenderer.h" />
+    <ClInclude Include="Input\ABCurves\ABCurvesPlanner.h" />
+    <ClInclude Include="Input\ABCurves\c\include\abc_fixed.h" />
+    <ClInclude Include="Input\ABCurves\c\include\abc_online.h" />
+    <ClInclude Include="Input\ABCurves\c\include\abc_w5_stream.h" />
     <ClInclude Include="Aim\AimController.h" />
     <ClInclude Include="ImGUI\imgui.h" />
     <ClInclude Include="ImGUI\imgui_internal.h" />

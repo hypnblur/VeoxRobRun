@@ -38,6 +38,7 @@ $PublishExe = Join-Path $PublishDir $ExeName
 $LibDir     = Join-Path $RepoRoot "Lib"
 $RuntimeDlls = @("vmm.dll", "leechcore.dll", "FTD3XX.dll", "OrbitResources.dll")
 $BvhSrc     = Join-Path $RepoRoot "tools\city_colliders.bvh"
+$AbcSrc     = Join-Path $RepoRoot "tools\abcurves_continuous.bin"
 $MapsSrc    = Join-Path $RepoRoot "maps"
 $MapsDst    = Join-Path $PublishDir "maps"
 $UploadDir  = Join-Path $RepoRoot "_upload"
@@ -109,6 +110,10 @@ if (-not (Test-Path $BvhSrc)) {
     throw "city_colliders.bvh not found at '$BvhSrc' - check the tools\ folder."
 }
 Copy-Item $BvhSrc (Join-Path $PublishDir "city_colliders.bvh") -Force
+
+if (Test-Path $AbcSrc) {
+    Copy-Item $AbcSrc (Join-Path $PublishDir "abcurves_continuous.bin") -Force
+}
 
 if (-not (Test-Path $MapsSrc)) {
     throw "maps\ source folder not found at '$MapsSrc'."

@@ -1,5 +1,7 @@
 #include "pch.h"
 #include "DeviceSession.h"
+#include "ABCurves/ABCurvesPlanner.h"
+#include "ABCurves/ABCurvesRenderer.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -94,6 +96,10 @@ struct DeviceSession::Impl {
         std::array<AimMotion::Vec2, sourceCount> stickCommands{};
         unsigned stickSources = 0;
         AimMotion::Quantizer combinedQuantizer;
+        std::array<ABCurves::ContinuousStream, sourceCount> abPlanners{};
+        std::array<std::uint64_t, sourceCount> abTargets{};
+        ABCurves::RendererStream abRenderer;
+        bool abFastWake = false;
         while (!stop) {
             DeviceConfig c; bool want, clear, enumerate;
             std::uint64_t gen;
@@ -101,7 +107,7 @@ struct DeviceSession::Impl {
                 std::unique_lock lock(mutex);
                 if (!wanted && !refresh && active == generation)
                     wake.wait(lock, [&] { return stop || wanted || refresh || active != generation; });
-                else wake.wait_for(lock, std::chrono::milliseconds(2));
+                else wake.wait_for(lock, std::chrono::milliseconds(abFastWake ? 1 : 2));
                 if (stop) break;
                 c = config; want = wanted; gen = generation;
                 clear = std::exchange(neutralize, false);
@@ -111,6 +117,7 @@ struct DeviceSession::Impl {
                 backend->Close(); opened = locked = false;
                 active = gen; attempts = 0; retry = {}; motion = {}; last = {};
                 combinedQuantizer.Reset();
+                abTargets = {}; abRenderer.Reset(); abFastWake = false;
                 stickCommands = {}; stickSources = 0;
             }
             if (enumerate) {
@@ -161,6 +168,7 @@ struct DeviceSession::Impl {
             bool ok = true;
             if (clear || epoch != outputEpoch.load()) {
                 epoch = outputEpoch; motion = {}; last = {}; combinedQuantizer.Reset();
+                abTargets = {}; abRenderer.Reset(); abFastWake = false;
                 ok = backend->Neutralize(); locked = false;
                 stickCommands = {}; stickSources = 0;
             }
@@ -198,13 +206,13 @@ struct DeviceSession::Impl {
             }
             now = Clock::now();
             for (size_t i = 0; i < sourceCount; ++i) {
-                if (local[i].revision != revisions[i]) { motion[i].Reset(); last[i] = {}; oneShots[i] = 0; stickCommands[i] = {}; combinedQuantizer.Reset(); revisions[i] = local[i].revision; }
+                if (local[i].revision != revisions[i]) { motion[i].Reset(); last[i] = {}; oneShots[i] = 0; stickCommands[i] = {}; abTargets[i] = 0; combinedQuantizer.Reset(); abRenderer.Reset(); revisions[i] = local[i].revision; }
                 if (local[i].active && now >= local[i].intent.expires) {
                     local[i].active = false;
                     std::lock_guard lock(mutex);
                     if (slots[i].active && slots[i].intent.expires <= now) { slots[i].active = false; ++status.expired; }
                 }
-                if (!local[i].active) { motion[i].Reset(); last[i] = {}; oneShots[i] = 0; stickCommands[i] = {}; }
+                if (!local[i].active) { motion[i].Reset(); last[i] = {}; oneShots[i] = 0; stickCommands[i] = {}; abTargets[i] = 0; }
             }
             const int exclusive = local[size_t(Source::Preview)].active ? int(Source::Preview)
                 : local[size_t(Source::Mortar)].active ? int(Source::Mortar) : -1;
@@ -212,6 +220,9 @@ struct DeviceSession::Impl {
             const bool stick = UsesController(c);
             unsigned activeSources = 0;
             bool axes = false, any = false;
+            bool wantAbRenderer = false;
+            std::uint64_t abRenderSeed = 0;
+            float abRenderDt = 0.001f;
             std::array<AimMotion::Vec2, sourceCount> contributions{};
             std::array<bool, sourceCount> used{};
             for (size_t i = 0; i < sourceCount && !test; ++i) {
@@ -219,6 +230,11 @@ struct DeviceSession::Impl {
                 const auto& in = local[i].intent;
                 any = true; axes |= in.axisLock;
                 activeSources |= 1u << i;
+                if (in.settings.abcurvesRenderer) {
+                    wantAbRenderer = true;
+                    abRenderSeed = in.settings.abcurvesSeed ? in.settings.abcurvesSeed
+                        : (in.target ^ std::uint64_t(now.time_since_epoch().count()));
+                }
                 if (!in.error && !in.rate && oneShots[i] == in.observation) continue;
                 const int interval = std::clamp(in.intervalMs, 1, 100);
                 if (last[i] != Clock::time_point{} && now - last[i] < std::chrono::milliseconds(interval)) {
@@ -228,20 +244,56 @@ struct DeviceSession::Impl {
                 float dt = last[i] == Clock::time_point{} ? float(interval) / 1000
                     : (std::min)(0.05f, std::chrono::duration<float>(now - last[i]).count());
                 last[i] = now;
+                if (in.settings.abcurvesRenderer)
+                    abRenderDt = dt;
                 AimMotion::Vec2 v = in.value;
                 if (in.error) {
                     motion[i].Observe(in.target, in.observation, in.value);
+                    AimMotion::Vec2 stepVec{};
+                    if (in.settings.smoothAlgorithm == 3 && ABCurves::ContinuousStream::Available()) {
+                        const float dist = std::hypot(motion[i].remaining.x, motion[i].remaining.y);
+                        if (dist > in.settings.deadzonePixels) {
+                            if (abTargets[i] != in.target || abTargets[i] == 0) {
+                                abTargets[i] = in.target ? in.target : 1ull;
+                                const std::uint64_t seed = in.settings.abcurvesSeed ? in.settings.abcurvesSeed
+                                    : (abTargets[i] ^ std::uint64_t(now.time_since_epoch().count()));
+                                abPlanners[i].Reset(seed);
+                            }
+                            const float abScale = std::clamp(
+                                std::isfinite(in.settings.abcurvesScale) ? in.settings.abcurvesScale : 1.f,
+                                0.25f, 4.f);
+                            const float speedMul = std::clamp(
+                                std::isfinite(in.settings.bezierSpeed) ? in.settings.bezierSpeed : 1.f,
+                                0.25f, 3.f);
+                            const double errCountsX = static_cast<double>(motion[i].remaining.x * in.settings.countsPerPixelX) * abScale;
+                            const double errCountsY = static_cast<double>(motion[i].remaining.y * in.settings.countsPerPixelY) * abScale;
+                            // ABCurves canonical space is Y-up; hardware/screen is Y-down.
+                            const auto abDelta = abPlanners[i].StepTowardError(
+                                errCountsX, -errCountsY,
+                                static_cast<double>(std::clamp(dt * speedMul, 0.001f, 0.05f)));
+                            stepVec.x = static_cast<float>(abDelta.dx / abScale);
+                            stepVec.y = static_cast<float>(-abDelta.dy / abScale);
+                            const float outLen = std::hypot(stepVec.x, stepVec.y);
+                            const float cap = (std::max)(0.f, in.settings.maxCountsPerSecond) * dt;
+                            if (outLen > cap && outLen > 0.f) {
+                                stepVec.x *= cap / outLen;
+                                stepVec.y *= cap / outLen;
+                            }
+                        }
+                    } else {
+                        stepVec = AimMotion::StepWithCurve(motion[i].curve, motion[i].target,
+                            motion[i].remaining, in.settings, dt);
+                    }
                     v = AimMotion::ApplyVariation(motion[i].variation, motion[i].target,
-                        motion[i].remaining,
-                        AimMotion::StepWithCurve(motion[i].curve, motion[i].target,
-                            motion[i].remaining, in.settings, dt),
-                        in.settings);
+                        motion[i].remaining, stepVec, in.settings);
                 } else if (in.rate) { v.x *= dt; v.y *= dt; }
                 if (stick) { v.x *= in.stickScale; v.y *= in.stickScale; stickCommands[i] = v; }
                 contributions[i] = v; used[i] = true;
                 sum.x += v.x; sum.y += v.y;
             }
-            if (!any) combinedQuantizer.Reset();
+            abFastWake = wantAbRenderer && !stick;
+            if (!any) { combinedQuantizer.Reset(); abRenderer.Reset(); }
+            if (!wantAbRenderer) abRenderer.Reset();
             const float limit = stick ? 32767.f : 127.f;
             const AimMotion::Vec2 scale{std::fabs(sum.x) > limit ? limit / std::fabs(sum.x) : 1.f,
                 std::fabs(sum.y) > limit ? limit / std::fabs(sum.y) : 1.f};
@@ -252,8 +304,17 @@ struct DeviceSession::Impl {
                   if (local[i].active && slots[i].revision != local[i].revision) valid = false;
             }
             if (ok && valid) {
-                const auto counts = stick ? AimMotion::Vec2{std::round(sum.x * scale.x), std::round(sum.y * scale.y)}
-                    : combinedQuantizer.Round({sum.x * scale.x, sum.y * scale.y}, int(limit));
+                AimMotion::Vec2 counts{};
+                if (stick) {
+                    counts = AimMotion::Vec2{std::round(sum.x * scale.x), std::round(sum.y * scale.y)};
+                } else if (wantAbRenderer && updated && ABCurves::RendererStream::Available()) {
+                    if (!abRenderer.Active())
+                        abRenderer.Begin(abRenderSeed);
+                    const auto rep = abRenderer.Step(sum.x * scale.x, sum.y * scale.y, abRenderDt, int(limit));
+                    counts = { float(rep.dx), float(rep.dy) };
+                } else {
+                    counts = combinedQuantizer.Round({sum.x * scale.x, sum.y * scale.y}, int(limit));
+                }
                 if (axes != locked) { ok = backend->AxisLock(axes); locked = axes; }
                 const bool write = stick ? updated || activeSources != stickSources : counts.x || counts.y;
                 if (ok && outputCurrent() && write) {

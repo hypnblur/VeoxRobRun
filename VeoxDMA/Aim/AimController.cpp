@@ -9,6 +9,8 @@
 #include "Il2Cpp.h"
 #include "Memory.h"
 #include "DeviceSession.h"
+#include "ABCurves/ABCurvesPlanner.h"
+#include "ABCurves/ABCurvesRenderer.h"
 #include "CtlState.h"
 #include "InputManager.h"
 #include "Overlay.h"
@@ -160,6 +162,10 @@ int g_smoothTarget = -1;
 float g_bezierT = 0.f;
 float g_bezierBendSign = 1.f;
 Base::AimMotion::CurveState g_cursorCurve{};
+Base::ABCurves::ContinuousStream g_memAbPlanner;
+Base::ABCurves::ContinuousStream g_cursorAbPlanner;
+Base::ABCurves::RendererStream g_cursorAbRenderer;
+int g_cursorAbTarget = -1;
 std::uint64_t g_lastWriteTick = 0;
 std::uint64_t g_targetLockUs = 0;
 Vector3 g_writtenForward{};
@@ -513,7 +519,7 @@ EffectiveSettings ResolveEffectiveSettings(const AimConfig& cfg, const RobRunRea
     eff.targetBone = std::clamp(cfg.TargetBone, 0, 4);
     eff.fov = std::clamp(cfg.Fov, 5, 180);
     eff.smoothness = std::clamp(cfg.Smoothness, 1, 100);
-    eff.smoothAlgorithm = std::clamp(cfg.SmoothAlgorithm, 0, 2);
+    eff.smoothAlgorithm = std::clamp(cfg.SmoothAlgorithm, 0, 3);
     eff.triggerEnabled = cfg.TriggerEnabled;
     eff.triggerKey = std::clamp(cfg.TriggerKey, 0, kKeyCount - 1);
     eff.triggerMinDelayMs = std::clamp(cfg.TriggerMinDelayMs, 0, 500);
@@ -537,7 +543,7 @@ EffectiveSettings ResolveEffectiveSettings(const AimConfig& cfg, const RobRunRea
                 eff.fov = p.FovOverride;
             if (p.SmoothnessOverride >= 1 && p.SmoothnessOverride <= 100)
                 eff.smoothness = p.SmoothnessOverride;
-            if (p.SmoothAlgorithmOverride >= 0 && p.SmoothAlgorithmOverride <= 2)
+            if (p.SmoothAlgorithmOverride >= 0 && p.SmoothAlgorithmOverride <= 3)
                 eff.smoothAlgorithm = p.SmoothAlgorithmOverride;
             eff.triggerEnabled = cfg.TriggerEnabled && p.TriggerEnabled;
             if (p.TriggerKeyOverride >= 0 && p.TriggerKeyOverride < kKeyCount)
@@ -2681,6 +2687,10 @@ void Tick()
                 g_carryYaw = g_carryPitch = 0.f;
                 g_bezierT = 0.f;
                 g_bezierBendSign = ((static_cast<unsigned>(bestId) ^ (static_cast<unsigned>(bestId) >> 2)) & 1u) ? 1.f : -1.f;
+                const std::uint64_t abSeed = (cfg.ABCurvesSeed > 0)
+                    ? static_cast<std::uint64_t>(cfg.ABCurvesSeed)
+                    : (static_cast<std::uint64_t>(bestId) ^ nowUs);
+                g_memAbPlanner.Reset(abSeed);
                 g_smoothInit = true;
                 g_smoothTarget = bestId;
                 g_targetLockUs = nowUs;
@@ -2782,8 +2792,19 @@ void Tick()
                             stepYaw = (dYaw + nyaw * lat) * stepFrac + g_carryYaw;
                             stepPitch = (dPitch + npitch * lat) * stepFrac + g_carryPitch;
                         }
+                    } else if (eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available()) {
+                        // ABCurves Continuous Planner: convert angular error (rad)
+                        // directly into common angular count space, advance the
+                        // neural ProDMP stream, and convert delta back to radians.
+                        const double abScale = static_cast<double>(std::clamp(cfg.ABCurvesScale, 0.25f, 4.f));
+                        const double errX = (static_cast<double>(dYaw) / Base::ABCurves::kCommonRadiansPerCount) * abScale;
+                        const double errY = (static_cast<double>(dPitch) / Base::ABCurves::kCommonRadiansPerCount) * abScale;
+                        const double abDt = static_cast<double>(std::clamp(dtSec * speedMul, 0.001f, 0.05f));
+                        const auto abDelta = g_memAbPlanner.StepTowardError(errX, errY, abDt);
+                        stepYaw = static_cast<float>((abDelta.dx * Base::ABCurves::kCommonRadiansPerCount) / abScale) + g_carryYaw;
+                        stepPitch = static_cast<float>((abDelta.dy * Base::ABCurves::kCommonRadiansPerCount) / abScale) + g_carryPitch;
                     } else {
-                        // EMA (0): exponential convergence
+                        // EMA (0): exponential convergence (or fallback if weights missing)
                         stepYaw = dYaw * gain + g_carryYaw;
                         stepPitch = dPitch * verticalGain + g_carryPitch;
                     }
@@ -2872,6 +2893,9 @@ void Tick()
     settings.smoothAlgorithm = eff.smoothAlgorithm;
     settings.bezierBend = std::clamp(cfg.BezierBend, 0.f, 1.f);
     settings.bezierSpeed = std::clamp(cfg.BezierSpeed, 0.25f, 3.f);
+    settings.abcurvesRenderer = cfg.ABCurvesRenderer;
+    settings.abcurvesScale = std::clamp(cfg.ABCurvesScale, 0.25f, 4.f);
+    settings.abcurvesSeed = static_cast<std::uint64_t>((std::max)(0, cfg.ABCurvesSeed));
     settings.countsPerPixelX = settings.countsPerPixelY = 1.f;
     settings.deadzonePixels = 0.5f;
 
@@ -2882,10 +2906,42 @@ void Tick()
         // a two-PC DMA setup needs Hardware Aim or the angle write above.
         stopAiming();
         settings.responseMs = responseMs;
-        const auto step = Base::AimMotion::StepWithCurve(
-            g_cursorCurve, static_cast<std::uint64_t>(bestId), { dx, dy }, settings, dt);
-        const int mx = static_cast<int>(std::lround(step.x));
-        const int my = static_cast<int>(std::lround(step.y));
+        Base::AimMotion::Vec2 step{};
+        if (eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available()) {
+            if (g_cursorAbTarget != bestId) {
+                g_cursorAbTarget = bestId;
+                const std::uint64_t seed = settings.abcurvesSeed ? settings.abcurvesSeed
+                    : (static_cast<std::uint64_t>(bestId) ^ static_cast<std::uint64_t>(nowTime.time_since_epoch().count()));
+                g_cursorAbPlanner.Reset(seed);
+                g_cursorAbRenderer.Reset();
+            }
+            const double abScale = static_cast<double>(settings.abcurvesScale);
+            const auto abDelta = g_cursorAbPlanner.StepTowardError(
+                static_cast<double>(dx) * abScale,
+                static_cast<double>(-dy) * abScale,
+                static_cast<double>(std::clamp(dt * settings.bezierSpeed, 0.001f, 0.05f)));
+            step.x = static_cast<float>(abDelta.dx / abScale);
+            step.y = static_cast<float>(-abDelta.dy / abScale);
+        } else {
+            g_cursorAbTarget = -1;
+            step = Base::AimMotion::StepWithCurve(
+                g_cursorCurve, static_cast<std::uint64_t>(bestId), { dx, dy }, settings, dt);
+        }
+        int mx = 0, my = 0;
+        if (cfg.ABCurvesRenderer && Base::ABCurves::RendererStream::Available()) {
+            if (!g_cursorAbRenderer.Active()) {
+                const std::uint64_t seed = settings.abcurvesSeed ? settings.abcurvesSeed
+                    : (static_cast<std::uint64_t>(bestId) ^ static_cast<std::uint64_t>(nowTime.time_since_epoch().count()));
+                g_cursorAbRenderer.Begin(seed);
+            }
+            const auto rep = g_cursorAbRenderer.Step(step.x, step.y, dt, 127);
+            mx = rep.dx;
+            my = rep.dy;
+        } else {
+            g_cursorAbRenderer.Reset();
+            mx = static_cast<int>(std::lround(step.x));
+            my = static_cast<int>(std::lround(step.y));
+        }
         dbg.stepX = mx;
         dbg.stepY = my;
         if (mx != 0 || my != 0) {
@@ -2921,7 +2977,7 @@ void Tick()
     intent.target = static_cast<std::uint64_t>(bestId);
     intent.observation = ++g_observation;
     intent.error = true;
-    intent.intervalMs = 6;
+    intent.intervalMs = cfg.ABCurvesRenderer ? 1 : 6;
     intent.stickScale = std::clamp(cfg.ControllerStickScale, 10.f, 500.f);
     intent.expires = Base::Hardware::Clock::now() + std::chrono::milliseconds(50);
     if (Base::Hardware::Session().Submit(Base::Hardware::Source::Aim, intent)) {
@@ -3311,8 +3367,8 @@ void DrawDebug()
     if (display.x <= 0.f || display.y <= 0.f) return;
 
     const DebugInfo d = GetDebug();
-    static const char* const kCurveNames[] = { "EMA", "Linear", "Bezier" };
-    const char* curveName = (d.smoothAlgorithm >= 0 && d.smoothAlgorithm < 3)
+    static const char* const kCurveNames[] = { "EMA", "Linear", "Bezier", "ABCurves" };
+    const char* curveName = (d.smoothAlgorithm >= 0 && d.smoothAlgorithm < 4)
         ? kCurveNames[d.smoothAlgorithm] : "EMA";
     const char* profName = (d.activeWeaponClass >= 0 && d.activeWeaponClass < kWeaponClassCount)
         ? kWeaponClassNames[d.activeWeaponClass] : "Default";
