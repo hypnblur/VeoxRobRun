@@ -41,10 +41,13 @@ struct ListHeader {
 };
 static_assert(sizeof(ListHeader) == 0x10, "List header layout");
 
-bool ReadDictHeader(std::uintptr_t dictionary, DictHeader& out)
+bool ReadDictHeader(std::uintptr_t dictionary, DictHeader& out, bool fresh = false)
 {
     if (dictionary <= 0x10000) return false;
-    if (!ReadBytes(dictionary + rr::Dict::entries, &out, sizeof(out))) return false;
+    const bool ok = fresh
+        ? ReadBytesFresh(dictionary + rr::Dict::entries, &out, sizeof(out))
+        : ReadBytes(dictionary + rr::Dict::entries, &out, sizeof(out));
+    if (!ok) return false;
     return out.entries > 0x10000 && out.count >= 0 && out.count <= 65536;
 }
 
@@ -61,15 +64,21 @@ bool ReadDictOnce(std::uintptr_t dictionary, std::vector<T>& out,
     bool requireStable)
 {
     out.clear();
+    // Under MemProcFS -norefresh, cached reads can return the exact same
+    // cached header page twice, defeating torn-read detection. When the caller
+    // requests strict stability, read the header and backing array fresh.
     DictHeader header;
-    if (!ReadDictHeader(dictionary, header)) return false;
+    if (!ReadDictHeader(dictionary, header, requireStable)) return false;
 
     // Read the backing-array length and the entries in one transaction. The
     // old path issued a separate read for capacity and another for the data.
     const std::size_t elementBytes =
         static_cast<std::size_t>(header.count) * sizeof(T);
     std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
-    if (!ReadBytes(header.entries + rr::Array::max_length, raw.data(), raw.size()))
+    const bool readArrayOk = requireStable
+        ? ReadBytesFresh(header.entries + rr::Array::max_length, raw.data(), raw.size())
+        : ReadBytes(header.entries + rr::Array::max_length, raw.data(), raw.size());
+    if (!readArrayOk)
         return false;
 
     std::uint64_t capacity = 0;
@@ -87,7 +96,7 @@ bool ReadDictOnce(std::uintptr_t dictionary, std::vector<T>& out,
     // changes are tolerated when the caller opts out of strict stability, which
     // the fast-moving world dictionaries do.
     DictHeader after;
-    if (!ReadDictHeader(dictionary, after) ||
+    if (!ReadDictHeader(dictionary, after, requireStable) ||
         !DictHeaderMatches(header, after, requireStable))
         return false;
 
@@ -261,37 +270,50 @@ bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
     out.clear();
     if (list <= 0x10000) return false;
 
-    ListHeader header;
-    if (!ReadBytes(list + rr::List::items, &header, sizeof(header)))
-        return false;
-    if (header.items <= 0x10000 || header.count < 0 || header.count > 65536)
-        return false;
-
-    const std::size_t elementBytes =
-        static_cast<std::size_t>(header.count) * sizeof(std::uintptr_t);
-    std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
-    if (!ReadBytes(header.items + rr::Array::max_length, raw.data(), raw.size()))
-        return false;
-
-    std::uint64_t capacity = 0;
-    std::memcpy(&capacity, raw.data(), sizeof(capacity));
-    if (capacity < static_cast<std::uint64_t>(header.count))
-        return false;
-
-    std::vector<std::uintptr_t> snapshot(static_cast<std::size_t>(header.count));
-    if (elementBytes)
-        std::memcpy(snapshot.data(), raw.data() + sizeof(capacity), elementBytes);
-
-    if (requireStable) {
-        ListHeader after;
-        if (!ReadBytes(list + rr::List::items, &after, sizeof(after)))
+    const int maxAttempts = requireStable ? 2 : 1;
+    for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+        ListHeader header;
+        const bool hdrOk = requireStable
+            ? ReadBytesFresh(list + rr::List::items, &header, sizeof(header))
+            : ReadBytes(list + rr::List::items, &header, sizeof(header));
+        if (!hdrOk)
+            continue;
+        if (header.items <= 0x10000 || header.count < 0 || header.count > 65536)
             return false;
-        if (after.items != header.items || after.count != header.count)
-            return false;
+
+        const std::size_t elementBytes =
+            static_cast<std::size_t>(header.count) * sizeof(std::uintptr_t);
+        std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
+        const bool rawOk = requireStable
+            ? ReadBytesFresh(header.items + rr::Array::max_length, raw.data(), raw.size())
+            : ReadBytes(header.items + rr::Array::max_length, raw.data(), raw.size());
+        if (!rawOk)
+            continue;
+
+        std::uint64_t capacity = 0;
+        std::memcpy(&capacity, raw.data(), sizeof(capacity));
+        if (capacity < static_cast<std::uint64_t>(header.count) ||
+            capacity > 0x1000000ull)
+            continue;
+
+        std::vector<std::uintptr_t> snapshot(static_cast<std::size_t>(header.count));
+        if (elementBytes)
+            std::memcpy(snapshot.data(), raw.data() + sizeof(capacity), elementBytes);
+
+        if (requireStable) {
+            ListHeader after;
+            if (!ReadBytesFresh(list + rr::List::items, &after, sizeof(after)))
+                continue;
+            if (after.items != header.items || after.count != header.count ||
+                after.version != header.version)
+                continue;
+        }
+
+        out = std::move(snapshot);
+        return true;
     }
-
-    out = std::move(snapshot);
-    return true;
+    out.clear();
+    return false;
 }
 
 } // namespace RobRunMemory

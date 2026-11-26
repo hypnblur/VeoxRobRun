@@ -3,6 +3,7 @@
 #include "RobRunSDK.h"
 #include "Memory.h"
 #include "DebugLog.h"
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -10,7 +11,7 @@
 
 namespace Il2Cpp {
 
-static std::uintptr_t gaBase = 0;
+static std::atomic<std::uintptr_t> gaBase{ 0 };
 
 // Positive class-name lookups only. A miss is deliberately not cached because
 // the class may not be loaded into the table yet when the catalog is first
@@ -104,11 +105,12 @@ struct SectionRange {
 // VerifyFingerprint before this path is used.
 bool ReadSection(const char* wanted, SectionRange& out)
 {
-    if (!gaBase || !wanted) return false;
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base || !wanted) return false;
     std::uint32_t lfanew = 0;
-    if (!ReadBytes(gaBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000)
+    if (!ReadBytes(base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000)
         return false;
-    const std::uintptr_t nt = gaBase + lfanew;
+    const std::uintptr_t nt = base + lfanew;
     std::uint16_t sectionCount = 0;
     std::uint16_t optionalSize = 0;
     if (!ReadBytes(nt + 6, &sectionCount, sizeof(sectionCount))) return false;
@@ -176,11 +178,13 @@ std::uintptr_t ScanForClassTableSlot()
     constexpr std::size_t kSignatureLength = sizeof(kSignature);
     constexpr std::size_t kChunk = 0x100000;
 
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base) return 0;
     std::vector<std::uint8_t> buffer(kChunk + kSignatureLength);
     for (std::size_t offset = 0; offset < text.size; offset += kChunk) {
         const std::size_t remaining = text.size - offset;
         const std::size_t want = (std::min)(kChunk + kSignatureLength, remaining);
-        if (!ReadBytes(gaBase + text.va + offset, buffer.data(), want))
+        if (!ReadBytes(base + text.va + offset, buffer.data(), want))
             continue;
         if (want < kSignatureLength) break;
 
@@ -216,13 +220,14 @@ std::uintptr_t ClassTableSlotRva()
     if (g_classTableAttempted) return g_classTableSlot;
     g_classTableAttempted = true;
 
-    if (ClassTableLooksValid(gaBase + rr::ClassTable::Slot)) {
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (base && ClassTableLooksValid(base + rr::ClassTable::Slot)) {
         g_classTableSlot = rr::ClassTable::Slot;
         return g_classTableSlot;
     }
 
     const std::uintptr_t scanned = ScanForClassTableSlot();
-    if (scanned && ClassTableLooksValid(gaBase + scanned)) {
+    if (base && scanned && ClassTableLooksValid(base + scanned)) {
         g_classTableSlot = scanned;
         return g_classTableSlot;
     }
@@ -235,7 +240,7 @@ std::uintptr_t ClassTableSlotRva()
 
 void Init(std::uintptr_t gameAssemblyBase)
 {
-    gaBase = gameAssemblyBase;
+    gaBase.store(gameAssemblyBase, std::memory_order_release);
     std::lock_guard<std::mutex> lock(g_classCacheMutex);
     g_classCache.clear();
     std::lock_guard<std::mutex> nameLock(g_classNameCacheMutex);
@@ -262,18 +267,19 @@ void ResetCaches()
 
 std::uintptr_t Base()
 {
-    return gaBase;
+    return gaBase.load(std::memory_order_acquire);
 }
 
 bool VerifyFingerprint()
 {
-    if (!gaBase) return false;
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base) return false;
     std::uint32_t lfanew = 0;
-    if (!ReadBytes(gaBase + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000) {
+    if (!ReadBytes(base + 0x3C, &lfanew, sizeof(lfanew)) || lfanew == 0 || lfanew > 0x1000) {
         DLOG("Fingerprint: PE header read failed (lfanew=0x%x)", lfanew);
         return false;
     }
-    const std::uintptr_t nt = gaBase + lfanew;
+    const std::uintptr_t nt = base + lfanew;
     std::uint32_t signature = 0;
     if (!ReadBytes(nt, &signature, sizeof(signature)) || signature != 0x00004550u) {
         DLOG("Fingerprint: PE signature mismatch (got 0x%x)", signature);
@@ -315,10 +321,11 @@ constexpr AccessorCheck kAccessors[] = {
 
 bool VerifyAccessors()
 {
-    if (!gaBase) return false;
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base) return false;
     for (const auto& check : kAccessors) {
         std::uint8_t actual[8]{};
-        if (!ReadBytes(gaBase + check.rva, actual, check.length)) return false;
+        if (!ReadBytes(base + check.rva, actual, check.length)) return false;
         if (std::memcmp(actual, check.bytes, check.length) != 0) return false;
     }
     return true;
@@ -326,10 +333,11 @@ bool VerifyAccessors()
 
 std::uintptr_t GetClassByIndex(int index)
 {
-    if (!gaBase || index < 0) return 0;
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base || index < 0) return 0;
     const std::uintptr_t slot = ClassTableSlotRva();
     if (!slot) return 0;
-    const std::uintptr_t table = ReadPtr(gaBase + slot);
+    const std::uintptr_t table = ReadPtr(base + slot);
     if (!ValidPtr(table)) return 0;
     const std::uintptr_t klass = ReadPtr(table + static_cast<std::uintptr_t>(index) * 8);
     return ValidClass(klass) ? klass : 0;
@@ -639,15 +647,18 @@ bool ReadPrimitiveVector3(std::uintptr_t wrapper, Vector3& out)
 
 std::uintptr_t FindClassByName(const char* name, int maxIndex)
 {
-    if (!gaBase || !name || !*name) return 0;
+    const std::uintptr_t base = gaBase.load(std::memory_order_acquire);
+    if (!base || !name || !*name) return 0;
 
-    std::lock_guard<std::mutex> lock(g_classCacheMutex);
-    const auto it = g_classCache.find(name);
-    if (it != g_classCache.end()) return it->second;
+    {
+        std::lock_guard<std::mutex> lock(g_classCacheMutex);
+        const auto it = g_classCache.find(name);
+        if (it != g_classCache.end()) return it->second;
+    }
 
     const std::uintptr_t slot = ClassTableSlotRva();
     if (!slot) return 0;
-    const std::uintptr_t table = ReadPtr(gaBase + slot);
+    const std::uintptr_t table = ReadPtr(base + slot);
     if (!ValidPtr(table)) return 0;
 
     constexpr int kChunk = 512;
@@ -662,6 +673,7 @@ std::uintptr_t FindClassByName(const char* name, int maxIndex)
             const std::uintptr_t klass = pointers[i];
             if (!ValidClass(klass)) continue;
             if (ClassNameOfClass(klass) == name) {
+                std::lock_guard<std::mutex> lock(g_classCacheMutex);
                 g_classCache[name] = klass;
                 return klass;
             }

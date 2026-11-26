@@ -27,8 +27,8 @@ private:
 	static inline CurrentProcessInformation current_process{ };
 	static inline std::atomic<int> current_pid{ 0 };
 
-	static inline BOOLEAN DMA_INITIALIZED = FALSE;
-	static inline BOOLEAN PROCESS_INITIALIZED = FALSE;
+	static inline std::atomic<bool> DMA_INITIALIZED{ false };
+	static inline std::atomic<bool> PROCESS_INITIALIZED{ false };
 	/**
 	*Dumps the systems Current physical memory pages
 	*To a file so we can use it in our DMA (:
@@ -312,7 +312,7 @@ public:
 	template <typename T>
 	bool AddScatterWriteRequest(VMMDLL_SCATTER_HANDLE handle, uint64_t addr, T value) const
 	{
-		if (!IsMemWriteMasterEnabled())
+		if (!handle || !IsMemWriteMasterEnabled())
 			return false;
 		if (!(addr > 0x2000000 && addr < 0x7FFFFFFFFFFF))
 			return false;
@@ -377,7 +377,7 @@ public:
 	/*the FPGA handle*/
 	VMM_HANDLE vHandle = nullptr;
 	/*underlying LeechCore handle owned by vHandle (do not close)*/
-	HANDLE lcHandle = nullptr;
+	std::atomic<HANDLE> lcHandle{ nullptr };
 };
 
 inline Memory TargetProcess;
