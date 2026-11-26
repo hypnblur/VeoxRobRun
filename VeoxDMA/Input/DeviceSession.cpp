@@ -22,6 +22,14 @@ bool ValidIpv4(const std::string& value) {
     }
     return parts == 4;
 }
+std::string NormalizeComPort(std::string port) {
+    while (!port.empty() && std::isspace(static_cast<unsigned char>(port.front()))) port.erase(port.begin());
+    while (!port.empty() && std::isspace(static_cast<unsigned char>(port.back()))) port.pop_back();
+    for (char& ch : port) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+    if (!port.empty() && port.find_first_not_of("0123456789") == std::string::npos)
+        port = "COM" + port;
+    return port;
+}
 std::string Validate(const DeviceConfig& c) {
     const int kind = int(c.kind);
     if (kind < 3 || kind > 9) return "Choose a hardware device.";
@@ -294,11 +302,14 @@ struct DeviceSession::Impl {
 DeviceSession::DeviceSession(std::unique_ptr<DeviceBackend> b) : impl(std::make_unique<Impl>(std::move(b))) {}
 DeviceSession::~DeviceSession() { Shutdown(); }
 bool DeviceSession::Connect(const DeviceConfig& c) {
-    const auto error = Validate(c);
+    DeviceConfig cfg = c;
+    if (cfg.manualPort || cfg.kind == DeviceKind::Ferrum)
+        cfg.port = NormalizeComPort(cfg.port);
+    const auto error = Validate(cfg);
     std::lock_guard lock(impl->mutex);
-    if (error.empty() && impl->wanted && impl->config == c) return true;
-    impl->ClearOutput(); impl->config = c; impl->wanted = error.empty();
-    impl->status = {}; impl->status.kind = c.kind; impl->status.generation = ++impl->generation;
+    if (error.empty() && impl->wanted && impl->config == cfg) return true;
+    impl->ClearOutput(); impl->config = cfg; impl->wanted = error.empty();
+    impl->status = {}; impl->status.kind = cfg.kind; impl->status.generation = ++impl->generation;
     impl->status.state = error.empty() ? LinkState::Connecting : LinkState::NeedsConfiguration;
     impl->status.error = error; impl->Start(); impl->wake.notify_all(); return error.empty();
 }

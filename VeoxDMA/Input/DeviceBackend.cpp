@@ -269,8 +269,12 @@ class Backend final : public DeviceBackend {
         endpoint = selected;
         serial = CreateFileA(("\\\\.\\" + selected).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (serial == INVALID_HANDLE_VALUE) return Fail("Cannot open COM port; check cable and other applications", GetLastError());
-        COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = 250;
-        if (!SetupComm(serial, 32768, 4096) || !SetCommTimeouts(serial, &timeouts)) return Fail("Cannot configure COM buffers/timeouts", GetLastError());
+        const bool ferrum = config.kind == DeviceKind::Ferrum;
+        COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = ferrum ? 20 : 250;
+        const DWORD inQueue = ferrum ? 4096 : 32768;
+        const DWORD outQueue = ferrum ? 256 : 4096;
+        if (!SetupComm(serial, inQueue, outQueue) || !SetCommTimeouts(serial, &timeouts))
+            return Fail("Cannot configure COM buffers/timeouts", GetLastError());
         PurgeComm(serial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
         if (IsMakcu(config.kind)) {
             const int rates[] = {config.baud, lastBaud, 115200, 4000000, 921600, 1500000, 2000000, 3000000};

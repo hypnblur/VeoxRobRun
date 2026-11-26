@@ -359,7 +359,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 		constexpr DeviceKind deviceKinds[] = { DeviceKind::Off, DeviceKind::KmboxUsb, DeviceKind::KmboxNet,
 			DeviceKind::Makcu, DeviceKind::Controller, DeviceKind::Ferrum, DeviceKind::Medius,
 			DeviceKind::KmboxNbPro };
-		constexpr int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
+		constexpr int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000, 6000000, 9600 };
 		const auto& saved = ConfigInstance.Aim;
 		if (saved.DeviceIndex > 0 && static_cast<unsigned>(saved.DeviceIndex) < std::size(deviceKinds)
 			&& static_cast<unsigned>(saved.BaudIndex) < std::size(baudRates)) {

@@ -1890,14 +1890,18 @@ void DrawAimHardwarePad()
 	static const DeviceKind deviceKinds[] = { DeviceKind::Off, DeviceKind::KmboxUsb, DeviceKind::KmboxNet,
 		DeviceKind::Makcu, DeviceKind::Controller, DeviceKind::Ferrum, DeviceKind::Medius,
 		DeviceKind::KmboxNbPro };
-	static const int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000 };
-	static const char* baudLabels[] = { "115200", "921600", "1500000", "2000000", "3000000", "4000000" };
+	static const int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000, 6000000, 9600 };
+	static const char* baudLabels[] = { "115200", "921600", "1500000", "2000000", "3000000", "4000000", "6000000", "9600" };
+	static const char* ctrlBaudLabels[] = { "115200", "4000000" };
 	static const char* kControllerSlots[] = { "Auto (0-3)", "Pad 1", "Pad 2", "Pad 3", "Pad 4" };
 
 	ImGui::BeginGroup();
 	{
 		BeginCard("Hardware Device", IconKind::Cpu, kCardW, 0.f, false, nullptr, true);
-		ComboRow("Device", &deviceIndex, deviceNames, IM_ARRAYSIZE(deviceNames));
+		if (ComboRow("Device", &deviceIndex, deviceNames, IM_ARRAYSIZE(deviceNames))) {
+			Session().Disconnect();
+			needsRefresh = true;
+		}
 
 		const auto kind = deviceKinds[ImClamp(deviceIndex, 0, (int)IM_ARRAYSIZE(deviceKinds) - 1)];
 		const bool isNet = IsNetworkDevice(kind);
@@ -1920,11 +1924,19 @@ void DrawAimHardwarePad()
 			if (needsRefresh) { Session().RefreshPorts(); needsRefresh = false; }
 			const auto& ports = Session().GetPorts();
 
-			ToggleRow("Manual COM Port", &manualPort);
+			if (kind == DeviceKind::Ferrum) {
+				if (ToggleRow("Ferrum Controller", &ferrumController))
+					Session().Disconnect();
+				Note("Use the COM port shown in Ferrum Utility > Serial API (e.g. COM20). Controller mode needs Ferrum 2.0.4+.");
+			}
+
+			if (kind != DeviceKind::Ferrum)
+				ToggleRow("Manual COM Port", &manualPort);
 			if (manualPort || kind == DeviceKind::Ferrum)
 			{
 				ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-				if (ImGui::InputTextWithHint("##com", "COM3", comPort, sizeof(comPort))) g_dirty = true;
+				const char* hint = (kind == DeviceKind::Ferrum) ? "COM20 (Ferrum Serial API)" : "COM3";
+				if (ImGui::InputTextWithHint("##com", hint, comPort, sizeof(comPort))) g_dirty = true;
 			}
 			else if (!ports.empty())
 			{
@@ -1946,10 +1958,17 @@ void DrawAimHardwarePad()
 				Note("No COM ports found.");
 			}
 
-			if (IsMakcu(kind))
+			if (kind == DeviceKind::Controller) {
+				int ctrlSel = (baudIndex == 5) ? 1 : 0;
+				if (ComboRow("Baud Rate", &ctrlSel, ctrlBaudLabels, IM_ARRAYSIZE(ctrlBaudLabels)))
+					baudIndex = (ctrlSel == 1) ? 5 : 0;
+			} else if (kind == DeviceKind::Makcu) {
+				baudIndex = ImClamp(baudIndex, 0, 5);
+				ComboRow("Baud Rate", &baudIndex, baudLabels, 6);
+			} else if (kind != DeviceKind::Medius) {
+				baudIndex = ImClamp(baudIndex, 0, (int)IM_ARRAYSIZE(baudLabels) - 1);
 				ComboRow("Baud Rate", &baudIndex, baudLabels, IM_ARRAYSIZE(baudLabels));
-			if (kind == DeviceKind::Ferrum)
-				ToggleRow("Ferrum Controller", &ferrumController);
+			}
 		}
 
 		const auto status = Session().GetStatus();
