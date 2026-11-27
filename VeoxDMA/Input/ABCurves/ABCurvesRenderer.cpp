@@ -78,8 +78,10 @@ bool RendererStream::Begin(std::uint64_t seed)
     Reset();
     if (!EnsureInitialized())
         return false;
-    state_ = SharedTemplate().profile;
-    if (abc_online_begin(&state_, seed ? seed : 2026ull) != ABC_FIXED_OK)
+    if (!state_)
+        state_ = std::make_unique<abc_online_renderer_t>();
+    *state_ = SharedTemplate().profile;
+    if (abc_online_begin(state_.get(), seed ? seed : 2026ull) != ABC_FIXED_OK)
         return false;
     active_ = true;
     return true;
@@ -90,7 +92,7 @@ RendererStream::Report RendererStream::Step(float smoothDx, float smoothDy, floa
     Report out{};
     if (!std::isfinite(smoothDx) || !std::isfinite(smoothDy) || !std::isfinite(dtSec) || dtSec <= 0.f)
         return out;
-    if (!active_ && !Begin(2026ull))
+    if (!Active() && !Begin(2026ull))
         return out;
 
     const float dtMs = std::clamp(dtSec * 1000.f, 0.05f, 50.f);
@@ -117,7 +119,7 @@ RendererStream::Report RendererStream::Step(float smoothDx, float smoothDy, floa
     int sumY = 0;
     for (int i = 0; i < runTicks; ++i) {
         abc_fixed_report_t rep{};
-        if (abc_online_step(&state_, qx, qy, &rep) != ABC_FIXED_OK) {
+        if (abc_online_step(state_.get(), qx, qy, &rep) != ABC_FIXED_OK) {
             Reset();
             break;
         }

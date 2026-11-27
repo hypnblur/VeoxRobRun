@@ -472,8 +472,13 @@ static struct {
 } g_liveFullMap{};
 static std::atomic<bool> g_fullMapFastMode{ false };
 
+static std::vector<RobRunMemory::DictEntry> g_cachedEntityEntries;
+static RobRunMemory::DictVersionStamp g_entityDictStamp{};
+
 static void ClearEntityCaches()
 {
+    g_cachedEntityEntries.clear();
+    g_entityDictStamp.Reset();
     rigCache.clear();
     detailCache.clear();
     cachedMapDialogModel = 0;
@@ -3985,7 +3990,8 @@ static void UpdateInternal()
         cachedBattleEntities + rr::BattleEntitiesModel::EntityDict);
     std::vector<RobRunMemory::DictEntry> entityEntries;
     static int entityDictFailures = 0;
-    if (RobRunMemory::ReadDictInt(entityDictionary, entityEntries)) {
+    if (RobRunMemory::ReadDictIntVersioned(entityDictionary, g_cachedEntityEntries, g_entityDictStamp, 200)) {
+        entityEntries = g_cachedEntityEntries;
         entityDictFailures = 0;
 
         // Also merge any BattleCharacterModels from WorldEntitiesModel

@@ -84,10 +84,11 @@ bool Memory::DumpMemoryMap(bool debug)
 	}
 
 	PVMMDLL_MAP_PHYSMEM pPhysMemMap = NULL;
-	if (!VMMDLL_Map_GetPhysMem(handle, &pPhysMemMap))
+	if (!VMMDLL_Map_GetPhysMem(handle, &pPhysMemMap) || !pPhysMemMap)
 	{
 		LOG("[!] Failed to get physical memory map\n");
 		VMMDLL_Close(handle);
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
 		return false;
 	}
 
@@ -96,6 +97,7 @@ bool Memory::DumpMemoryMap(bool debug)
 		LOG("[!] Invalid VMM Map Version\n");
 		VMMDLL_MemFree(pPhysMemMap);
 		VMMDLL_Close(handle);
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
 		return false;
 	}
 
@@ -104,6 +106,7 @@ bool Memory::DumpMemoryMap(bool debug)
 		printf("[!] Failed to get physical memory map\n");
 		VMMDLL_MemFree(pPhysMemMap);
 		VMMDLL_Close(handle);
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
 		return false;
 	}
 	//Dump map to file
@@ -121,6 +124,7 @@ bool Memory::DumpMemoryMap(bool debug)
 		LOG("[!] Failed to open %s for writing\n", mapPath.c_str());
 		VMMDLL_MemFree(pPhysMemMap);
 		VMMDLL_Close(handle);
+		std::this_thread::sleep_for(std::chrono::milliseconds(250));
 		return false;
 	}
 	nFile << sb.str();
@@ -130,6 +134,9 @@ bool Memory::DumpMemoryMap(bool debug)
 
 	VMMDLL_MemFree(pPhysMemMap);
 	VMMDLL_Close(handle);
+	// Give LeechCore / FTD3XX time to finish tearing down the FT601 USB handle
+	// before Init() immediately opens the main VMM handle.
+	std::this_thread::sleep_for(std::chrono::milliseconds(250));
 	if (!writeOk)
 	{
 		LOG("[!] Failed writing memory map to %s\n", mapPath.c_str());
@@ -199,25 +206,34 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 			std::string path = "";
 			if (memMap)
 			{
-				// Always regenerate mmap.txt on DMA init instead of checking
-				// host-PC uptime: in a 2-PC setup the target PC can reboot while
-				// the radar PC stays on, making any cached mmap.txt stale.
-				auto temp_path = std::filesystem::temp_directory_path();
-				path = (temp_path / "mmap.txt").string();
-				LOG("dumping memory map to file...\n");
-				const bool dumped = this->DumpMemoryMap(debug);
-				if (!dumped)
-				{
-					LOG("[!] ERROR: Could not dump memory map!\n");
-					LOG("Defaulting to no memory map!\n");
-				}
-				else
-				{
-					LOG("Dumped memory map!\n");
+				// Regenerate mmap.txt once per VeoxDMA launch (fresh for the
+				// target PC's current boot, without hammering VMMDLL open/close
+				// on every 3-second attach retry if the card isn't ready yet).
+				static bool s_mmapDumpedThisRun = false;
+				std::error_code ec;
+				auto temp_path = std::filesystem::temp_directory_path(ec);
+				if (!ec) {
+					path = (temp_path / "mmap.txt").string();
+					bool dumped = s_mmapDumpedThisRun && std::filesystem::exists(path, ec);
+					if (!dumped) {
+						LOG("dumping memory map to file...\n");
+						dumped = this->DumpMemoryMap(debug);
+						if (dumped)
+							s_mmapDumpedThisRun = true;
+					}
+					if (!dumped)
+					{
+						LOG("[!] ERROR: Could not dump memory map!\n");
+						LOG("Defaulting to no memory map!\n");
+					}
+					else
+					{
+						LOG("Dumped memory map!\n");
 
-					//Add the memory map to the arguments and increase arg count.
-					args[argc++] = (LPSTR)"-memmap";
-					args[argc++] = (LPSTR)path.c_str();
+						//Add the memory map to the arguments and increase arg count.
+						args[argc++] = (LPSTR)"-memmap";
+						args[argc++] = (LPSTR)path.c_str();
+					}
 				}
 			}
 			this->vHandle = VMMDLL_Initialize(argc, args);
@@ -226,6 +242,7 @@ bool Memory::Init(std::string process_name, bool memMap, bool debug)
 			{
 				memMap = false;
 				LOG("[!] Initialization failed with Memory map? Try without MMap\n");
+				std::this_thread::sleep_for(std::chrono::milliseconds(250));
 			}
 		}
 		if (!vmmReady)
@@ -535,11 +552,15 @@ uintptr_t Memory::GetImportTableAddress(std::string import, std::string process,
 	return addr;
 }
 
-//callback for VfsFileListU
+static std::mutex g_vfsListMutex;
+static uint64_t g_dtbFileSize = 0;
+//callback for VfsFileListU (keep VfsFileList.h = 0 for ABI compatibility across vmm.dll builds)
 static VOID cbAddFile(_Inout_ HANDLE h, _In_ LPSTR uszName, _In_ ULONG64 cb, _In_opt_ PVMMDLL_VFS_FILELIST_EXINFO pExInfo)
 {
-	if (h && uszName && strcmp(uszName, "dtb.txt") == 0)
-		*reinterpret_cast<uint64_t*>(h) = cb;
+	(void)h;
+	(void)pExInfo;
+	if (uszName && strcmp(uszName, "dtb.txt") == 0)
+		g_dtbFileSize = cb;
 }
 
 struct Info
@@ -626,13 +647,18 @@ bool Memory::FixCr3()
 	}
 
 	uint64_t dtbFileSize = 0;
-	VMMDLL_VFS_FILELIST2 VfsFileList;
-	VfsFileList.dwVersion = VMMDLL_VFS_FILELIST_VERSION;
-	VfsFileList.h = reinterpret_cast<HANDLE>(&dtbFileSize);
-	VfsFileList.pfnAddDirectory = 0;
-	VfsFileList.pfnAddFile = cbAddFile; //dumb af callback who made this system
+	{
+		std::lock_guard<std::mutex> vfsLock(g_vfsListMutex);
+		g_dtbFileSize = 0;
+		VMMDLL_VFS_FILELIST2 VfsFileList{};
+		VfsFileList.dwVersion = VMMDLL_VFS_FILELIST_VERSION;
+		VfsFileList.h = 0;
+		VfsFileList.pfnAddDirectory = 0;
+		VfsFileList.pfnAddFile = cbAddFile;
 
-	result = VMMDLL_VfsListU(this->vHandle, (LPSTR)"\\misc\\procinfo\\", &VfsFileList);
+		result = VMMDLL_VfsListU(this->vHandle, (LPSTR)"\\misc\\procinfo\\", &VfsFileList);
+		dtbFileSize = g_dtbFileSize;
+	}
 	if (!result || dtbFileSize == 0 || dtbFileSize > 16ull * 1024ull * 1024ull)
 		return false;
 
@@ -832,7 +858,7 @@ uint64_t Memory::FindSignature(const char* signature, uint64_t range_start, uint
 
 	if (PID == 0)
 		PID = this->GetPID();
-	if (PID <= 0)
+	if (PID == 0)
 		return 0;
 
 	std::vector<SignatureToken> tokens;
@@ -933,7 +959,7 @@ bool Memory::WriteRestore(uintptr_t address, void* buffer, size_t size) const
 
 bool Memory::WriteRestore(uintptr_t address, void* buffer, size_t size, int pid) const
 {
-	if (!this->vHandle || pid <= 0 || !buffer || !size)
+	if (!this->vHandle || pid == 0 || !buffer || !size)
 		return false;
 	if (!(address > 0x2000000 && address < 0x7FFFFFFFFFFF))
 		return false;
@@ -981,7 +1007,7 @@ bool Memory::Read(uintptr_t address, void* buffer, size_t size) const
 
 bool Memory::Read(uintptr_t address, void* buffer, size_t size, int pid) const
 {
-	if (!this->vHandle || pid <= 0)
+	if (!this->vHandle || pid == 0)
 		return false;
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
@@ -1019,7 +1045,7 @@ bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size) const
 
 bool Memory::ReadFresh(uintptr_t address, void* buffer, size_t size, int pid) const
 {
-	if (!this->vHandle || pid <= 0)
+	if (!this->vHandle || pid == 0)
 		return false;
 	if (!(address > 0x10000 && address < 0x7FFFFFFFFFFF) || !buffer || !size)
 		return false;
@@ -1105,7 +1131,7 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle()
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandle(int pid)
 {
-	if (!this->vHandle || pid <= 0)
+	if (!this->vHandle || pid == 0)
 		return nullptr;
 	VMMDLL_SCATTER_HANDLE ScatterHandle = VMMDLL_Scatter_Initialize(this->vHandle, pid, kFreshReadFlags);
 	if (!ScatterHandle)
@@ -1179,7 +1205,7 @@ bool Memory::ExecuteReadScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 		return false;
 	if (pid == 0)
 		pid = this->GetPID();
-	if (pid <= 0)
+	if (pid == 0)
 		return false;
 
 	const bool ok = VMMDLL_Scatter_ExecuteRead(handle) != 0;
@@ -1193,7 +1219,7 @@ bool Memory::ExecuteWriteScatter(VMMDLL_SCATTER_HANDLE handle, int pid)
 		return false;
 	if (pid == 0)
 		pid = this->GetPID();
-	if (pid <= 0)
+	if (pid == 0)
 		return false;
 
 	if (!IsMemWriteMasterEnabled())
@@ -1220,7 +1246,7 @@ VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached()
 
 VMMDLL_SCATTER_HANDLE Memory::CreateScatterHandleCached(int pid)
 {
-	if (!this->vHandle || pid <= 0)
+	if (!this->vHandle || pid == 0)
 		return nullptr;
 	VMMDLL_SCATTER_HANDLE h = VMMDLL_Scatter_Initialize(this->vHandle, pid, 0);
 	if (!h)
