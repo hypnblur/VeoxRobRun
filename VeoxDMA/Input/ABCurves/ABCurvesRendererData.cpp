@@ -1,6 +1,4 @@
-#ifndef ABCURVES_STANDALONE
 #include "pch.h"
-#endif
 #include "ABCurvesRendererData.h"
 
 namespace Base::ABCurves {
