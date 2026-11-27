@@ -1873,7 +1873,7 @@ void DrawAimHardwarePad()
 	static char comPort[16] = "";
 	static char ipAddr[64] = "";
 	static char netPort[16] = "8899";
-	static char macId[16] = "";
+	static char macId[32] = "";
 	static int baudIndex = 0;
 	static bool manualPort = false;
 	static bool ferrumController = false;
@@ -1920,13 +1920,14 @@ void DrawAimHardwarePad()
 		if (isNet)
 		{
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-			if (ImGui::InputTextWithHint("##ip", "IP address", ipAddr, sizeof(ipAddr))) g_dirty = true;
+			if (ImGui::InputTextWithHint("##ip", "192.168.2.188 (KMBox IP)", ipAddr, sizeof(ipAddr))) g_dirty = true;
 			const float half = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
 			ImGui::SetNextItemWidth(half);
-			if (ImGui::InputTextWithHint("##netport", "Network port", netPort, sizeof(netPort))) g_dirty = true;
+			if (ImGui::InputTextWithHint("##netport", "8899 (Port)", netPort, sizeof(netPort))) g_dirty = true;
 			ImGui::SameLine(0.f, 8.f);
 			ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-			if (ImGui::InputTextWithHint("##mac", "Device ID", macId, sizeof(macId))) g_dirty = true;
+			if (ImGui::InputTextWithHint("##mac", "UUID / MAC (8 hex)", macId, sizeof(macId))) g_dirty = true;
+			Note("Enter the IP, Port (default 8899), and 8-char hex UUID shown on the KMBox screen.");
 		}
 
 		if (isSerial)
