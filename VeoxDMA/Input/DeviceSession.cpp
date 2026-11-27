@@ -24,13 +24,34 @@ bool ValidIpv4(const std::string& value) {
     }
     return parts == 4;
 }
+std::string Trim(std::string s) {
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    return s;
+}
 std::string NormalizeComPort(std::string port) {
-    while (!port.empty() && std::isspace(static_cast<unsigned char>(port.front()))) port.erase(port.begin());
-    while (!port.empty() && std::isspace(static_cast<unsigned char>(port.back()))) port.pop_back();
+    port = Trim(std::move(port));
     for (char& ch : port) ch = char(std::toupper(static_cast<unsigned char>(ch)));
     if (!port.empty() && port.find_first_not_of("0123456789") == std::string::npos)
         port = "COM" + port;
     return port;
+}
+std::string NormalizeNetPort(std::string port) {
+    port = Trim(std::move(port));
+    return port.empty() ? "8899" : port;
+}
+std::string NormalizeMac(std::string mac) {
+    mac = Trim(std::move(mac));
+    if (mac.size() >= 2 && mac[0] == '0' && (mac[1] == 'x' || mac[1] == 'X'))
+        mac.erase(0, 2);
+    std::string out;
+    out.reserve(mac.size());
+    for (char ch : mac) {
+        if (ch == ':' || ch == '-' || std::isspace(static_cast<unsigned char>(ch)))
+            continue;
+        out.push_back(char(std::toupper(static_cast<unsigned char>(ch))));
+    }
+    return out;
 }
 std::string Validate(const DeviceConfig& c) {
     const int kind = int(c.kind);
@@ -364,8 +385,13 @@ DeviceSession::DeviceSession(std::unique_ptr<DeviceBackend> b) : impl(std::make_
 DeviceSession::~DeviceSession() { Shutdown(); }
 bool DeviceSession::Connect(const DeviceConfig& c) {
     DeviceConfig cfg = c;
-    if (cfg.manualPort || cfg.kind == DeviceKind::Ferrum)
+    if (IsNetworkDevice(cfg.kind)) {
+        cfg.ip = Trim(cfg.ip);
+        cfg.networkPort = NormalizeNetPort(cfg.networkPort);
+        cfg.mac = NormalizeMac(cfg.mac);
+    } else if (cfg.manualPort || cfg.kind == DeviceKind::Ferrum) {
         cfg.port = NormalizeComPort(cfg.port);
+    }
     const auto error = Validate(cfg);
     std::lock_guard lock(impl->mutex);
     if (error.empty() && impl->wanted && impl->config == cfg) return true;

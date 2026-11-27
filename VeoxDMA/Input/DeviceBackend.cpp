@@ -6,7 +6,11 @@
 #include "HidTable.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <windows.h>
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 #include <setupapi.h>
 #include <devguid.h>
 #include <array>
@@ -41,6 +45,7 @@ class Backend final : public DeviceBackend {
     std::array<bool, 232> injectedKeys{};
     std::uint8_t sequence = 0, proto = 0;
     std::uint32_t netSequence = 0, netMac = 0;
+    int netConsecFails = 0;
     struct Pending { std::uint32_t sequence = 0, command = 0; bool valid = false; };
     std::array<Pending, 256> pending{};
     soft_mouse_t mouse{};
@@ -343,17 +348,60 @@ class Backend final : public DeviceBackend {
         for (const auto& p : ports) if (p.port == selected) { lastIdentity = p.identity; lastKind = config.kind; }
         error.clear(); heartbeat = Clock::now(); return true;
     }
+    void DisableUdpConnReset() {
+        if (socket == INVALID_SOCKET) return;
+        // Ported from kmboxNet.cpp: disable Windows UDP ICMP Port Unreachable
+        // connection-reset queueing so transient blips don't poison later sends.
+        BOOL newBehavior = FALSE;
+        DWORD bytesReturned = 0;
+        WSAIoctl(socket, SIO_UDP_CONNRESET, &newBehavior, sizeof(newBehavior),
+            nullptr, 0, &bytesReturned, nullptr, nullptr);
+    }
+    void DrainNetStale() {
+        if (socket == INVALID_SOCKET) return;
+        for (int i = 0; i < 32; ++i) {
+            client_data discard{}; sockaddr_in from{}; int fromLen = sizeof(from);
+            const int n = recvfrom(socket, reinterpret_cast<char*>(&discard), sizeof(discard), 0,
+                reinterpret_cast<sockaddr*>(&from), &fromLen);
+            if (n < 0) break;
+        }
+    }
     bool NetSend(uint32_t command, const void* payload, size_t n) {
+        static constexpr int kMaxSendRetries = 3;
+        static constexpr int kMaxConsecFails = 8;
         client_data packet{};
         packet.head.mac = netMac; packet.head.cmd = command;
         packet.head.indexpts = command == cmd_connect ? netSequence : ++netSequence;
         packet.head.rand = netSequence ^ 0x65A97B13u;
         if (n) std::memcpy(&packet.u8buff, payload, n);
         const int size = int(sizeof(cmd_head_t) + n);
-        if (sendto(socket, reinterpret_cast<const char*>(&packet), size, 0, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != size)
-            return Fail("UDP send failed", WSAGetLastError());
-        pending[netSequence % pending.size()] = {netSequence, command, true};
-        return true;
+        int lastErr = 0;
+        for (int attempt = 0; attempt < kMaxSendRetries; ++attempt) {
+            if (sendto(socket, reinterpret_cast<const char*>(&packet), size, 0,
+                reinterpret_cast<sockaddr*>(&address), sizeof(address)) == size) {
+                netConsecFails = 0;
+                pending[packet.head.indexpts % pending.size()] = {packet.head.indexpts, command, true};
+                return true;
+            }
+            lastErr = WSAGetLastError();
+            if (lastErr == WSAECONNRESET) {
+                DrainNetStale();
+                DisableUdpConnReset();
+                continue;
+            }
+            if (lastErr == WSAEINTR || lastErr == WSAEWOULDBLOCK)
+                continue;
+            break;
+        }
+        // Tolerate isolated UDP hiccups on active connections (matches kmboxNet.cpp).
+        if (initialized && ++netConsecFails < kMaxConsecFails)
+            return true;
+        return Fail("UDP send failed repeatedly; check network connection to Kmbox Net", lastErr);
+    }
+    static bool IsKnownNetCmd(uint32_t cmd) {
+        return cmd == cmd_connect || cmd == cmd_mouse_move || cmd == cmd_mouse_left
+            || cmd == cmd_mouse_right || cmd == cmd_mouse_middle || cmd == cmd_mouse_wheel
+            || cmd == cmd_mouse_automove || cmd == cmd_keyboard_all;
     }
     bool ReadNet() {
         for (unsigned i = 0; i < 64; ++i) {
@@ -362,14 +410,20 @@ class Backend final : public DeviceBackend {
             if (n == SOCKET_ERROR) {
                 const auto code = WSAGetLastError();
                 if (code == WSAEWOULDBLOCK) return true;
-                if (code == WSAECONNRESET) continue;
+                if (code == WSAECONNRESET) { DisableUdpConnReset(); continue; }
+                if (initialized && ++netConsecFails < 8) return true;
                 return Fail("UDP receive failed", code);
             }
-            if (n < int(sizeof(cmd_head_t)) || from.sin_addr.s_addr != address.sin_addr.s_addr || from.sin_port != address.sin_port) continue;
-            auto& expected = pending[packet.head.indexpts % pending.size()];
-            if (!expected.valid || expected.sequence != packet.head.indexpts || expected.command != packet.head.cmd) continue;
-            expected.valid = false; lastReply = Clock::now();
+            if (n < int(sizeof(cmd_head_t)) || from.sin_addr.s_addr != address.sin_addr.s_addr) continue;
+            if (!IsKnownNetCmd(packet.head.cmd)) continue;
+            // Any valid reply from the KMBox IP confirms the link is alive even if
+            // high-frequency mouse moves wrapped the 256-slot pending table.
+            lastReply = Clock::now();
+            netConsecFails = 0;
             if (packet.head.cmd == cmd_connect) netHandshake = true;
+            auto& expected = pending[packet.head.indexpts % pending.size()];
+            if (expected.valid && expected.sequence == packet.head.indexpts && expected.command == packet.head.cmd)
+                expected.valid = false;
         }
         return true;
     }
@@ -389,24 +443,37 @@ class Backend final : public DeviceBackend {
         WSADATA data{};
         if (WSAStartup(MAKEWORD(2, 2), &data)) return Fail("Winsock startup failed");
         winsock = true;
-        address.sin_family = AF_INET; address.sin_port = htons(static_cast<unsigned short>(std::stoi(config.networkPort)));
+        address = {};
+        address.sin_family = AF_INET;
+        address.sin_port = htons(static_cast<unsigned short>(std::stoi(config.networkPort)));
         if (InetPtonA(AF_INET, config.ip.c_str(), &address.sin_addr) != 1) return Fail("Invalid IPv4 address");
         netMac = uint32_t(std::stoul(config.mac, nullptr, 16));
         socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (socket == INVALID_SOCKET) return Fail("Cannot create UDP socket", WSAGetLastError());
+        DisableUdpConnReset();
         u_long nonblocking = 1;
         if (ioctlsocket(socket, FIONBIO, &nonblocking)) return Fail("Cannot configure UDP socket", WSAGetLastError());
         endpoint = config.ip + ":" + config.networkPort;
-        if (!NetSend(cmd_connect, nullptr, 0)) return false;
+        netSequence = 0;
+        netConsecFails = 0;
+        netHandshake = false;
         const auto until = Clock::now() + std::chrono::seconds(2);
+        auto nextSend = Clock::time_point{};
         while (!cancelled() && Clock::now() < until) {
+            if (Clock::now() >= nextSend) {
+                if (!NetSend(cmd_connect, nullptr, 0)) return false;
+                nextSend = Clock::now() + std::chrono::milliseconds(300);
+            }
             if (!ReadNet()) return false;
             if (netHandshake) {
-                initialized = true; heartbeat = Clock::now();
-                if (!Neutralize()) return false;
-                if (!WaitNetReply(netSequence - 1,
-                    "KMBox connected but did not acknowledge mouse commands; check firmware and device settings")) return false;
+                initialized = true;
                 verified = true;
+                lastReply = heartbeat = Clock::now();
+                if (!Neutralize()) return false;
+                // Wait briefly for a neutralize ack if firmware sends one, but do
+                // not reject fire-and-forget KMBox Net / NB Pro firmwares.
+                bool timedOut = false;
+                (void)WaitNetReply(netSequence, "", &timedOut);
                 return true;
             }
             Pause(2);
@@ -426,7 +493,7 @@ public:
         if (socket != INVALID_SOCKET) { closesocket(socket); socket = INVALID_SOCKET; }
         if (winsock) { WSACleanup(); winsock = false; }
         initialized = verified = netHandshake = testAcknowledged = false; input = {}; makcu = {}; medius = {}; line.clear();
-        pending = {}; mouse = {}; keyboard = {}; sequence = 0; netSequence = 0;
+        pending = {}; mouse = {}; keyboard = {}; sequence = 0; netSequence = 0; netConsecFails = 0;
         lastReply = heartbeat = controllerPoll = controllerReply = {};
         controllerOutput = {}; controllerResubscribe = controllerBaseline = false;
         controllerTextSnapshots = false; controllerFirmware = 0; controllerKinds = 0;
@@ -435,7 +502,7 @@ public:
         const auto now = Clock::now();
         if (IsNetworkDevice(config.kind)) {
             if (!ReadNet()) return false;
-            if (now - lastReply > std::chrono::seconds(5)) return Fail("Kmbox Net stopped replying");
+            if (now - lastReply > std::chrono::seconds(8)) return Fail("Kmbox Net stopped replying");
             if (now - heartbeat >= std::chrono::seconds(1)) {
                 heartbeat = now;
                 return NetSend(cmd_mouse_move, &mouse, sizeof(mouse));

@@ -361,15 +361,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 			DeviceKind::KmboxNbPro };
 		constexpr int baudRates[] = { 115200, 921600, 1500000, 2000000, 3000000, 4000000, 6000000, 9600 };
 		const auto& saved = ConfigInstance.Aim;
-		if (saved.DeviceIndex > 0 && static_cast<unsigned>(saved.DeviceIndex) < std::size(deviceKinds)
-			&& static_cast<unsigned>(saved.BaudIndex) < std::size(baudRates)) {
+		if (saved.DeviceIndex > 0 && static_cast<unsigned>(saved.DeviceIndex) < std::size(deviceKinds)) {
+			const int safeBaudIdx = std::clamp(saved.BaudIndex, 0, static_cast<int>(std::size(baudRates)) - 1);
 			Base::Hardware::DeviceConfig cfg;
 			cfg.kind = deviceKinds[saved.DeviceIndex];
 			cfg.port = saved.ComPort;
 			cfg.ip = saved.IpAddr;
 			cfg.networkPort = saved.NetPort;
 			cfg.mac = saved.MacId;
-			cfg.baud = baudRates[saved.BaudIndex];
+			cfg.baud = baudRates[safeBaudIdx];
 			cfg.manualPort = saved.ManualPort || cfg.kind == DeviceKind::Ferrum;
 			cfg.ferrumController = saved.FerrumController;
 			Base::Hardware::Session().Connect(cfg);
