@@ -1,6 +1,4 @@
-#ifndef ABCURVES_STANDALONE
 #include "pch.h"
-#endif
 #include "ABCurvesPlanner.h"
 
 #include <algorithm>
