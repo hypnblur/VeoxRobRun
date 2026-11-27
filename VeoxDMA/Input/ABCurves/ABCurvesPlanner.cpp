@@ -407,6 +407,14 @@ struct ContinuousStream::Impl {
     float pairFeat[16][20]{};
     float choiceLogits[16]{};
 
+    // Scratch feature buffers (kept in heap Impl rather than on worker stack)
+    bool featKnown[kHistorySamples]{};
+    bool featKnownCtx[kHistorySamples]{};
+    double featMot[kHistorySamples][2]{};
+    double featGoal[kHistorySamples][2]{};
+    double featTv[kHistorySamples][2]{};
+    double featRel[kHistorySamples][2]{};
+
     void Reset(std::uint64_t seed)
     {
         motorRng.Reset(seed);
@@ -492,11 +500,13 @@ struct ContinuousStream::Impl {
 
     void ComputeMotorFeatures(int s)
     {
-        bool known[kHistorySamples];
-        double mot[kHistorySamples][2];
-        double goal[kHistorySamples][2];
-        double tv[kHistorySamples][2]{};
-        double rel[kHistorySamples][2]{};
+        bool* known = featKnown;
+        auto& mot = featMot;
+        auto& goal = featGoal;
+        auto& tv = featTv;
+        auto& rel = featRel;
+        std::memset(tv, 0, sizeof(featTv));
+        std::memset(rel, 0, sizeof(featRel));
 
         double sumMotX = 0.0, sumMotY = 0.0;
         for (int i = 0; i < kHistorySamples; ++i) {
@@ -824,10 +834,10 @@ struct ContinuousStream::Impl {
     }
 
     void ComputeEventFeatures(int s, double innovationAge, int curMode,
-        float rawOut[22], float xOut[32], double basisOut[2][2]) const
+        float rawOut[22], float xOut[32], double basisOut[2][2])
     {
-        bool knownCtx[kHistorySamples];
-        bool known[kHistorySamples];
+        bool* knownCtx = featKnownCtx;
+        bool* known = featKnown;
         for (int i = 0; i < kHistorySamples; ++i) {
             const std::int64_t slotTime = nowUs + static_cast<std::int64_t>(i - 639) * 1000LL;
             knownCtx[i] = valid[s + i] && (available[s + i] <= slotTime);
@@ -1298,23 +1308,27 @@ struct ContinuousStream::Impl {
 
 bool ContinuousStream::EnsureLoaded(const char* explicitPath)
 {
-    auto& state = SharedWeights();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    if (state.weights)
-        return true;
-    if (state.attempted && (!explicitPath || explicitPath[0] == '\0'))
-        return false;
-    state.attempted = true;
-
-    for (const auto& candidate : CandidateWeightPaths(explicitPath)) {
-        std::error_code ec;
-        if (!std::filesystem::exists(candidate, ec))
-            continue;
-        auto loaded = std::make_unique<ContinuousWeights>();
-        if (LoadWeightsFromFile(candidate, *loaded)) {
-            state.weights = std::move(loaded);
+    try {
+        auto& state = SharedWeights();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        if (state.weights)
             return true;
+        if (state.attempted && (!explicitPath || explicitPath[0] == '\0'))
+            return false;
+        state.attempted = true;
+
+        for (const auto& candidate : CandidateWeightPaths(explicitPath)) {
+            std::error_code ec;
+            if (!std::filesystem::exists(candidate, ec) || ec)
+                continue;
+            auto loaded = std::make_unique<ContinuousWeights>();
+            if (LoadWeightsFromFile(candidate, *loaded)) {
+                state.weights = std::move(loaded);
+                return true;
+            }
         }
+    } catch (...) {
+        return false;
     }
     return false;
 }
@@ -1324,25 +1338,18 @@ bool ContinuousStream::Available()
     return EnsureLoaded();
 }
 
-ContinuousStream::ContinuousStream()
-    : impl_(std::make_unique<Impl>())
-{
-    if (EnsureLoaded()) {
-        std::lock_guard<std::mutex> lock(SharedWeights().mutex);
-        impl_->w = SharedWeights().weights.get();
-    }
-    impl_->Reset(7);
-}
-
+ContinuousStream::ContinuousStream() = default;
 ContinuousStream::~ContinuousStream() = default;
 ContinuousStream::ContinuousStream(ContinuousStream&&) noexcept = default;
 ContinuousStream& ContinuousStream::operator=(ContinuousStream&&) noexcept = default;
 
 void ContinuousStream::Reset(std::uint64_t seed)
 {
+    if (!EnsureLoaded())
+        return;
     if (!impl_)
         impl_ = std::make_unique<Impl>();
-    if (!impl_->w && EnsureLoaded()) {
+    if (!impl_->w) {
         std::lock_guard<std::mutex> lock(SharedWeights().mutex);
         impl_->w = SharedWeights().weights.get();
     }
@@ -1351,9 +1358,13 @@ void ContinuousStream::Reset(std::uint64_t seed)
 
 ContinuousStream::Delta ContinuousStream::StepTowardError(double errX, double errY, double dtSec)
 {
-    if (!impl_)
+    if (!EnsureLoaded())
         return {};
-    if (!impl_->w && EnsureLoaded()) {
+    if (!impl_) {
+        impl_ = std::make_unique<Impl>();
+        impl_->Reset(7ull);
+    }
+    if (!impl_->w) {
         std::lock_guard<std::mutex> lock(SharedWeights().mutex);
         impl_->w = SharedWeights().weights.get();
     }

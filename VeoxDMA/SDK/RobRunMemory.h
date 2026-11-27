@@ -51,6 +51,24 @@ bool ReadObjectString(std::uintptr_t object, std::wstring& out);
 bool ReadDictInt(std::uintptr_t dictionary, std::vector<DictEntry>& out,
     bool requireStable = true);
 
+// Version-gated cached snapshot for Dictionary<int, reference>.
+// Every `checkIntervalMs` milliseconds, reads only the 24-byte header fresh;
+// only transfers the backing array when entries/count/version actually change.
+struct DictVersionStamp {
+    std::uintptr_t dictionary = 0;
+    std::uintptr_t entries = 0;
+    std::int32_t count = 0;
+    std::int32_t version = 0;
+    std::uint64_t lastCheckMs = 0;
+    bool valid = false;
+    void Reset() { *this = {}; }
+};
+
+bool ReadDictIntVersioned(std::uintptr_t dictionary,
+    std::vector<DictEntry>& cachedEntries,
+    DictVersionStamp& stamp,
+    std::uint64_t checkIntervalMs = 200);
+
 // Cheap structural probe (header + backing-array capacity only). Use this to
 // validate a candidate world model without copying every dictionary.
 bool LooksLikeDictionary(std::uintptr_t dictionary);
