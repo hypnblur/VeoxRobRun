@@ -51,6 +51,21 @@ class Backend final : public DeviceBackend {
     soft_mouse_t mouse{};
     soft_keyboard_t keyboard{};
     Clock::time_point lastReply{}, heartbeat{}, controllerPoll{}, controllerReply{};
+    // Kmbox USB is an ASCII command link on a 115200-baud CH340. The firmware
+    // echoes every command (and the echo is longer than the command), so the
+    // host may never outrun the wire. Without pacing, a 1 kHz renderer fills
+    // the driver TX queue, WriteFile times out mid-command and the firmware
+    // parser is left with a fragment; every later command is then ignored.
+    Clock::time_point lastSerialWrite{}, lastKmboxReboot{};
+    int serialBaud = 115200;
+    unsigned serialOpenFailures = 0;
+    // Echo watchdog: the B+ replies to every ASCII command. Once a reply has
+    // been seen, a device that stops replying while commands are still queued
+    // has a wedged parser. Fire-and-forget firmwares never set
+    // kboxEchoCapable and are not failed by this check.
+    bool kboxEchoCapable = false, kboxAwaiting = false;
+    unsigned kboxEchoTimeouts = 0;
+    Clock::time_point kboxLastCommand{};
     bool netHandshake = false, testAcknowledged = false;
     bool Fail(const char* reason, unsigned code = 0) {
         error = reason;
@@ -62,22 +77,87 @@ class Backend final : public DeviceBackend {
         while (!cancelled() && Clock::now() < until) std::this_thread::sleep_for(std::chrono::milliseconds(2));
         return !cancelled();
     }
-    bool Write(const void* data, size_t len) {
+    // Wire-time pacing for the ASCII Kmbox USB link. The firmware replies to
+    // every command, and that echo stream is wider than the command stream, so
+    // the device cannot absorb a burst even when the host UART is configured
+    // for a higher baud. Leave at least 4 ms (the Kmbox B+ recommendation)
+    // between commands and never start a new command before the previous one
+    // has had time to clock out.
+    bool PaceSerial(size_t len) {
+        if (config.kind != DeviceKind::KmboxUsb) return true;
+        const auto baud = serialBaud > 0 ? serialBaud : 115200;
+        const auto wireUs = (static_cast<std::uint64_t>(len) * 10ull * 1000000ull
+            + static_cast<std::uint64_t>(baud) - 1ull) / static_cast<std::uint64_t>(baud);
+        auto gap = std::chrono::microseconds(wireUs) + std::chrono::milliseconds(1);
+        if (gap < std::chrono::milliseconds(4)) gap = std::chrono::milliseconds(4);
+        const auto due = lastSerialWrite + gap;
+        while (true) {
+            const auto now = Clock::now();
+            if (now >= due) break;
+            const auto remainingMs = std::chrono::duration_cast<std::chrono::milliseconds>(due - now).count();
+            if (!Pause(static_cast<unsigned>((std::max)(1ll, remainingMs + 1)))) return false;
+        }
+        return true;
+    }
+    bool WriteRaw(const void* data, size_t len, unsigned& lastError) {
         const uint8_t* ptr = static_cast<const uint8_t*>(data);
         size_t remaining = len;
         const auto deadline = Clock::now() + std::chrono::milliseconds(300);
         while (remaining > 0) {
             DWORD count = 0;
-            if (!WriteFile(serial, ptr, DWORD(remaining), &count, nullptr))
-                return Fail("Serial write failed", GetLastError());
+            if (!WriteFile(serial, ptr, DWORD(remaining), &count, nullptr)) {
+                lastError = GetLastError();
+                return false;
+            }
             if (count == 0) {
-                if (Clock::now() >= deadline)
-                    return Fail("Serial write timed out", ERROR_WRITE_FAULT);
+                if (Clock::now() >= deadline) {
+                    lastError = ERROR_WRITE_FAULT;
+                    return false;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
             ptr += count;
             remaining -= count;
+        }
+        return true;
+    }
+    // A short/failed write can leave the firmware mid-command ("km.mo" plus a
+    // timeout, for example). Discard the rest of the TX queue and terminate the
+    // line so the next command is not glued onto the fragment.
+    void TerminateSerialLine() {
+        if (serial == INVALID_HANDLE_VALUE) return;
+        PurgeComm(serial, PURGE_TXCLEAR);
+        static const char kTerminator[] = "\r\n";
+        DWORD written = 0;
+        WriteFile(serial, kTerminator, 2, &written, nullptr);
+    }
+    bool Write(const void* data, size_t len) {
+        if (serial == INVALID_HANDLE_VALUE) return Fail("Serial port is not open");
+        if (!PaceSerial(len)) return false;
+        unsigned lastError = 0;
+        if (WriteRaw(data, len, lastError)) {
+            lastSerialWrite = Clock::now();
+            if (config.kind == DeviceKind::KmboxUsb && len >= 7 && std::memcmp(data, "km.move", 7) == 0) {
+                kboxAwaiting = true;
+                kboxLastCommand = lastSerialWrite;
+            }
+            return true;
+        }
+        if (config.kind != DeviceKind::KmboxUsb) {
+            if (lastError) return Fail("Serial write failed", lastError);
+            return Fail("Serial write timed out", ERROR_WRITE_FAULT);
+        }
+        TerminateSerialLine();
+        if (!Pause(4)) return false;
+        if (!WriteRaw(data, len, lastError)) {
+            if (lastError) return Fail("Serial write failed after line resync", lastError);
+            return Fail("Serial write timed out after line resync", ERROR_WRITE_FAULT);
+        }
+        lastSerialWrite = Clock::now();
+        if (config.kind == DeviceKind::KmboxUsb && len >= 7 && std::memcmp(data, "km.move", 7) == 0) {
+            kboxAwaiting = true;
+            kboxLastCommand = lastSerialWrite;
         }
         return true;
     }
@@ -112,7 +192,9 @@ class Backend final : public DeviceBackend {
         dcb.fDtrControl = DTR_CONTROL_DISABLE; dcb.fDsrSensitivity = FALSE; dcb.fTXContinueOnXoff = FALSE;
         dcb.fOutX = FALSE; dcb.fInX = FALSE; dcb.fErrorChar = FALSE; dcb.fNull = FALSE;
         dcb.fRtsControl = RTS_CONTROL_DISABLE; dcb.fAbortOnError = FALSE;
-        return SetCommState(serial, &dcb) ? true : Fail("Cannot configure serial baud", GetLastError());
+        if (!SetCommState(serial, &dcb)) return Fail("Cannot configure serial baud", GetLastError());
+        serialBaud = baud;
+        return true;
     }
     void Buttons(unsigned mask) {
         input.pressed |= mask & ~input.down; input.down = mask; input.valid = true;
@@ -194,6 +276,12 @@ class Backend final : public DeviceBackend {
             if (!ReadFile(serial, bytes, std::min<DWORD>(status.cbInQue, sizeof(bytes)), &count, nullptr))
                 return Fail("Serial read failed", GetLastError());
             if (!count) break;
+            if (config.kind == DeviceKind::KmboxUsb) {
+                lastReply = Clock::now();
+                kboxEchoCapable = true;
+                kboxEchoTimeouts = 0;
+                kboxAwaiting = false;
+            }
             status.cbInQue -= (std::min)(status.cbInQue, count);
             for (DWORD i = 0; i < count; ++i) {
                 if (IsMakcu(config.kind)) {
@@ -253,6 +341,29 @@ class Backend final : public DeviceBackend {
         }
         return false;
     }
+    // Last-resort recovery for a wedged Kmbox USB. The B+ family answers
+    // km.reboot() with an echo and then restarts, so the COM port disappears
+    // for a moment and the session's normal reconnect loop brings it back.
+    // Only used after repeated open/neutralize failures, never for a single
+    // timed-out movement.
+    bool RebootKmbox(const char* reason) {
+        if (serial == INVALID_HANDLE_VALUE) return false;
+        const auto now = Clock::now();
+        if (lastKmboxReboot != Clock::time_point{} &&
+            now - lastKmboxReboot < std::chrono::seconds(10)) return false;
+        lastKmboxReboot = now;
+        static const char kReboot[] = "km.reboot()\r\n";
+        DWORD written = 0;
+        // Terminate any half command first so the reboot request is parsed as
+        // its own line even when the previous write died mid-command.
+        WriteFile(serial, "\r\n", 2, &written, nullptr);
+        Pause(10);
+        WriteFile(serial, kReboot, static_cast<DWORD>(sizeof(kReboot) - 1), &written, nullptr);
+        initialized = false; // Close() must not try to neutralize a dead parser.
+        error = reason ? reason : "Kmbox stopped accepting commands; reboot requested.";
+        Pause(150);
+        return true;
+    }
     bool OpenSerial() {
         auto ports = Ports();
         std::string selected = config.port;
@@ -277,10 +388,13 @@ class Backend final : public DeviceBackend {
         const bool ferrum = config.kind == DeviceKind::Ferrum;
         COMMTIMEOUTS timeouts{}; timeouts.ReadIntervalTimeout = MAXDWORD; timeouts.WriteTotalTimeoutConstant = ferrum ? 20 : 250;
         const DWORD inQueue = ferrum ? 4096 : 32768;
-        const DWORD outQueue = ferrum ? 256 : 4096;
+        // Kmbox USB is paced to the wire; a deep TX queue only turns a brief
+        // stall into hundreds of milliseconds of stale movement.
+        const DWORD outQueue = ferrum ? 256 : (config.kind == DeviceKind::KmboxUsb ? 1024 : 4096);
         if (!SetupComm(serial, inQueue, outQueue) || !SetCommTimeouts(serial, &timeouts))
             return Fail("Cannot configure COM buffers/timeouts", GetLastError());
         PurgeComm(serial, PURGE_TXABORT | PURGE_RXABORT | PURGE_TXCLEAR | PURGE_RXCLEAR);
+        lastSerialWrite = {};
         if (IsMakcu(config.kind)) {
             const int rates[] = {config.baud, lastBaud, 115200, 4000000, 921600, 1500000, 2000000, 3000000};
             int found = 0;
@@ -319,6 +433,38 @@ class Backend final : public DeviceBackend {
             }
             verified = true;
         } else if (!Configure(config.baud)) return false;
+        if (config.kind == DeviceKind::KmboxUsb) {
+            // Flush any half command left in the device from a previous crash
+            // or a timed-out write before the first real command is sent.
+            TerminateSerialLine();
+            if (!Pause(25)) return false;
+            PurgeComm(serial, PURGE_RXCLEAR);
+            // Prove the selected port is the Kmbox and not another CH340:
+            // km.version() is echoed by the B+ family. Fire-and-forget clones
+            // are tolerated, but a device that echoed in an earlier session and
+            // now stays silent is treated as wedged.
+            lastReply = {};
+            if (!Text("km.version()\r\n")) return false;
+            bool probeReply = false;
+            const auto probeUntil = Clock::now() + std::chrono::milliseconds(400);
+            while (!cancelled() && Clock::now() < probeUntil) {
+                if (!ReadSerial()) return false;
+                if (lastReply != Clock::time_point{}) { probeReply = true; break; }
+                Pause(2);
+            }
+            if (probeReply) {
+                verified = true;
+                PurgeComm(serial, PURGE_RXCLEAR);
+            } else if (kboxEchoCapable) {
+                ++serialOpenFailures;
+                if (serialOpenFailures >= 2)
+                    RebootKmbox("Kmbox USB stopped replying to km.version(); reboot requested.");
+                return Fail("Kmbox USB stopped replying; check the COM port and cable");
+            } else {
+                std::printf("[Kmbox] no reply to km.version() on %s; check the COM port and 115200 baud\n",
+                    selected.c_str());
+            }
+        }
         if (config.kind == DeviceKind::Controller) {
             if (!Text("km.controller_physical()\r\n")) return false;
             const auto until = Clock::now() + std::chrono::milliseconds(750);
@@ -339,14 +485,22 @@ class Backend final : public DeviceBackend {
         }
         if (cancelled()) return false;
         initialized = true;
-        if (!Neutralize()) return false;
+        if (!Neutralize()) {
+            if (config.kind == DeviceKind::KmboxUsb) {
+                ++serialOpenFailures;
+                if (serialOpenFailures >= 2)
+                    RebootKmbox("Kmbox opened but did not acknowledge its startup commands; reboot requested. It will reconnect automatically.");
+            }
+            return false;
+        }
+        serialOpenFailures = 0;
         if (config.kind == DeviceKind::Makcu && !Text("km.buttons(1)\r\n")) return false;
         if (config.kind == DeviceKind::Medius) {
             const uint8_t subscription[] = {Medius::kClassButton, 0xFF, 0xFF, 0, 1, 0};
             if (!Frame(Medius::kTypeCatch, subscription, sizeof(subscription))) return false;
         }
         for (const auto& p : ports) if (p.port == selected) { lastIdentity = p.identity; lastKind = config.kind; }
-        error.clear(); heartbeat = Clock::now(); return true;
+        error.clear(); heartbeat = Clock::now(); lastSerialWrite = Clock::now(); return true;
     }
     void DisableUdpConnReset() {
         if (socket == INVALID_SOCKET) return;
@@ -483,18 +637,29 @@ class Backend final : public DeviceBackend {
 public:
     ~Backend() override { Close(); }
     bool Open(const DeviceConfig& c, const std::function<bool()>& cancel) override {
-        Close(); config = c; cancelled = cancel; error.clear(); endpoint.clear();
+        Close();
+        if (c.kind != DeviceKind::KmboxUsb || (c.manualPort && c.port != config.port)) {
+            kboxEchoCapable = false;
+            kboxEchoTimeouts = 0;
+        }
+        config = c; cancelled = cancel; error.clear(); endpoint.clear();
         return IsNetworkDevice(config.kind) ? OpenNet() : OpenSerial();
     }
     void Close() override {
-        if (initialized) Neutralize();
-        if (initialized && config.kind == DeviceKind::Controller) Text("km.controller(0)\r\n");
+        // Do not try to neutralize a Kmbox USB link that just failed: every
+        // extra write can block for the serial timeout and may append another
+        // fragment to a wedged parser. Other devices keep the old behaviour.
+        const bool kboxLinkFailed = config.kind == DeviceKind::KmboxUsb && !error.empty();
+        if (initialized && !kboxLinkFailed) Neutralize();
+        if (initialized && !kboxLinkFailed && config.kind == DeviceKind::Controller) Text("km.controller(0)\r\n");
         if (serial != INVALID_HANDLE_VALUE) { CloseHandle(serial); serial = INVALID_HANDLE_VALUE; }
         if (socket != INVALID_SOCKET) { closesocket(socket); socket = INVALID_SOCKET; }
         if (winsock) { WSACleanup(); winsock = false; }
         initialized = verified = netHandshake = testAcknowledged = false; input = {}; makcu = {}; medius = {}; line.clear();
         pending = {}; mouse = {}; keyboard = {}; sequence = 0; netSequence = 0; netConsecFails = 0;
         lastReply = heartbeat = controllerPoll = controllerReply = {};
+        lastSerialWrite = {};
+        kboxAwaiting = false; kboxLastCommand = {};
         controllerOutput = {}; controllerResubscribe = controllerBaseline = false;
         controllerTextSnapshots = false; controllerFirmware = 0; controllerKinds = 0;
     }
@@ -510,6 +675,13 @@ public:
             return true;
         }
         if (!ReadSerial()) return false;
+        if (config.kind == DeviceKind::KmboxUsb && kboxEchoCapable && kboxAwaiting &&
+            now - kboxLastCommand > std::chrono::milliseconds(1500)) {
+            if (++kboxEchoTimeouts >= 2 &&
+                RebootKmbox("Kmbox USB stopped acknowledging commands; reboot requested."))
+                return false;
+            return Fail("Kmbox USB stopped acknowledging commands; reconnecting.");
+        }
         if ((IsMakcu(config.kind) || config.kind == DeviceKind::Medius)
             && now - lastReply > std::chrono::seconds(25)) return Fail("Device health reply timed out");
         if (UsesController(config)) {
@@ -569,6 +741,32 @@ public:
         testAcknowledged = false;
         if (config.kind == DeviceKind::Controller && !input.controllerValid)
             return Fail("MAKCU physical controller input is unavailable; reconnect the controller before testing movement");
+        if (config.kind == DeviceKind::KmboxUsb) {
+            // The B+ echoes every command. Purge stale bytes so the reply we
+            // wait for belongs to this test movement; no reply means the write
+            // reached the driver but the firmware did not process it. After a
+            // long aim burst the echo can sit behind queued reports, so allow
+            // enough time for the device to catch up.
+            PurgeComm(serial, PURGE_RXCLEAR);
+            lastReply = {};
+            if (!Move(x, y, stick)) return false;
+            const auto started = Clock::now();
+            const auto until = started + std::chrono::milliseconds(1000);
+            while (!cancelled() && Clock::now() < until) {
+                if (!ReadSerial()) return false;
+                if (lastReply != Clock::time_point{}) {
+                    testAcknowledged = true;
+                    std::printf("[Kmbox] test move echo after %lld ms\n",
+                        (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                            Clock::now() - started).count());
+                    break;
+                }
+                Pause(2);
+            }
+            if (!testAcknowledged)
+                std::printf("[Kmbox] test move: no echo in 1000 ms\n");
+            return true;
+        }
         if (!Move(x, y, stick)) return false;
         if (config.kind == DeviceKind::Controller) {
             if (!Pause(40) || !ReadSerial()) return false;

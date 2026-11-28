@@ -2284,6 +2284,15 @@ void Tick()
     }
     dbg.held = keyHeld;
     dbg.keySource = keySource;
+    {
+        static bool s_keyWasHeld = false;
+        if (keyHeld != s_keyWasHeld) {
+            VeoxDiag("[Aim] activation key %s (source=%s aimType=%d deviceReady=%d)",
+                keyHeld ? "held" : "released", keySource, cfg.AimType,
+                Base::Hardware::Ready() ? 1 : 0);
+            s_keyWasHeld = keyHeld;
+        }
+    }
     if (!dbg.held) {
         dbg.reason = "aim key not held";
         clearLastRejected();
@@ -2899,11 +2908,21 @@ void Tick()
     settings.countsPerPixelX = settings.countsPerPixelY = 1.f;
     settings.deadzonePixels = 0.5f;
 
-    if (cfg.AimType == 0) {
+    const auto hardwareNow = Base::Hardware::Session().GetStatus();
+    const auto hardwareKind = hardwareNow.kind;
+    const bool hardwareMouseReady = hardwareNow.state == Base::Hardware::LinkState::Ready &&
+        (hardwareKind == Base::Hardware::DeviceKind::KmboxUsb ||
+         hardwareKind == Base::Hardware::DeviceKind::KmboxNet ||
+         hardwareKind == Base::Hardware::DeviceKind::KmboxNbPro ||
+         hardwareKind == Base::Hardware::DeviceKind::Makcu ||
+         hardwareKind == Base::Hardware::DeviceKind::Medius);
+    if (cfg.AimType == 0 && !hardwareMouseReady) {
         // Cursor fallback: closed-loop relative movement on this PC. Each frame
         // re-reads the target so the gain does not need to match the game's
         // sensitivity exactly. This only reaches a game running on the same PC;
-        // a two-PC DMA setup needs Hardware Aim or the angle write above.
+        // a two-PC DMA setup needs the hardware path. If a mouse device is
+        // connected, fall through to it instead of moving the overlay PC's
+        // cursor, which the game PC can never see.
         stopAiming();
         settings.responseMs = responseMs;
         Base::AimMotion::Vec2 step{};
@@ -2961,6 +2980,13 @@ void Tick()
     // not necessarily one screen pixel) and the higher cap lets flicks reach
     // the device's 127-count report limit instead of being clamped early.
     if (!Base::Hardware::Ready()) {
+        static std::uint64_t s_lastNotReadyLog = 0;
+        if (nowMs - s_lastNotReadyLog >= 1000) {
+            s_lastNotReadyLog = nowMs;
+            const auto status = Base::Hardware::Session().GetStatus();
+            VeoxDiag("[Aim] hardware not ready state=%d kind=%d error='%s'",
+                int(status.state), int(status.kind), status.error.c_str());
+        }
         dbg.reason = "hardware device not ready";
         stopAiming();
         return;
@@ -2984,6 +3010,13 @@ void Tick()
         g_wasAiming = true;
         dbg.reason = "moving (hardware)";
     } else {
+        static std::uint64_t s_lastRejectedLog = 0;
+        if (nowMs - s_lastRejectedLog >= 1000) {
+            s_lastRejectedLog = nowMs;
+            const auto status = Base::Hardware::Session().GetStatus();
+            VeoxDiag("[Aim] hardware submit rejected state=%d test=%d error='%s'",
+                int(status.state), int(status.test), status.error.c_str());
+        }
         dbg.reason = "hardware submit rejected";
     }
 }
