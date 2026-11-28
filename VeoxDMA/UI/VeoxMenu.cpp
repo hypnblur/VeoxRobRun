@@ -2605,6 +2605,8 @@ void DrawWorldAndLoot()
 		ToggleRow("Vehicle ESP", &ConfigInstance.World.Vehicles);
 		ToggleRow("Grenade Prediction", &ConfigInstance.World.GrenadePrediction);
 		ToggleRow("Grenade Markers", &ConfigInstance.World.Grenades);
+		ToggleRow("Gold Key Doors", &ConfigInstance.World.GoldKeyDoors);
+		ToggleRow("Purple Key Doors", &ConfigInstance.World.PurpleKeyDoors);
 		SliderIntRow("Global Max Distance", &lf.GlobalMaxDistance, 0, 3000, " m", "Unlimited");
 		ToggleRow("House Info", &ConfigInstance.World.HouseEsp);
 		ToggleRow("Detailed Workbench Labels", &ConfigInstance.World.ShowWorkbenchLabels);

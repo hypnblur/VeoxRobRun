@@ -8,6 +8,8 @@
 #include <d2d1.h>
 #include <functional>
 
+namespace RobRunWorld { enum class KeyDoorStatus; }
+
 namespace Esp {
 
 // Stack side for labels around a box. The int form matches the persisted
@@ -44,6 +46,10 @@ struct LabelStack {
 // on top of bright textures. `pos` is the top-left; the function pixel-snaps.
 void DrawOutlinedText(ImDrawList* dl, const ImVec2& pos, ImU32 col,
 	ImFont* font, float size, const char* text);
+
+ImU32 KeyDoorStatusColour(RobRunWorld::KeyDoorStatus status);
+void DrawKeyDoorMarker(ImDrawList* dl, const ImVec2& position, ImFont* font,
+	float size, const char* name, RobRunWorld::KeyDoorStatus status);
 
 // Full-outline box with optional 1-px black backing outline.
 void DrawFullBox(ImDrawList* dl, const ImVec2& mn, const ImVec2& mx,

@@ -1900,6 +1900,18 @@ void DrawInGameMapOverlay()
 
 	dl->PushClipRect(ImVec2(clipMinX, clipMinY), ImVec2(clipMaxX, clipMaxY), true);
 
+	if (isFull && snapshot->world && snapshot->world->valid) {
+		const auto visibility = RobRunReader::GetKeyDoorVisibility();
+		const auto nowMs = GetTickCount64();
+		for (const auto& door : snapshot->world->keyDoors) {
+			ImVec2 point{};
+			if (!visibility.Shows(door.group) || !worldToMap(door.position, point))
+				continue;
+			Esp::DrawKeyDoorMarker(dl, point, font, std::clamp(7.f * scale, 11.f, 18.f), door.name,
+				snapshot->world->KeyDoorStatusAt(door, nowMs));
+		}
+	}
+
 	// 1. Optional valuables/loot, cargo & dropped bags (drawn underneath vehicles/players)
 	if (snapshot->world && snapshot->world->valid &&
 		(cfg.InGameMapValuables || cfg.InGameMapCargo || cfg.InGameMapDroppedBags))

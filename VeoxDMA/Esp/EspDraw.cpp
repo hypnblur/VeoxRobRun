@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "EspDraw.h"
+#include "../SDK/WorldEntities.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -75,6 +76,29 @@ void DrawOutlinedText(ImDrawList* dl, const ImVec2& pos, ImU32 col,
 	dl->AddText(font, size, ImVec2(p.x - 1.f, p.y + 1.f), outline, text);
 	dl->AddText(font, size, ImVec2(p.x + 1.f, p.y + 1.f), outline, text);
 	dl->AddText(font, size, p, col, text);
+}
+
+ImU32 KeyDoorStatusColour(RobRunWorld::KeyDoorStatus status)
+{
+	switch (status) {
+	case RobRunWorld::KeyDoorStatus::Unlocked: return IM_COL32(105, 242, 150, 255);
+	case RobRunWorld::KeyDoorStatus::Locked:   return IM_COL32(255, 103, 103, 255);
+	default:                                  return IM_COL32(173, 178, 189, 255);
+	}
+}
+
+void DrawKeyDoorMarker(ImDrawList* dl, const ImVec2& position, ImFont* font,
+	float size, const char* name, RobRunWorld::KeyDoorStatus status)
+{
+	if (!font) return;
+	const auto colour = KeyDoorStatusColour(status);
+	const float radius = size * 0.23f;
+	const std::string text = std::string(name) + " - " + RobRunWorld::KeyDoorStatusText(status);
+	const float width = font->CalcTextSizeA(size, FLT_MAX, 0.f, text.c_str()).x;
+	dl->AddCircleFilled(position, radius + 1.f, IM_COL32(26, 28, 32, 245));
+	dl->AddCircleFilled(position, radius, colour);
+	DrawOutlinedText(dl, ImVec2(position.x - width * 0.5f, position.y - radius - size - 2.f),
+		colour, font, size, text.c_str());
 }
 
 void DrawFullBox(ImDrawList* dl, const ImVec2& mn, const ImVec2& mx,

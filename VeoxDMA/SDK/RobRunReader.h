@@ -237,6 +237,8 @@ std::string GetLocationId();
 // Enables the one-off item-catalog class scan. Disabled by default because
 // the scan is intentionally bounded but not free.
 void SetReadCatalogEnabled(bool enabled);
+void SetKeyDoorVisibility(RobRunWorld::KeyDoorVisibility visibility);
+RobRunWorld::KeyDoorVisibility GetKeyDoorVisibility();
 void SetLootPreviewEnabled(bool enabled);
 std::shared_ptr<const LootPreview> GetLootPreview();
 void SetGrenadePredictionEnabled(bool enabled);

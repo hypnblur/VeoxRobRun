@@ -30,6 +30,8 @@ public:
 	bool InstantLoot = false;
 	bool InstantUnlock = false;
 	bool UnrevealedLootLabels = false;
+	bool GoldKeyDoors = false;
+	bool PurpleKeyDoors = false;
 
 	// Per-collection toggles for the new metadata dump. The group flags above
 	// stay as master switches: turning "Containers" off hides every container
@@ -154,6 +156,8 @@ public:
 		j[ConfigName][LIT("MinValueFilter")] = MinValueFilter;
 		j[ConfigName][LIT("InstantLoot")] = InstantLoot;
 		j[ConfigName][LIT("UnrevealedLootLabels")] = UnrevealedLootLabels;
+		j[ConfigName][LIT("GoldKeyDoors")] = GoldKeyDoors;
+		j[ConfigName][LIT("PurpleKeyDoors")] = PurpleKeyDoors;
 		j[ConfigName][LIT("InstantUnlock")] = InstantUnlock;
 
 		ToJsonBool(&j, LIT("LootNodes"), LootNodes);
@@ -234,6 +238,8 @@ public:
 		LegacyValuables = settings.value(LIT("LegacyValuables"), true);
 		ShowWorkbenchLabels = settings.value(LIT("ShowWorkbenchLabels"), true);
 		ShowWorkbenchContents = settings.value(LIT("ShowWorkbenchContents"), true);
+		GoldKeyDoors = settings.value(LIT("GoldKeyDoors"), false);
+		PurpleKeyDoors = settings.value(LIT("PurpleKeyDoors"), false);
 		Containers = settings.value(LIT("Containers"), true);
 		Loot = settings.value(LIT("Loot"), true);
 		Grenades = settings.value(LIT("Grenades"), true);

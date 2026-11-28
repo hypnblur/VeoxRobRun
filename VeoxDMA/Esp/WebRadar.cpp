@@ -799,6 +799,26 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 
 	j["players"] = std::move(playersOut);
 	j["vehicles"] = std::move(vehiclesOut);
+	j["doors"] = json::array();
+	if (snapshot && snapshot->world && snapshot->world->valid) {
+		const auto visibility = RobRunReader::GetKeyDoorVisibility();
+		const auto nowMs = GetTickCount64();
+		for (const auto& door : snapshot->world->keyDoors) {
+			if (!visibility.Shows(door.group))
+				continue;
+			const auto status = snapshot->world->KeyDoorStatusAt(door, nowMs);
+			const auto colour = Esp::KeyDoorStatusColour(status);
+			j["doors"].push_back({
+				{ "id", door.entityId },
+				{ "name", door.name },
+				{ "status", RobRunWorld::KeyDoorStatusText(status) },
+				{ "color", RgbHex((colour >> IM_COL32_R_SHIFT) & 0xFF,
+					(colour >> IM_COL32_G_SHIFT) & 0xFF, (colour >> IM_COL32_B_SHIFT) & 0xFF) },
+				{ "x", door.position.x },
+				{ "z", door.position.z }
+			});
+		}
+	}
 	j["lootVer"] = g_cachedLootVer;
 	if (forceIncludeLoot || clientLootVer != g_cachedLootVer) {
 		j["loot"] = g_cachedLootArray;

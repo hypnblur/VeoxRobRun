@@ -80,6 +80,15 @@ const char* KindName(Kind kind)
     return "World";
 }
 
+const char* KeyDoorStatusText(KeyDoorStatus status)
+{
+    switch (status) {
+    case KeyDoorStatus::Locked:   return "Locked";
+    case KeyDoorStatus::Unlocked: return "Unlocked";
+    default:                     return "Unknown";
+    }
+}
+
 Kind ClassifyCargo(const std::string& name)
 {
     if (name.find("Bush") != std::string::npos || name.find("Datura") != std::string::npos)
@@ -426,7 +435,7 @@ bool LookupLiveItemInfo(const std::string& label, LiveItemInfo& outInfo)
 }
 
 // Resolve a typed description delegate without executing it in the game.
-// Handles both direct closures (<>c__DisplayClass3_0) and indexed registry
+// Handles both named captures in direct closures and indexed registry
 // closures (<>c__DisplayClass5_0`1 capturing Enum<T> at +0x10 and index at +0x18).
 std::uintptr_t ResolveDescriptionDelegate(std::uintptr_t func, const char* directClosure,
     const char* captureName)
@@ -437,13 +446,8 @@ std::uintptr_t ResolveDescriptionDelegate(std::uintptr_t func, const char* direc
     const auto target = RobRunMemory::ReadPtr(func + delegateTarget);
     const std::string targetClass = Il2Cpp::ClassNameOf(target);
 
-    if (targetClass == directClosure) {
-        Il2Cpp::Field capture{};
-        if (!Il2Cpp::FindField(Il2Cpp::ClassOf(target), captureName, capture) ||
-            capture.offset != 0x10)
-            return 0;
-        return RobRunMemory::ReadPtr(target + capture.offset);
-    }
+    if (targetClass == directClosure)
+        return ReadModelReference(target, Il2Cpp::ClassOf(target), captureName);
     if (targetClass != "<>c__DisplayClass5_0`1") return 0;
 
     constexpr std::uintptr_t capturedEnum = 0x10;
@@ -600,6 +604,108 @@ bool ReadCollection(std::uintptr_t world, std::uintptr_t offset,
         return true;
 
     return false;
+}
+
+KeyDoorStatus ReadKeyDoorStatus(std::uintptr_t door)
+{
+    std::uintptr_t data = 0;
+    std::uintptr_t state = 0;
+    if (!RobRunMemory::ReadBytesFresh(door + rr::LocationDoorModel::UnlockState,
+            &data, sizeof(data)) || data <= 0x10000)
+        return KeyDoorStatus::Unknown;
+
+    // The live door can expose ReferenceData through a replicated PrimitiveModel.
+    const bool wrapped = Il2Cpp::IsClass(data, "PrimitiveModel`1");
+    if (wrapped && (!RobRunMemory::ReadBytesFresh(data + rr::PrimitiveData::ModelData,
+            &data, sizeof(data)) || data <= 0x10000))
+        return KeyDoorStatus::Unknown;
+
+    auto valueOffset = wrapped ? rr::PrimitiveData::value : rr::LocationDoorModel::UnlockStateValue;
+    Il2Cpp::Field valueField;
+    if (Il2Cpp::FindField(Il2Cpp::ClassOf(data), "_value", valueField) &&
+        valueField.offset >= 0x10 && valueField.offset < 0x1000)
+        valueOffset = static_cast<std::uintptr_t>(valueField.offset);
+    if (!RobRunMemory::ReadBytesFresh(data + valueOffset, &state, sizeof(state)))
+        return KeyDoorStatus::Unknown;
+
+    const auto id = ReadIdentifiedId(state);
+    if (id == "locked") return KeyDoorStatus::Locked;
+    if (id == "unlocked") return KeyDoorStatus::Unlocked;
+    return KeyDoorStatus::Unknown;
+}
+
+void ReadKeyDoors(std::uintptr_t world, State& out)
+{
+    using enum KeyDoorGroup;
+    struct Definition {
+        std::string_view itemId;
+        const char* name;
+        KeyDoorGroup group;
+    };
+    static constexpr Definition doors[] = {
+        { "room_key_13", "Strip Club VIP Room", Gold },
+        { "vip_key_1", "Grand Hotel Warehouse", Gold },
+        { "vip_key_2", "Police Station Locked Room", Gold },
+        { "vip_key_3", "Cottage 03 Basement", Gold },
+        { "vip_key_4", "Police Station Armory", Gold },
+        { "vip_key_5", "Bank Gold Vault", Gold },
+        { "vip_key_6", "Art Gallery Vault", Gold },
+        { "room_key_1", "Sunny Beach Gun Shop", Purple },
+        { "room_key_2", "Sunny Beach Equipment Store", Purple },
+        { "room_key_3", "Downtown Gun Shop", Purple },
+        { "room_key_4", "Downtown Equipment Store", Purple },
+        { "room_key_5", "Downtown Gas Station Left Room", Purple },
+        { "room_key_6", "Downtown Gas Station Right Room", Purple },
+        { "room_key_7", "Cottage 05 Locked Room", Purple },
+        { "room_key_8", "Downtown Pharmacy", Purple },
+        { "room_key_9", "Sunny Beach Pharmacy", Purple },
+        { "room_key_10", "Downtown Convenience Store", Purple },
+        { "room_key_11", "Sunny Beach Convenience Store", Purple },
+        { "room_key_12", "Sunny Beach Hotel 02", Purple },
+    };
+
+    std::vector<RobRunMemory::DictEntry> entries;
+    if (!ReadCollection(world, rr::WorldEntitiesModel::LocationDoors, entries, 4096))
+        return;
+
+    out.keyDoorsReadMs = GetTickCount64();
+    out.keyDoors.reserve(std::size(doors));
+    for (const auto& entry : entries) {
+        if (!Il2Cpp::IsClass(entry.value, "LocationDoorModel"))
+            continue;
+        const auto description = RobRunMemory::ReadPtr(entry.value + rr::LocationDoorModel::Description);
+        const auto descriptionClass = Il2Cpp::ClassOf(description);
+        const auto requirement = ReadModelReference(description, descriptionClass,
+            "<RequirementItemFunc>k__BackingField");
+        const auto item = ResolveDescriptionDelegate(requirement,
+            "<>c__DisplayClass50_0", "requirementItem");
+        const auto itemId = ReadIdentifiedId(item);
+        if (itemId.empty())
+            continue;
+
+        const auto* match = std::find_if(std::begin(doors), std::end(doors),
+            [&itemId](const Definition& door) { return door.itemId == itemId; });
+        if (match == std::end(doors))
+            continue;
+
+        Vector3 position{};
+        Il2Cpp::Field worldPosition;
+        if (!Il2Cpp::FindField(descriptionClass, "<WorldPosition>k__BackingField", worldPosition) ||
+            worldPosition.offset < 0x10 || worldPosition.typeCode != rr::Il2CppType::CodeValueType ||
+            !ReadInlineField(description, worldPosition.offset, position)) {
+            const auto inner = RobRunMemory::ReadPtr(entry.value + rr::LocationDoorModel::InnerDoorModel);
+            const auto positionModel = inner > 0x10000
+                ? RobRunMemory::ReadPtr(inner + rr::DoorModel::Position) : 0;
+            if (!ReadInlineField(positionModel, 0x10, position))
+                continue;
+        }
+
+        const auto status = ReadKeyDoorStatus(entry.value);
+        out.keyDoors.push_back({ entry.key, position, match->name, match->group, status });
+        if constexpr (kProbes)
+            VeoxDiag("key door: item=%s entity=%d position=(%.2f, %.2f, %.2f) status=%s",
+                itemId.c_str(), entry.key, position.x, position.y, position.z, KeyDoorStatusText(status));
+    }
 }
 
 // Structural probe for a collection field. The field can hold the dictionary
@@ -1159,7 +1265,7 @@ float ReadGrenadeEffectRadius(std::uintptr_t description)
     return std::max(damageRange, specialEffect);
 }
 
-bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
+bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out, bool readKeyDoors)
 {
     out = State{};
     if (battleModel <= 0x10000) return false;
@@ -2089,6 +2195,8 @@ bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out)
              readCount, (unsigned long long)world, out.entities.size(),
              out.containers, out.loots, out.vehicles, out.grenades);
 
+    if (readKeyDoors)
+        ReadKeyDoors(world, out);
     return out.valid;
 }
 

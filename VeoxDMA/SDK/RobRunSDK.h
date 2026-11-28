@@ -83,6 +83,7 @@ namespace Il2CppType {
 inline constexpr std::uintptr_t code = 0x0A; // type-code byte
 inline constexpr std::uint8_t CodeBoolean        = 0x02;
 inline constexpr std::uint8_t CodeSingle         = 0x0C;
+inline constexpr std::uint8_t CodeValueType      = 0x11;
 inline constexpr std::uint8_t CodeClass          = 0x12;
 inline constexpr std::uint8_t CodeGenericInstance = 0x15;
 inline constexpr std::uint8_t CodeObject         = 0x1C;
@@ -1424,7 +1425,8 @@ inline constexpr std::uintptr_t StateChangeCooldown = 0x58; // +0x10 TimestampDa
 }
 
 namespace LocationDoorModel {
-inline constexpr std::uintptr_t UnlockState     = 0x28; // ReferenceData -> +0x18 -> +0x10 Id ("locked"/"unlocked")
+inline constexpr std::uintptr_t UnlockState     = 0x28; // PrimitiveModel or direct ReferenceData
+inline constexpr std::uintptr_t UnlockStateValue = 0x10; // direct ReferenceData fallback
 inline constexpr std::uintptr_t Description     = 0x30; // LocationDoorDescription
 inline constexpr std::uintptr_t DescWorldPos    = 0x30; // Vector3
 inline constexpr std::uintptr_t InnerDoorModel  = 0x38;
