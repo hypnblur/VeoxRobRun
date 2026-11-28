@@ -1,5 +1,6 @@
 #pragma once
 #include "pch.h"
+#include "../Input/Hotkey.h"
 #include <algorithm>
 #include <cctype>
 #include <mutex>
@@ -13,6 +14,22 @@ public:
 	{
 		ConfigName = name;
 	}
+
+	bool EspEnabled = true;
+	bool ShowPlayerName = true;
+	bool ShowClanTag = true;
+	bool ShowOffscreenDistance = true;
+	bool ShowVisibilityTags = true;
+	bool ShowAimingTag = true;
+	bool ShowKnockedDownTag = true;
+	bool ShowKnockedOutTag = true;
+	bool ShowSurrenderedTag = true;
+	bool ShowHandcuffedTag = true;
+	bool ShowBagValueTag = true;
+	bool ShowInVehicleTag = true;
+	bool ShowCrouchingTag = true;
+	bool ShowSprintingTag = true;
+	bool ShowCriticalHealthTag = true;
 
 	bool BoxEsp = true;
 	bool Health = true;
@@ -32,6 +49,7 @@ public:
 	std::string BvhPath = "city_colliders.bvh";
 	bool ShowBvh = false;
 	int BvhDrawDist = 100;
+	int IgnoreBvhSurfaceBinding = VK_F7;
 	// Project the ESP with the Unity render camera instead of the managed
 	// BattleCameraModel block. When enabled, this uses the hardware-synchronized
 	// native matrices to eliminate mouse-turn projection jitter.
@@ -249,6 +267,21 @@ public:
     json ToJson()
     {
         json j;
+        j[ConfigName][LIT("EspEnabled")] = EspEnabled;
+        j[ConfigName][LIT("ShowPlayerName")] = ShowPlayerName;
+        j[ConfigName][LIT("ShowClanTag")] = ShowClanTag;
+        j[ConfigName][LIT("ShowOffscreenDistance")] = ShowOffscreenDistance;
+        j[ConfigName][LIT("ShowVisibilityTags")] = ShowVisibilityTags;
+        j[ConfigName][LIT("ShowAimingTag")] = ShowAimingTag;
+        j[ConfigName][LIT("ShowKnockedDownTag")] = ShowKnockedDownTag;
+        j[ConfigName][LIT("ShowKnockedOutTag")] = ShowKnockedOutTag;
+        j[ConfigName][LIT("ShowSurrenderedTag")] = ShowSurrenderedTag;
+        j[ConfigName][LIT("ShowHandcuffedTag")] = ShowHandcuffedTag;
+        j[ConfigName][LIT("ShowBagValueTag")] = ShowBagValueTag;
+        j[ConfigName][LIT("ShowInVehicleTag")] = ShowInVehicleTag;
+        j[ConfigName][LIT("ShowCrouchingTag")] = ShowCrouchingTag;
+        j[ConfigName][LIT("ShowSprintingTag")] = ShowSprintingTag;
+        j[ConfigName][LIT("ShowCriticalHealthTag")] = ShowCriticalHealthTag;
         j[ConfigName][LIT("BoxEsp")] = BoxEsp;
         j[ConfigName][LIT("Health")] = Health;
         j[ConfigName][LIT("Distance")] = Distance;
@@ -264,6 +297,7 @@ public:
         j[ConfigName][LIT("BvhPath")] = BvhPath;
         j[ConfigName][LIT("ShowBvh")] = ShowBvh;
         j[ConfigName][LIT("BvhDrawDist")] = BvhDrawDist;
+        j[ConfigName][LIT("IgnoreBvhSurfaceBinding")] = IgnoreBvhSurfaceBinding;
         j[ConfigName][LIT("NativeEspCameraV2")] = NativeEspCamera;
         j[ConfigName][LIT("WeaponEsp")] = WeaponEsp;
         j[ConfigName][LIT("LookingAtYou")] = LookingAtYou;
@@ -277,7 +311,7 @@ public:
         j[ConfigName][LIT("ShowArmorValue")] = ShowArmorValue;
         j[ConfigName][LIT("ShowStamina")] = ShowStamina;
         j[ConfigName][LIT("SpectatorAlert")] = SpectatorAlert;
-        j[ConfigName][LIT("WeaponSprite")] = WeaponSprite;
+        j[ConfigName][LIT("ShowWeaponSprite")] = WeaponSprite;
         j[ConfigName][LIT("NameByRole")] = NameByRole;
         ToJsonColour(&j, LIT("CriminalColour"), &CriminalColour);
         ToJsonColour(&j, LIT("PoliceColour"), &PoliceColour);
@@ -345,6 +379,27 @@ public:
     }
     void FromJson(const json& j)
     {
+        const json empty = json::object();
+        const auto& settings = j.contains(ConfigName) ? j[ConfigName] : empty;
+        EspEnabled = settings.value(LIT("EspEnabled"), true);
+        ShowPlayerName = settings.value(LIT("ShowPlayerName"), true);
+        ShowClanTag = settings.value(LIT("ShowClanTag"), true);
+        ShowOffscreenDistance = settings.value(LIT("ShowOffscreenDistance"), true);
+        ShowVisibilityTags = settings.value(LIT("ShowVisibilityTags"), true);
+        ShowAimingTag = settings.value(LIT("ShowAimingTag"), true);
+        ShowKnockedDownTag = settings.value(LIT("ShowKnockedDownTag"), true);
+        ShowKnockedOutTag = settings.value(LIT("ShowKnockedOutTag"), true);
+        ShowSurrenderedTag = settings.value(LIT("ShowSurrenderedTag"), true);
+        ShowHandcuffedTag = settings.value(LIT("ShowHandcuffedTag"), true);
+        ShowBagValueTag = settings.value(LIT("ShowBagValueTag"), true);
+        ShowInVehicleTag = settings.value(LIT("ShowInVehicleTag"), true);
+        ShowCrouchingTag = settings.value(LIT("ShowCrouchingTag"), true);
+        ShowSprintingTag = settings.value(LIT("ShowSprintingTag"), true);
+        ShowCriticalHealthTag = settings.value(LIT("ShowCriticalHealthTag"), true);
+        WeaponEsp = settings.value(LIT("WeaponEsp"), true);
+        // Older profiles only showed the sprite while Weapon Name was enabled.
+        WeaponSprite = settings.value(LIT("ShowWeaponSprite"),
+            WeaponEsp && settings.value(LIT("WeaponSprite"), true));
         if (!j.contains(ConfigName))
             return;
         BoxEsp = j[ConfigName].value(LIT("BoxEsp"), BoxEsp);
@@ -362,8 +417,9 @@ public:
         BvhPath = j[ConfigName].value(LIT("BvhPath"), BvhPath);
         ShowBvh = j[ConfigName].value(LIT("ShowBvh"), ShowBvh);
         BvhDrawDist = j[ConfigName].value(LIT("BvhDrawDist"), BvhDrawDist);
+        IgnoreBvhSurfaceBinding = Hotkey::Read(j[ConfigName], LIT("IgnoreBvhSurfaceBinding"),
+            LIT("IgnoreBvhSurfaceKey"), Hotkey::LegacyUtility, VK_F7, Hotkey::AllowOff);
         NativeEspCamera = j[ConfigName].value(LIT("NativeEspCameraV2"), NativeEspCamera);
-        WeaponEsp = j[ConfigName].value(LIT("WeaponEsp"), WeaponEsp);
         LookingAtYou = j[ConfigName].value(LIT("LookingAtYou"), LookingAtYou);
         LookingAlert = j[ConfigName].value(LIT("LookingAlert"), LookingAlert);
         ShowRole = j[ConfigName].value(LIT("ShowRole"), ShowRole);
@@ -375,7 +431,6 @@ public:
         ShowArmorValue = j[ConfigName].value(LIT("ShowArmorValue"), ShowArmorValue);
         ShowStamina = j[ConfigName].value(LIT("ShowStamina"), ShowStamina);
         SpectatorAlert = j[ConfigName].value(LIT("SpectatorAlert"), SpectatorAlert);
-        WeaponSprite = j[ConfigName].value(LIT("WeaponSprite"), WeaponSprite);
         NameByRole = j[ConfigName].value(LIT("NameByRole"), NameByRole);
         FromJsonColour(j, LIT("CriminalColour"), &CriminalColour);
         FromJsonColour(j, LIT("PoliceColour"), &PoliceColour);

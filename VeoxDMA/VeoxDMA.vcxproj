@@ -29,26 +29,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -202,6 +202,7 @@ if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)to
     <ClCompile Include="SDK\RobRunCamera.cpp" />
     <ClCompile Include="SDK\Inventory.cpp" />
     <ClCompile Include="SDK\WorldEntities.cpp" />
+    <ClCompile Include="SDK\GrenadePrediction.cpp" />
     <ClCompile Include="SDK\SkinChanger.cpp" />
     <ClCompile Include="SDK\FovChanger.cpp" />
     <ClCompile Include="Esp\Radar.cpp" />
@@ -297,6 +298,7 @@ if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)to
     <ClInclude Include="SDK\RobRunCamera.h" />
     <ClInclude Include="SDK\Inventory.h" />
     <ClInclude Include="SDK\WorldEntities.h" />
+    <ClInclude Include="SDK\GrenadePrediction.h" />
     <ClInclude Include="SDK\SkinChanger.h" />
     <ClInclude Include="SDK\FovChanger.h" />
     <ClInclude Include="Security\XorStr.h" />
@@ -315,6 +317,7 @@ if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)to
     <ClInclude Include="Input\MediusProtocol.h" />
     <ClInclude Include="Input\FerrumProtocol.h" />
     <ClInclude Include="Input\CtlState.h" />
+    <ClInclude Include="Input\Hotkey.h" />
     <ClInclude Include="Input\HidTable.h" />
     <ClInclude Include="Input\InputDevice.h" />
     <ClInclude Include="Input\InputManager.h" />
@@ -337,6 +340,12 @@ if exist "$(SolutionDir)tools\abcurves_continuous.bin" copy /y "$(SolutionDir)to
     <ClInclude Include="ImGUI\imstb_truetype.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="StageRadarMaps" AfterTargets="Build">
+    <ItemGroup>
+      <RadarMap Include="$(MSBuildProjectDirectory)\..\maps\*.png" />
+    </ItemGroup>
+    <Copy SourceFiles="@(RadarMap)" DestinationFolder="$(OutDir)maps" SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

@@ -31,6 +31,19 @@ inline std::uint32_t ColorToImU32(const D2D1::ColorF& c)
 	       ((std::uint32_t)(c.r * 255.f));
 }
 
+inline constexpr LootFilter::Rarity LootRarityFromGame(int quality, LootFilter::Rarity fallback)
+{
+	switch (quality) {
+	case 1: return LootFilter::Rarity::Common;
+	case 2: return LootFilter::Rarity::Uncommon;
+	case 3: return LootFilter::Rarity::Rare;
+	case 4: return LootFilter::Rarity::Epic;
+	case 5: return LootFilter::Rarity::Legendary;
+	case 6: return LootFilter::Rarity::Exotic;
+	default: return fallback;
+	}
+}
+
 // Packed IM_COL32 form of a catalog rarity colour (RarityColors stores
 // 0xAARRGGBB, ImGui wants 0xAABBGGRR).
 inline std::uint32_t RarityColorU32(LootFilter::Rarity rarity)

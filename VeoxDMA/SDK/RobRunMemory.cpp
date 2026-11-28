@@ -61,11 +61,12 @@ bool DictHeaderMatches(const DictHeader& before, const DictHeader& after,
 
 template <typename T>
 bool ReadDictOnce(std::uintptr_t dictionary, std::vector<T>& out,
-    bool requireStable, bool fresh = false)
+    bool requireStable, bool fresh = false, std::int32_t freshMaxCount = 0)
 {
     out.clear();
     DictHeader header;
-    if (!ReadDictHeader(dictionary, header, fresh)) return false;
+    if (!ReadDictHeader(dictionary, header, fresh) ||
+        (freshMaxCount > 0 && header.count > freshMaxCount)) return false;
 
     // Read the backing-array length and the entries in one transaction. The
     // old path issued a separate read for capacity and another for the data.
@@ -77,7 +78,7 @@ bool ReadDictOnce(std::uintptr_t dictionary, std::vector<T>& out,
         : ReadBytes(header.entries + rr::Array::max_length, raw.data(), raw.size());
     // Under NOPAGING_IO, a fresh read can fail if a tail page is paged out;
     // fall back to the cached path rather than dropping the whole snapshot.
-    if (!readArrayOk && fresh)
+    if (!readArrayOk && fresh && freshMaxCount == 0)
         readArrayOk = ReadBytes(header.entries + rr::Array::max_length, raw.data(), raw.size());
     if (!readArrayOk)
         return false;
@@ -317,6 +318,12 @@ bool ReadDictIntVersioned(std::uintptr_t dictionary,
     return true;
 }
 
+bool ReadDictIntFresh(std::uintptr_t dictionary, std::vector<DictEntry>& out,
+    std::int32_t maxCount)
+{
+    return maxCount > 0 && ReadDictOnce(dictionary, out, true, true, maxCount);
+}
+
 bool ReadDictRef(std::uintptr_t dictionary, std::vector<RefDictEntry>& out,
     bool requireStable)
 {
@@ -334,24 +341,25 @@ bool ReadDictRef(std::uintptr_t dictionary, std::vector<RefDictEntry>& out,
     return false;
 }
 
-bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
-    bool requireStable)
+static bool ReadListSnapshot(std::uintptr_t list, std::vector<std::uintptr_t>& out,
+    std::int32_t maxCount, bool requireStable, bool fresh)
 {
     out.clear();
     if (list <= 0x10000) return false;
 
+    const auto read = fresh ? ReadBytesFresh : ReadBytes;
     const int maxAttempts = requireStable ? 2 : 1;
     for (int attempt = 0; attempt < maxAttempts; ++attempt) {
         ListHeader header;
-        if (!ReadBytes(list + rr::List::items, &header, sizeof(header)))
+        if (!read(list + rr::List::items, &header, sizeof(header)))
             continue;
-        if (header.items <= 0x10000 || header.count < 0 || header.count > 65536)
+        if (header.items <= 0x10000 || header.count < 0 || header.count > maxCount)
             return false;
 
         const std::size_t elementBytes =
             static_cast<std::size_t>(header.count) * sizeof(std::uintptr_t);
         std::vector<unsigned char> raw(sizeof(std::uint64_t) + elementBytes);
-        if (!ReadBytes(header.items + rr::Array::max_length, raw.data(), raw.size()))
+        if (!read(header.items + rr::Array::max_length, raw.data(), raw.size()))
             continue;
 
         std::uint64_t capacity = 0;
@@ -366,7 +374,7 @@ bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
 
         if (requireStable) {
             ListHeader after;
-            if (!ReadBytes(list + rr::List::items, &after, sizeof(after)))
+            if (!read(list + rr::List::items, &after, sizeof(after)))
                 continue;
             if (after.items != header.items || after.count != header.count ||
                 after.version != header.version)
@@ -378,6 +386,16 @@ bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
     }
     out.clear();
     return false;
+}
+
+bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out, bool requireStable)
+{
+    return ReadListSnapshot(list, out, 65536, requireStable, false);
+}
+
+bool ReadListFresh(std::uintptr_t list, std::vector<std::uintptr_t>& out, std::int32_t maxCount)
+{
+    return ReadListSnapshot(list, out, maxCount, true, true);
 }
 
 } // namespace RobRunMemory

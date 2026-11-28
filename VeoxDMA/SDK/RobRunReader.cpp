@@ -7,11 +7,16 @@ extern void RequestReattach();
 #include "Memory.h"
 #include "CameraFinder.h"
 #include "CollisionBVH.h"
+#include "GrenadePrediction.h"
 #include "ConfigInstance.h"
+#include "Config/LootFilterData.h"
 #include "DebugLog.h"
+#include "Misc/Diag.h"
 #include "Overlay.h"
 #include <atomic>
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -19,6 +24,7 @@ extern void RequestReattach();
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -99,6 +105,7 @@ struct RoleCacheEntry {
     int roleId = 0;
     std::string roleName;
     bool resolved = false;
+    bool isCivilianRole = false;
 };
 static std::unordered_map<std::uintptr_t, RoleCacheEntry> g_roleCache;
 
@@ -201,7 +208,7 @@ static bool CheckGameProcessAlive(bool force = false)
 // city_colliders.bvh only matches the City map. On non-City maps (Hub, Cottage,
 // etc.), raycasting against City geometry produces false occlusions where every
 // player appears behind a wall.
-static bool IsBvhActiveForCurrentLocation()
+static bool IsBvhActiveForCurrentLocation(bool allowUnknown = true)
 {
     std::string loc;
     {
@@ -209,7 +216,7 @@ static bool IsBvhActiveForCurrentLocation()
         loc = cachedLocationId;
     }
     if (loc.empty())
-        return true; // location not read yet -> allow BVH
+        return allowUnknown;
     std::string lower = loc;
     for (char& c : lower)
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -343,6 +350,8 @@ static bool RestoreDefaultCrosshair();
 // Slow-changing per-entity data (health, role, vehicle, identity). Reading the
 // primitive wrappers and strings costs far more than a position read, so it is
 // refreshed a few times per second and copied into every snapshot.
+enum class AimKnockEvidence { None, PhaseOnly, Timed };
+
 struct DetailCacheEntry {
     std::uintptr_t characterModel = 0;
     std::uintptr_t transform = 0;
@@ -359,6 +368,7 @@ struct DetailCacheEntry {
     int vehicleId = 0;
     int role = 0;
     std::string roleName;
+    bool isCivilianRole = false;
     std::wstring nickname;
     std::wstring clanTag;
     std::wstring weaponName;
@@ -377,6 +387,7 @@ struct DetailCacheEntry {
     std::int32_t equipValue = 0;
     bool isKnockedDown = false;
     bool isKnockedOut = false;
+    AimKnockEvidence aimKnock = AimKnockEvidence::None;
     bool isSurrendered = false;
     bool isHandcuffed = false;
     std::string reloadPhase;
@@ -454,6 +465,47 @@ struct RectTransformCache {
     float uiScaleX = 1.f, uiScaleY = 1.f;
     float uiScreenW = 0.f, uiScreenH = 0.f;
 };
+
+struct CachedLootLabel {
+    std::uintptr_t klass = 0, item = 0, content = 0, rect = 0;
+    int index = -1;
+    std::uint64_t confirmedMs = 0;
+    LootLabel label{};
+};
+
+struct LootGridCache {
+    std::uintptr_t dialog = 0, current = 0, container = 0, screenUpdater = 0;
+    std::uintptr_t reveal = 0, list = 0, inventoryView = 0;
+    std::size_t cursor = 0;
+    RectTransformCache viewport;
+    std::uint64_t layoutConfirmedMs = 0;
+    std::uint64_t screenConfirmedMs = 0;
+    std::unordered_map<std::uintptr_t, CachedLootLabel> slots;
+    std::unordered_map<std::uintptr_t, LootLabel> items;
+};
+
+struct LootPreviewReaderState {
+    LootGridCache grid;
+    std::uintptr_t screensUpdater = 0;
+    std::uint64_t generation = 0;
+    std::uint64_t lastPollMs = 0;
+    std::uint64_t lastResolveMs = 0;
+    std::int32_t rectFieldsOffset = -1;
+    std::string_view lastStatus;
+};
+
+static LootPreviewReaderState g_lootPreview;
+static std::atomic<std::shared_ptr<const LootPreview>> g_publishedLootPreview;
+static std::atomic<bool> g_lootPreviewEnabled{ false };
+static RobRunGrenades::Predictor g_grenadePredictor;
+static std::atomic<bool> g_grenadePredictionEnabled{ false };
+static std::atomic<std::shared_ptr<const RobRunGrenades::Preview>> g_grenadePrediction;
+static std::chrono::steady_clock::time_point g_nextGrenadePoll{};
+static std::uintptr_t g_grenadeWorld = 0;
+static RobRunWorld::GrenadeContactLayout g_grenadeContactLayout;
+static std::unordered_map<std::uintptr_t, float> g_grenadeEffectRadii;
+static std::atomic<int> g_trackedAimEntity{ -1 };
+static std::uint64_t g_lastTrackedKnockReadMs = 0;
 static std::uintptr_t cachedMapDialogModel = 0;
 static std::uintptr_t cachedMapConfigModel = 0;
 static std::uintptr_t cachedMapFullVar = 0;
@@ -475,8 +527,23 @@ static std::atomic<bool> g_fullMapFastMode{ false };
 static std::vector<RobRunMemory::DictEntry> g_cachedEntityEntries;
 static RobRunMemory::DictVersionStamp g_entityDictStamp{};
 
+static void ResetGrenadePrediction()
+{
+    g_grenadePredictor.Reset();
+    g_grenadePrediction.store(nullptr);
+    g_nextGrenadePoll = {};
+    g_grenadeWorld = 0;
+    g_grenadeContactLayout = {};
+    g_grenadeEffectRadii.clear();
+}
+
 static void ClearEntityCaches()
 {
+    ResetGrenadePrediction();
+    g_lootPreview = {};
+    g_publishedLootPreview.store(nullptr);
+    g_trackedAimEntity.store(-1, std::memory_order_relaxed);
+    g_lastTrackedKnockReadMs = 0;
     g_cachedEntityEntries.clear();
     g_entityDictStamp.Reset();
     rigCache.clear();
@@ -606,6 +673,9 @@ static NativeCameraSnapshot LoadNativeCamera()
 static std::mutex g_bvhMutex;
 static std::shared_ptr<const CollisionBVH::Scene> g_bvhScene =
     std::make_shared<CollisionBVH::Scene>();
+static std::shared_ptr<const std::vector<std::uint8_t>> g_bvhIgnoredTriangles;
+static std::vector<std::vector<std::uint32_t>> g_bvhIgnoreHistory;
+static constexpr float kVisibilityRayStart = 0.20f;
 static std::string g_bvhRequestedPath;
 static std::uint64_t g_bvhLastAttemptMs = 0;
 static CollisionBVH::DynamicOccluders g_dynOccluders;
@@ -720,6 +790,8 @@ static void TryLoadBvh(bool force = false)
 
     std::lock_guard<std::mutex> lock(g_bvhMutex);
     g_bvhScene = std::move(nextScene);
+    g_bvhIgnoredTriangles.reset();
+    g_bvhIgnoreHistory.clear();
 }
 
 static bool DmaRead(std::uint64_t address, void* buffer, std::size_t size)
@@ -979,6 +1051,8 @@ static void PublishSnapshot()
     snapshot->sessionGeneration = sessionGeneration;
     snapshot->sessionChangedMs = sessionChangedMs;
     for (auto& entity : snapshot->entities) {
+        if (localEntityId >= 0 && entity.entityId == localEntityId)
+            snapshot->localIsPolice = (RoleLabel(entity.role, entity.roleName) == "Police Officer");
         if (entity.entityId != localEntityId && !entity.isDead &&
             RobRunMemory::Finite(localPosition) && !localPosition.IsZero()) {
             const float dx = localPosition.x - entity.position.x;
@@ -1237,7 +1311,9 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                     }
                     if (be > 0x10000 && sessionGeneration == gen) {
                         auto plots = std::make_shared<RobRunWorld::PlotState>();
-                        if (RobRunWorld::ReadPlots(be, *plots) && sessionGeneration == gen) {
+                        const auto snapshot = GetSnapshot();
+                        const Vector3 localPosition = snapshot ? snapshot->localPosition : Vector3{};
+                        if (RobRunWorld::ReadPlots(be, localPosition, *plots) && sessionGeneration == gen) {
                             std::lock_guard<std::mutex> lock(g_worldMutex);
                             g_plotState = std::move(plots);
                         }
@@ -1501,8 +1577,9 @@ static void ReadHealth(std::uintptr_t characterModel, EntityData& entity)
     }
 }
 
-static std::string NormalizeRoleName(const std::string& raw)
+static std::string NormalizeRoleName(const std::string& raw, bool& isCivilianRole)
 {
+    isCivilianRole = false;
     if (raw.empty()) return {};
     std::string lower;
     lower.reserve(raw.size());
@@ -1511,6 +1588,12 @@ static std::string NormalizeRoleName(const std::string& raw)
         lower.push_back(static_cast<char>(std::tolower(ch)));
     }
     if (lower.empty()) return {};
+    const auto first = lower.find_first_not_of(' ');
+    if (first != std::string::npos) {
+        const auto name = lower.substr(first, lower.find_last_not_of(' ') - first + 1);
+        isCivilianRole = name == "civilian" || name == "civilianrole" ||
+            name == "rolecivilian" || name == "role_civilian" || name == "civilian_role";
+    }
 
     // Police first — "robbery" contains "rob" which would false-positive as Criminal
     if (lower.find("polic") != std::string::npos ||
@@ -1543,7 +1626,7 @@ static std::string NormalizeRoleName(const std::string& raw)
 }
 
 static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
-    std::string& outRoleName, int depth = 0)
+    std::string& outRoleName, bool& isCivilianRole, int depth = 0)
 {
     if (depth >= 4 || obj <= 0x10000 || obj >= 0x00007FFFFFFFFFFFull)
         return false;
@@ -1556,7 +1639,7 @@ static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
     if (clsName == "String") {
         std::wstring ws;
         if (RobRunMemory::ReadString(obj, ws, 128) && !ws.empty()) {
-            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws));
+            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws), isCivilianRole);
             if (!norm.empty()) {
                 outRoleName = norm;
                 return true;
@@ -1571,7 +1654,7 @@ static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
         if (!Il2Cpp::IsClass(strObj, "String")) return false;
         std::wstring ws;
         if (!RobRunMemory::ReadString(strObj, ws, 128) || ws.empty()) return false;
-        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws));
+        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(ws), isCivilianRole);
         if (norm.empty()) return false;
         dst = norm;
         return true;
@@ -1604,7 +1687,7 @@ static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
             if (f.typeCode == 0x12 || f.typeCode == 0x15 || f.typeCode == 0x1C) {
                 if (fieldMatches(f.name, {"value", "data", "desc", "role"})) {
                     const std::uintptr_t child = ReadPtr(obj + static_cast<std::uintptr_t>(f.offset));
-                    if (ResolveRoleFromObject(child, outRoleId, outRoleName, depth + 1))
+                    if (ResolveRoleFromObject(child, outRoleId, outRoleName, isCivilianRole, depth + 1))
                         return true;
                 }
             }
@@ -1636,7 +1719,7 @@ static bool ResolveRoleFromObject(std::uintptr_t obj, int& outRoleId,
 
     const std::uintptr_t inner = ReadPtr(obj + rr::ReferenceData::Value);
     if (inner > 0x10000 && inner < 0x00007FFFFFFFFFFFull && Il2Cpp::ClassOf(inner) != 0) {
-        if (ResolveRoleFromObject(inner, outRoleId, outRoleName, depth + 1))
+        if (ResolveRoleFromObject(inner, outRoleId, outRoleName, isCivilianRole, depth + 1))
             return true;
     }
     if (readIl2CppStringField(rr::Description::Name, outRoleName))
@@ -1662,16 +1745,17 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
         if (it != g_roleCache.end() && it->second.resolved) {
             if (!it->second.roleName.empty()) entity.roleName = it->second.roleName;
             if (it->second.roleId != 0) entity.role = it->second.roleId;
+            entity.isCivilianRole = it->second.isCivilianRole;
             return;
         }
 
         int roleId = 0;
         std::string roleName;
-        if (ResolveRoleFromObject(innerPtr, roleId, roleName)) {
+        if (ResolveRoleFromObject(innerPtr, roleId, roleName, entity.isCivilianRole)) {
             if (!roleName.empty()) entity.roleName = roleName;
             if (roleId != 0) entity.role = roleId;
             if (!entity.roleName.empty()) {
-                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true };
+                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true, entity.isCivilianRole };
                 return;
             }
         }
@@ -1681,10 +1765,10 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
         if (nameStr > 0x10000) {
             std::wstring w;
             if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
-                const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w), entity.isCivilianRole);
                 if (!norm.empty()) {
                     entity.roleName = norm;
-                    g_roleCache[innerPtr] = RoleCacheEntry{ roleId, norm, true };
+                    g_roleCache[innerPtr] = RoleCacheEntry{ roleId, norm, true, entity.isCivilianRole };
                     return;
                 }
             }
@@ -1692,7 +1776,7 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
 
         if (Il2Cpp::ClassOf(innerPtr) != 0) {
             if (roleId != 0 || !roleName.empty())
-                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true };
+                g_roleCache[innerPtr] = RoleCacheEntry{ roleId, roleName, true, entity.isCivilianRole };
             return;
         }
     }
@@ -1700,7 +1784,7 @@ static void ApplyRoleFromWrapper(std::uintptr_t roleWrapper, EntityData& entity)
     // Fallback for wrappers that store a primitive int32 role (never cached by wrapper).
     int roleId = 0;
     std::string roleName;
-    if (ResolveRoleFromObject(roleWrapper, roleId, roleName)) {
+    if (ResolveRoleFromObject(roleWrapper, roleId, roleName, entity.isCivilianRole)) {
         if (!roleName.empty()) entity.roleName = roleName;
         if (roleId != 0) entity.role = roleId;
         if (!entity.roleName.empty())
@@ -1761,7 +1845,7 @@ static void ReadCommonState(std::uintptr_t characterModel, EntityData& entity)
                 if (nameStr > 0x10000) {
                     std::wstring w;
                     if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
-                        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                        const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w), entity.isCivilianRole);
                         if (!norm.empty()) entity.roleName = norm;
                     }
                 }
@@ -1841,6 +1925,28 @@ static std::int64_t ReadTimestampData(std::uintptr_t tsWrapper)
 
 static constexpr std::int64_t kMaxKnockdownRemainMs = 60000LL;
 static constexpr std::int64_t kMaxKnockoutRemainMs  = 300000LL;
+static constexpr std::int64_t kCombatTimestampSentinel = 1767225600000LL;
+
+static bool IsActiveCombatWindow(std::int64_t end, std::int64_t now, std::int64_t maxRemaining)
+{
+    return now > 0 && end > kCombatTimestampSentinel && end > now && end - now <= maxRemaining;
+}
+
+static bool IsAimKnocked(const EntityData& entity, AimKnockEvidence evidence)
+{
+    if (evidence == AimKnockEvidence::Timed) return true;
+    if (evidence != AimKnockEvidence::PhaseOnly || entity.inVehicle) return false;
+    if (entity.isHandcuffed) return true;
+
+    // Phase descriptions can persist on active officers. Require a downed
+    // pose before an untimed phase is allowed to reject a target.
+    const auto& pose = entity.bonePoints;
+    return !entity.isCrouching && pose.hasHead && pose.hasPelvis &&
+        Skeleton::IsValidBone(pose.head, entity.position) &&
+        Skeleton::IsValidBone(pose.pelvis, entity.position) &&
+        pose.head.y - entity.position.y <= 1.f &&
+        pose.pelvis.y - entity.position.y <= 0.75f;
+}
 
 // Validates a KnockoutModel::Phase ReferenceData::Value pointer.
 // Rejects non-canonical garbage and non-knockout/idle/default/cuffing phase descriptions.
@@ -1880,6 +1986,49 @@ static bool IsActiveKnockoutPhaseDesc(std::uintptr_t phaseDesc)
     }
     s_phaseValidCache[phaseDesc] = valid;
     return valid;
+}
+
+static void RefreshTrackedAimKnock()
+{
+    const int id = g_trackedAimEntity.load(std::memory_order_relaxed);
+    if (id < 0) return;
+    const auto now = GetTickCount64();
+    if (g_lastTrackedKnockReadMs && now - g_lastTrackedKnockReadMs < 40) return;
+    const auto it = std::find_if(entities.begin(), entities.end(),
+        [id](const EntityData& entity) { return entity.entityId == id; });
+    if (it == entities.end() || it->isDead || it->characterModel <= 0x10000) return;
+    g_lastTrackedKnockReadMs = now;
+
+    const auto read = [](std::uintptr_t at, auto& value) {
+        return RobRunMemory::ReadBytesFresh(at, &value, sizeof(value));
+    };
+    const auto readField = [&](std::uintptr_t object, std::uintptr_t offset, auto& value) {
+        return !object || (object > 0x10000 && object < 0x00007FFFFFFFFFFFull && read(object + offset, value));
+    };
+    const auto model = it->characterModel;
+    std::uintptr_t kd{}, ko{}, leave{}, kdTime{}, koTime{}, phase{}, phaseDesc{};
+    std::int64_t kdEnd{}, koEnd{};
+    std::uint8_t leaving{}, cuffing{};
+    if (!read(model + rr::BattleCharacterModel::Knockdown, kd) ||
+        !read(model + rr::BattleCharacterModel::KnockdownLeaveState, leave) ||
+        !read(model + rr::BattleCharacterModel::Knockout, ko) ||
+        !readField(kd, rr::KnockdownModel::EndTs, kdTime) ||
+        !readField(ko, rr::KnockoutModel::EndTs, koTime) ||
+        !readField(ko, rr::KnockoutModel::Phase, phase) ||
+        !readField(phase, rr::ReferenceData::Value, phaseDesc) ||
+        !readField(leave, rr::KnockdownLeaveStateModel::IsActive, leaving) ||
+        !readField(ko, rr::KnockoutModel::IsHandcuffing, cuffing) ||
+        !readField(kdTime, rr::PrimitiveData::value, kdEnd) ||
+        !readField(koTime, rr::PrimitiveData::value, koEnd))
+        return;
+    const auto battleNow = ReadBattleNowMs(cachedBattleEntities);
+    const bool timedKnock = (!leaving && IsActiveCombatWindow(kdEnd, battleNow, kMaxKnockdownRemainMs)) ||
+        (!cuffing && IsActiveCombatWindow(koEnd, battleNow, kMaxKnockoutRemainMs));
+    const auto evidence = timedKnock ? AimKnockEvidence::Timed :
+        (!cuffing && IsActiveKnockoutPhaseDesc(phaseDesc) ? AimKnockEvidence::PhaseOnly : AimKnockEvidence::None);
+    it->aimKnocked = IsAimKnocked(*it, evidence);
+    if (const auto detail = detailCache.find(id); detail != detailCache.end() && detail->second.characterModel == model)
+        detail->second.aimKnock = evidence;
 }
 
 static void ReadReloadAndKnockdownState(std::uintptr_t characterModel,
@@ -2691,7 +2840,13 @@ static bool RestoreDefaultCrosshair()
     return restored;
 }
 
-static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache, bool forceRefresh, const char* tag)
+struct UiRectReadSample {
+    std::int32_t& fieldsOffset;
+    std::unordered_map<std::uintptr_t, std::vector<unsigned char>> reads;
+};
+
+static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformCache& cache,
+    bool forceRefresh, const char* tag, UiRectReadSample* freshSample = nullptr)
 {
     if (managedRect <= 0x10000) {
         cache.valid = false;
@@ -2706,8 +2861,22 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
 
     // Uncached-first read helpers: under -norefresh, newly instantiated UI
     // dialogs (e.g. MapDialogView on pressing 'M') may not be in VMM's cache.
-    auto mapReadBytes = [](std::uintptr_t addr, void* buf, std::size_t sz) -> bool {
+    auto mapReadBytes = [freshSample](std::uintptr_t addr, void* buf, std::size_t sz) -> bool {
         if (addr <= 0x10000 || !buf || !sz) return false;
+        if (freshSample) {
+            // Slots share most of their canvas ancestors. Reuse those reads for
+            // this sample, including while the inventory is scrolling.
+            auto& bytes = freshSample->reads[addr];
+            if (bytes.size() != sz) {
+                bytes.resize(sz);
+                if (!TargetProcess.ReadFresh(addr, bytes.data(), sz)) {
+                    bytes.clear();
+                    return false;
+                }
+            }
+            std::memcpy(buf, bytes.data(), sz);
+            return true;
+        }
         if (TargetProcess.ReadFresh(addr, buf, sz)) return true;
         return TargetProcess.Read(addr, buf, sz);
     };
@@ -2727,7 +2896,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     const std::uintptr_t matrices = mapReadPtr(hierarchy + rr::UnityTransform::matrices);
     const std::uintptr_t parents  = mapReadPtr(hierarchy + rr::UnityTransform::parents);
     const std::uintptr_t pointers = mapReadPtr(hierarchy + rr::UnityTransform::pointers);
-    if (matrices <= 0x10000 || parents <= 0x10000) {
+    if (matrices <= 0x10000 || parents <= 0x10000 || (freshSample && pointers <= 0x10000)) {
         cache.valid = false;
         return false;
     }
@@ -2751,7 +2920,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
         }
         // Fallback: chunked 4 KB scan of hierarchy.pointers (tolerates large
         // UI Canvas hierarchies with >4096 elements without multi-page cache misses).
-        if (idx < 0) {
+        if (idx < 0 && !freshSample) {
             std::int32_t count = 0;
             if (!mapReadI32(hierarchy + rr::UnityTransform::count, count) || count < 1 || count > 65536) {
                 if (!mapReadI32(hierarchy + 0x10, count) || count < 1 || count > 65536)
@@ -2777,7 +2946,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
 
     if (idx < 0) {
         static bool loggedIdxFail = false;
-        if (!loggedIdxFail) {
+        if (!freshSample && !loggedIdxFail) {
             loggedIdxFail = true;
             std::printf("[MapProbe] %s idx resolve failed: rc=0x%llX native=0x%llX hier=0x%llX ptrs=0x%llX\n",
                 tag ? tag : "?", (unsigned long long)managedRect,
@@ -2791,6 +2960,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     // (typically 4-10 hops; avoids reading the entire Canvas parent array).
     std::vector<int> chain;
     chain.reserve(16);
+    bool reachedRoot = false;
     for (int cur = idx, steps = 0; cur >= 0 && cur < 131072 && steps < 32; ++steps) {
         bool cycle = false;
         for (int existing : chain) {
@@ -2801,10 +2971,13 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
         std::int32_t p = -1;
         if (!mapReadI32(parents + static_cast<std::uintptr_t>(cur) * sizeof(std::int32_t), p))
             break;
-        if (p < 0 || p == cur) break;
+        if (p < 0 || p == cur) {
+            reachedRoot = true;
+            break;
+        }
         cur = p;
     }
-    if (chain.empty()) { cache.valid = false; return false; }
+    if (chain.empty() || (freshSample && !reachedRoot)) { cache.valid = false; return false; }
     std::reverse(chain.begin(), chain.end());
 
     struct UiTRS {
@@ -2932,6 +3105,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
         return true;
     };
 
+    const float minSide = freshSample ? 8.f : 50.f;
     auto evalRectFieldsAt = [&](int fi,
                                 float& outMinX, float& outMinY, float& outMaxX, float& outMaxY,
                                 float& outScreenW, float& outScreenH,
@@ -2989,6 +3163,8 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
                 }
             }
         }
+        if (freshSample && !haveCanvasRef)
+            return 0;
 
         float pw = canvasRefW;
         float ph = canvasRefH;
@@ -3044,7 +3220,7 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
         const float sw = rw * absCsx;
         const float sh = rh * absCsy;
         if (!std::isfinite(sw) || !std::isfinite(sh) ||
-            sw < 50.f || sw > 8000.f || sh < 50.f || sh > 8000.f)
+            sw < minSide || sw > 8000.f || sh < minSide || sh > 8000.f)
             return 0;
 
         // Standard UI pivots (0, 0.5, 1) and square/screen-sized containers earn bonus confidence.
@@ -3076,8 +3252,9 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     float rw = 0.f, rh = 0.f, pivX = 0.5f, pivY = 0.5f;
     bool foundRect = false;
 
-    if (s_rectTransformRectOffset >= static_cast<std::int32_t>(kScanBase)) {
-        const int fi = (s_rectTransformRectOffset - static_cast<std::int32_t>(kScanBase)) / 4;
+    auto& rectFieldsOffset = freshSample ? freshSample->fieldsOffset : s_rectTransformRectOffset;
+    if (rectFieldsOffset >= static_cast<std::int32_t>(kScanBase)) {
+        const int fi = (rectFieldsOffset - static_cast<std::int32_t>(kScanBase)) / 4;
         if (evalRectFieldsAt(fi, minX, minY, maxX, maxY, screenW, screenH, rw, rh, pivX, pivY) >= 100)
             foundRect = true;
     }
@@ -3095,17 +3272,19 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
                 rw = tRw; rh = tRh; pivX = tPx; pivY = tPy;
             }
         }
-        if (bestFi >= 0 && bestScore >= 60) {
-            s_rectTransformRectOffset = static_cast<std::int32_t>(kScanBase) + bestFi * 4;
+        if (bestFi >= 0 && bestScore >= (freshSample ? 100 : 60)) {
+            rectFieldsOffset = static_cast<std::int32_t>(kScanBase) + bestFi * 4;
             foundRect = true;
-            std::printf("[MapProbe] RectTransform fields discovered at native+0x%X (score=%d): size=(%.1fx%.1f) pivot=(%.2f,%.2f) canvas=(%.0fx%.0f) bounds=(%.0f,%.0f..%.0f,%.0f)\n",
-                s_rectTransformRectOffset, bestScore, rw, rh, pivX, pivY, screenW, screenH, minX, minY, maxX, maxY);
+            if (!freshSample) {
+                std::printf("[MapProbe] RectTransform fields discovered at native+0x%X (score=%d): size=(%.1fx%.1f) pivot=(%.2f,%.2f) canvas=(%.0fx%.0f) bounds=(%.0f,%.0f..%.0f,%.0f)\n",
+                    rectFieldsOffset, bestScore, rw, rh, pivX, pivY, screenW, screenH, minX, minY, maxX, maxY);
+            }
         }
     }
 
     if (!foundRect) {
         static bool loggedRectFail = false;
-        if (!loggedRectFail || forceRefresh) {
+        if (!freshSample && (!loggedRectFail || forceRefresh)) {
             loggedRectFail = true;
             std::printf("[MapProbe] %s RectTransform probe missed: native=0x%llX idx=%d chain=%zu wx=(%.1f,%.1f) scale=(%.3f,%.3f)\n",
                 tag ? tag : "?", (unsigned long long)native, idx, chain.size(), wx, wy, cache.uiScaleX, cache.uiScaleY);
@@ -3120,9 +3299,552 @@ static bool ReadRectTransformUiBounds(std::uintptr_t managedRect, RectTransformC
     cache.uiMaxY = maxY;
     cache.uiScreenW = screenW;
     cache.uiScreenH = screenH;
-    cache.valid = (cache.uiMaxX - cache.uiMinX >= 50.f) && (cache.uiMaxY - cache.uiMinY >= 50.f);
+    cache.valid = (cache.uiMaxX - cache.uiMinX >= minSide) && (cache.uiMaxY - cache.uiMinY >= minSide);
     return cache.valid;
 }
+
+namespace {
+
+constexpr std::int32_t kMaxLootSlots = 256;
+
+void ReportLootPreview(std::string_view status)
+{
+    if (status == g_lootPreview.lastStatus)
+        return;
+    g_lootPreview.lastStatus = status;
+    VeoxDiag("[Loot labels] %.*s", static_cast<int>(status.size()), status.data());
+}
+
+std::string LootObjectClass(std::uintptr_t object)
+{
+    return object > 0x10000 ? Il2Cpp::ClassNameOfClass(ReadPtrFresh(object)) : std::string{};
+}
+
+enum class LootRevealState : std::int32_t { Close, Scan, Preview, Open };
+
+struct LootSlotFields {
+    std::uintptr_t klass;
+    std::byte reserved0[0x18];
+    std::uintptr_t container;
+    std::uintptr_t descriptions;
+    std::uintptr_t inventoryView;
+    std::byte reserved1[0x20];
+    std::int32_t index;
+    std::byte reserved2[0x14];
+    std::uintptr_t content;
+    std::uintptr_t item;
+    LootRevealState state;
+};
+
+namespace slot = rr::InventoryCellsRevealSlotUpdater;
+static_assert(offsetof(LootSlotFields, container) == slot::Model);
+static_assert(offsetof(LootSlotFields, inventoryView) == slot::InventoryView);
+static_assert(offsetof(LootSlotFields, index) == slot::SlotIndex);
+static_assert(offsetof(LootSlotFields, content) == slot::Content);
+static_assert(offsetof(LootSlotFields, item) == slot::CurrentItem);
+static_assert(offsetof(LootSlotFields, state) == slot::State);
+
+struct ScreensDictionaryHeader {
+    std::uintptr_t entries;
+    std::int32_t count;
+    std::int32_t freeList;
+    std::int32_t freeCount;
+    std::int32_t version;
+    bool operator==(const ScreensDictionaryHeader&) const = default;
+};
+static_assert(sizeof(ScreensDictionaryHeader) == 0x18);
+
+struct ScreensDictionaryEntry {
+    std::uint32_t hash;
+    std::int32_t next;
+    std::uintptr_t screen;
+    std::uintptr_t updater;
+    std::uintptr_t disposable;
+};
+static_assert(sizeof(ScreensDictionaryEntry) == rr::ScreensUpdater::EntryStride);
+static_assert(offsetof(ScreensDictionaryEntry, updater) == rr::ScreensUpdater::EntryUpdater);
+
+std::uintptr_t FindScreensUpdater(std::uintptr_t game)
+{
+    std::vector<std::uintptr_t> updaters;
+    if (!RobRunMemory::ReadListFresh(ReadPtrFresh(game + rr::Game::ActiveUpdaters), updaters, 512))
+        return 0;
+    for (const auto updater : updaters) {
+        if (LootObjectClass(updater) == "ScreensUpdater")
+            return updater;
+    }
+    return 0;
+}
+
+std::uintptr_t FindOpenLootDialogUpdater(std::uintptr_t screens, std::uintptr_t dialog,
+    std::uintptr_t knownUpdater, bool& inactive)
+{
+    inactive = false;
+    const auto model = ReadPtrFresh(screens + rr::ScreensUpdater::ScreensModel);
+    if (LootObjectClass(model) != "ScreensModel")
+        return 0;
+    std::vector<std::uintptr_t> stack;
+    if (!RobRunMemory::ReadListFresh(ReadPtrFresh(model + rr::ScreensModel::Stack), stack, 64))
+        return 0;
+    if (stack.empty() || stack.back() != dialog) {
+        inactive = true;
+        return 0;
+    }
+    if (knownUpdater) return knownUpdater;
+
+    const auto dictionary = ReadPtrFresh(screens + rr::ScreensUpdater::DisposeModels);
+    const auto headerAddress = dictionary + rr::Dict::entries;
+    ScreensDictionaryHeader header{}, after{};
+    if (dictionary <= 0x10000 || !RobRunMemory::ReadBytesFresh(headerAddress, &header, sizeof(header)) ||
+        header.entries <= 0x10000 || header.count <= 0 || header.count > 128)
+        return 0;
+
+    std::uint64_t capacity = 0;
+    if (!RobRunMemory::ReadBytesFresh(header.entries + rr::Array::max_length, &capacity, sizeof(capacity)) ||
+        capacity < static_cast<std::uint64_t>(header.count))
+        return 0;
+
+    std::vector<ScreensDictionaryEntry> entries(header.count);
+    if (!RobRunMemory::ReadBytesFresh(header.entries + rr::Array::vector,
+            entries.data(), entries.size() * sizeof(entries.front())) ||
+        !RobRunMemory::ReadBytesFresh(headerAddress, &after, sizeof(after)) || after != header)
+        return 0;
+    for (const auto& entry : entries) {
+        if (entry.next >= rr::Dict::entry_allocated_min && entry.screen == dialog)
+            return entry.updater;
+    }
+    return 0;
+}
+
+std::uintptr_t FindInventoryContainerUpdater(std::uintptr_t screenUpdater, std::uintptr_t battle)
+{
+    // BattleScreenFactory wraps the inventory updater with the screen's
+    // lifecycle updaters before ScreensUpdater registers it in the dictionary.
+    if (LootObjectClass(screenUpdater) != "BattleScreensUpdater" ||
+        ReadPtrFresh(screenUpdater + rr::BattleScreensUpdater::BattleModel) != battle)
+        return 0;
+
+    std::vector<std::uintptr_t> children;
+    if (!RobRunMemory::ReadListFresh(
+            ReadPtrFresh(screenUpdater + rr::BattleScreensUpdater::Updaters), children, 64))
+        return 0;
+    for (const auto child : children) {
+        if (LootObjectClass(child) == "InventoryContainerDialogUpdater" &&
+            ReadPtrFresh(child + rr::LootDialogUpdaters::ContainerBattleModel) == battle)
+            return child;
+    }
+    return 0;
+}
+
+std::uintptr_t FindLootRevealUpdater(std::uintptr_t dialogUpdater, std::uintptr_t container)
+{
+    std::vector<std::uintptr_t> updaters;
+    if (!RobRunMemory::ReadListFresh(
+            ReadPtrFresh(dialogUpdater + rr::LootDialogUpdaters::Updaters), updaters, 128))
+        return 0;
+    std::vector<std::uintptr_t> externalUpdaters;
+    for (const auto updater : updaters) {
+        const auto name = LootObjectClass(updater);
+        if (name != "LootDialogUpdater" && name != "VehicleLootDialogUpdater" &&
+            name != "TrunkDialogUpdater" && name != "StorageBoxDialogUpdater" &&
+            name != "PlotContainerDialogUpdater")
+            continue;
+        if (!RobRunMemory::ReadListFresh(
+                ReadPtrFresh(updater + rr::LootDialogUpdaters::Updaters), externalUpdaters, 128))
+            continue;
+        for (const auto child : externalUpdaters) {
+            if (LootObjectClass(child) == "InventoryCellsRevealUpdater" &&
+                ReadPtrFresh(child + rr::InventoryCellsRevealUpdater::RevealContainerModel) == container)
+                return child;
+        }
+    }
+    return 0;
+}
+
+bool ReadLootItem(std::uintptr_t item, LootLabel& label)
+{
+    if (!Il2Cpp::IsClassOrDerived(item, "InventoryItemDescription"))
+        return false;
+    std::wstring itemId;
+    if (!RobRunMemory::ReadString(ReadPtrFresh(item + rr::InventoryItemDescription::Id), itemId, 128) ||
+        itemId.empty())
+        return false;
+    auto id = RobRunMemory::WideToUtf8(itemId);
+    if (id.empty())
+        return false;
+
+    const auto& catalog = LootFilter::kItemCatalog;
+    auto definition = std::find_if(catalog.begin(), catalog.end(), [&](const auto& entry) {
+        return id == entry.id && entry.displayName[0];
+    });
+    if (definition == catalog.end()) {
+        definition = std::find_if(catalog.begin(), catalog.end(), [&](const auto& entry) {
+            return id == entry.labelMatch && entry.displayName[0];
+        });
+    }
+    const bool known = definition != catalog.end();
+    label.name = known ? std::string(definition->displayName) : std::move(id);
+    const auto fallback = known ? definition->rarity : LootFilter::Rarity::Common;
+    std::int32_t quality = 0;
+    label.rarity = RobRunMemory::ReadBytesFresh(item + rr::InventoryItemDescription::Rarity,
+        &quality, sizeof(quality)) ? LootRarityFromGame(quality, fallback) : fallback;
+    return true;
+}
+
+bool ReadLootViewport(std::uintptr_t inventoryView, UiRectReadSample& sample, RectTransformCache& bounds)
+{
+    if (!Il2Cpp::IsClassOrDerived(inventoryView, "ScrolledCellsUiView"))
+        return false;
+    const auto scroll = ReadPtrFresh(inventoryView + rr::ScrolledCellsUiView::ScrollRect);
+    const auto scrollViewport = Il2Cpp::IsClassOrDerived(scroll, "ScrollRect")
+        ? ReadPtrFresh(scroll + rr::UiScrollRect::Viewport) : 0;
+    const auto slotViewport = ReadPtrFresh(inventoryView + rr::ScrolledCellsUiView::ScrollToSlotViewport);
+    for (const auto viewport : { scrollViewport, slotViewport }) {
+        if (LootObjectClass(viewport) == "RectTransform" &&
+            ReadRectTransformUiBounds(viewport, bounds, true, "loot viewport", &sample))
+            return true;
+    }
+    return false;
+}
+
+void NormalizeLootBounds(const RectTransformCache& bounds, Vector2& min, Vector2& max)
+{
+    min = { bounds.uiMinX / bounds.uiScreenW, 1.f - bounds.uiMaxY / bounds.uiScreenH };
+    max = { bounds.uiMaxX / bounds.uiScreenW, 1.f - bounds.uiMinY / bounds.uiScreenH };
+}
+
+// OnUpdate starts the icon effect on entry to Preview. Close and Scan still
+// show the cover, and Init fills CurrentItem before it creates that cover.
+bool IsHiddenLootSlot(const LootSlotFields& fields)
+{
+    return (fields.state == LootRevealState::Close || fields.state == LootRevealState::Scan) &&
+        fields.content > 0x10000 &&
+        fields.item > 0x10000 && fields.inventoryView > 0x10000 &&
+        fields.index >= 0 && fields.index < kMaxLootSlots;
+}
+
+bool ReadLootPointer(std::uintptr_t address, std::uintptr_t& out)
+{
+    return RobRunMemory::ReadBytesFresh(address, &out, sizeof(out));
+}
+
+void ClearLootGrid()
+{
+    g_lootPreview.grid = {};
+    g_publishedLootPreview.store(nullptr);
+}
+
+void PublishLootLabels(const LootGridCache& grid, std::uint64_t now)
+{
+    if (!grid.layoutConfirmedMs || now - grid.layoutConfirmedMs >= LootPreview::MaxAgeMs) {
+        g_publishedLootPreview.store(nullptr);
+        return;
+    }
+    auto preview = std::make_shared<LootPreview>();
+    preview->sessionGeneration = g_lootPreview.generation;
+    preview->stampMs = grid.layoutConfirmedMs;
+    NormalizeLootBounds(grid.viewport, preview->viewportMin, preview->viewportMax);
+    preview->labels.reserve(grid.slots.size());
+    for (const auto& [address, slot] : grid.slots) {
+        if (now - slot.confirmedMs < LootPreview::MaxAgeMs)
+            preview->labels.push_back(slot.label);
+    }
+    if (preview->labels.empty())
+        g_publishedLootPreview.store(nullptr);
+    else
+        g_publishedLootPreview.store(std::move(preview));
+}
+
+bool ReadLootSlotBounds(const LootSlotFields& slot, UiRectReadSample& sample,
+    const RectTransformCache& viewport, std::uintptr_t& rect, Vector2& min, Vector2& max)
+{
+    std::uintptr_t view{};
+    if (!ReadLootPointer(slot.content + rr::InventoryCellsRevealView::PooledContentValue, view) ||
+        LootObjectClass(view) != "InventoryCellsRevealView" ||
+        !ReadLootPointer(view + rr::InventoryCellsRevealView::RectTransform, rect))
+        return false;
+    RectTransformCache bounds;
+    if (!ReadRectTransformUiBounds(rect, bounds, true, "loot slot", &sample) ||
+        std::fabs(bounds.uiScreenW - viewport.uiScreenW) > 1.f ||
+        std::fabs(bounds.uiScreenH - viewport.uiScreenH) > 1.f)
+        return false;
+    NormalizeLootBounds(bounds, min, max);
+    return true;
+}
+
+bool SameLootBounds(const Vector2& a, const Vector2& b, const RectTransformCache& viewport)
+{
+    return std::fabs(a.x - b.x) * viewport.uiScreenW <= 1.f &&
+        std::fabs(a.y - b.y) * viewport.uiScreenH <= 1.f;
+}
+
+void ReadLootLabels(LootGridCache& grid, std::uint64_t now)
+{
+    std::uintptr_t list{};
+    if (!ReadLootPointer(grid.reveal + rr::InventoryCellsRevealUpdater::Updaters, list))
+        return;
+    if (grid.list != list) {
+        grid.list = list;
+        grid.slots.clear();
+        grid.cursor = 0;
+        grid.inventoryView = 0;
+        g_publishedLootPreview.store(nullptr);
+    }
+
+    std::vector<std::uintptr_t> updaters;
+    if (!RobRunMemory::ReadListFresh(list, updaters, kMaxLootSlots)) {
+        ReportLootPreview("Reveal slot list unavailable");
+        return;
+    }
+    if (updaters.empty()) {
+        grid.slots.clear();
+        g_publishedLootPreview.store(nullptr);
+        return;
+    }
+
+    std::vector<LootSlotFields> fields(updaters.size());
+    std::vector<DWORD> bytesRead(updaters.size());
+    {
+        Memory::ScopedScatter scatter(TargetProcess);
+        if (!scatter) return;
+        for (std::size_t i = 0; i < updaters.size(); ++i) {
+            if (updaters[i] > 0x10000)
+                VMMDLL_Scatter_PrepareEx(scatter, updaters[i], sizeof(fields[i]),
+                    reinterpret_cast<PBYTE>(&fields[i]), &bytesRead[i]);
+        }
+        if (!TargetProcess.ExecuteScatterRead(scatter)) {
+            ReportLootPreview("Could not read loot slots");
+            return;
+        }
+    }
+
+    const std::size_t previouslyCached = grid.slots.size();
+    const std::unordered_set<std::uintptr_t> currentSlots(updaters.begin(), updaters.end());
+    std::erase_if(grid.slots, [&](const auto& entry) { return !currentSlots.contains(entry.first); });
+
+    const auto isCurrentHidden = [&](const LootSlotFields& slot) {
+        return slot.container == grid.container && IsHiddenLootSlot(slot) &&
+            Il2Cpp::ClassNameOfClass(slot.klass) == "InventoryCellsRevealSlotUpdater";
+    };
+    std::size_t firstHidden = fields.size(), firstInView = fields.size(), anchor = fields.size();
+    for (std::size_t i = 0; i < fields.size(); ++i) {
+        if (bytesRead[i] != sizeof(fields[i])) continue;
+        const auto& fieldsAtSlot = fields[i];
+        const auto cached = grid.slots.find(updaters[i]);
+        const bool hidden = cached != grid.slots.end() && fieldsAtSlot.klass == cached->second.klass
+            ? fieldsAtSlot.container == grid.container && IsHiddenLootSlot(fieldsAtSlot)
+            : isCurrentHidden(fieldsAtSlot);
+        if (hidden) {
+            if (firstHidden == fields.size()) firstHidden = i;
+            if (fieldsAtSlot.inventoryView == grid.inventoryView && firstInView == fields.size())
+                firstInView = i;
+        }
+        if (cached == grid.slots.end()) continue;
+        auto& slot = cached->second;
+        if (!hidden || fieldsAtSlot.klass != slot.klass || fieldsAtSlot.inventoryView != grid.inventoryView ||
+            fieldsAtSlot.item != slot.item || fieldsAtSlot.content != slot.content ||
+            fieldsAtSlot.index != slot.index) {
+            grid.slots.erase(cached);
+            continue;
+        }
+        slot.confirmedMs = now;
+        if (anchor == fields.size()) anchor = i;
+    }
+    if (grid.slots.size() != previouslyCached)
+        PublishLootLabels(grid, now);
+
+    if (firstHidden == fields.size()) {
+        PublishLootLabels(grid, now);
+        ReportLootPreview("No verified hidden slots in the active grid");
+        return;
+    }
+
+    const auto inventoryView = fields[firstInView != fields.size() ? firstInView : firstHidden].inventoryView;
+    UiRectReadSample sample{ g_lootPreview.rectFieldsOffset, {} };
+    RectTransformCache viewport;
+    if (!ReadLootViewport(inventoryView, sample, viewport)) {
+        if (inventoryView != grid.inventoryView) {
+            grid.slots.clear();
+            g_publishedLootPreview.store(nullptr);
+        } else {
+            PublishLootLabels(grid, now);
+        }
+        return;
+    }
+
+    Vector2 viewMin, viewMax, oldMin, oldMax;
+    NormalizeLootBounds(viewport, viewMin, viewMax);
+    if (grid.viewport.valid) NormalizeLootBounds(grid.viewport, oldMin, oldMax);
+    bool layoutChanged = inventoryView != grid.inventoryView || !grid.viewport.valid ||
+        !SameLootBounds(viewMin, oldMin, viewport) || !SameLootBounds(viewMax, oldMax, viewport) ||
+        viewport.managed != grid.viewport.managed || viewport.uiScreenW != grid.viewport.uiScreenW ||
+        viewport.uiScreenH != grid.viewport.uiScreenH;
+    unsigned layoutsRead = 0;
+    if (!layoutChanged && anchor != fields.size()) {
+        const auto& old = grid.slots.at(updaters[anchor]);
+        Vector2 min, max;
+        std::uintptr_t rect{};
+        ++layoutsRead;
+        if (!ReadLootSlotBounds(fields[anchor], sample, viewport, rect, min, max)) {
+            PublishLootLabels(grid, now);
+            return;
+        }
+        layoutChanged = rect != old.rect || !SameLootBounds(min, old.label.min, viewport) ||
+            !SameLootBounds(max, old.label.max, viewport);
+    } else if (!grid.slots.empty()) {
+        // A fresh layout anchor is required before renewing old geometry.
+        layoutChanged = true;
+    }
+
+    if (layoutChanged) {
+        grid.slots.clear();
+        g_publishedLootPreview.store(nullptr);
+    }
+    grid.inventoryView = inventoryView;
+    grid.viewport = viewport;
+
+    constexpr unsigned kMaxLayoutsPerPass = 4;
+    std::vector<std::pair<std::uintptr_t, CachedLootLabel>> updates;
+    updates.reserve(kMaxLayoutsPerPass);
+    const auto beforeLayouts = grid.slots.size();
+    for (std::size_t scanned = 0; scanned < fields.size() && layoutsRead < kMaxLayoutsPerPass; ++scanned) {
+        const std::size_t i = grid.cursor++ % fields.size();
+        const auto& field = fields[i];
+        if ((layoutsRead > 0 && !layoutChanged && i == anchor) ||
+            bytesRead[i] != sizeof(field) || field.inventoryView != inventoryView ||
+            !isCurrentHidden(field))
+            continue;
+        ++layoutsRead;
+
+        std::uintptr_t rect{};
+        Vector2 min, max;
+        if (!ReadLootSlotBounds(field, sample, viewport, rect, min, max))
+            continue;
+        if (max.x <= viewMin.x || max.y <= viewMin.y || min.x >= viewMax.x || min.y >= viewMax.y) {
+            grid.slots.erase(updaters[i]);
+            continue;
+        }
+        auto metadata = grid.items.find(field.item);
+        if (metadata == grid.items.end()) {
+            LootLabel item{};
+            if (!ReadLootItem(field.item, item))
+                continue;
+            if (grid.items.size() >= kMaxLootSlots) grid.items.clear();
+            metadata = grid.items.emplace(field.item, std::move(item)).first;
+        }
+
+        LootSlotFields verified{};
+        if (!RobRunMemory::ReadBytesFresh(updaters[i], &verified, sizeof(verified))) continue;
+        if (verified.klass != field.klass || verified.inventoryView != inventoryView ||
+            !isCurrentHidden(verified) || verified.index != field.index ||
+            verified.item != field.item || verified.content != field.content) {
+            grid.slots.erase(updaters[i]);
+            continue;
+        }
+        LootLabel label = metadata->second;
+        label.min = min;
+        label.max = max;
+        updates.emplace_back(updaters[i], CachedLootLabel{
+            field.klass, field.item, field.content, rect, field.index, now, std::move(label)});
+    }
+    if (grid.slots.size() != beforeLayouts)
+        PublishLootLabels(grid, now);
+
+    std::uintptr_t current{}, container{}, confirmedList{}, gameModel{}, battle{};
+    if (!ReadLootPointer(grid.dialog + rr::InventoryDialogModel::CurrentInventoryModel, current) ||
+        !ReadLootPointer(grid.current + rr::CurrentInventoryModel::RevealContainerModel, container) ||
+        !ReadLootPointer(grid.reveal + rr::InventoryCellsRevealUpdater::Updaters, confirmedList) ||
+        !ReadLootPointer(cachedGame + rr::Game::GameModel, gameModel) ||
+        (gameModel > 0x10000 && !ReadLootPointer(gameModel + rr::GameModel::BattleModel, battle)))
+        return;
+    bool inactive = false;
+    const auto screenUpdater = FindOpenLootDialogUpdater(g_lootPreview.screensUpdater, grid.dialog,
+        grid.screenUpdater, inactive);
+    if (inactive || current != grid.current || container != grid.container || confirmedList != grid.list ||
+        battle != cachedBattleModel.load(std::memory_order_relaxed)) {
+        ClearLootGrid();
+        return;
+    }
+    if (!screenUpdater) return;
+
+    for (auto& [address, label] : updates)
+        grid.slots.insert_or_assign(address, std::move(label));
+    grid.layoutConfirmedMs = now;
+    PublishLootLabels(grid, now);
+    ReportLootPreview("Refreshing verified slot labels");
+}
+
+void UpdateLootPreview()
+{
+    const auto generation = sessionGeneration.load(std::memory_order_relaxed);
+    const auto battle = cachedBattleModel.load(std::memory_order_relaxed);
+    if (!g_lootPreviewEnabled.load(std::memory_order_relaxed) || cachedGame <= 0x10000 || battle <= 0x10000) {
+        if (g_lootPreview.lastPollMs) {
+            g_lootPreview = {};
+            g_publishedLootPreview.store(nullptr);
+        }
+        return;
+    }
+    if (generation != g_lootPreview.generation) {
+        g_lootPreview = {};
+        g_lootPreview.generation = generation;
+        g_publishedLootPreview.store(nullptr);
+    }
+
+    auto& grid = g_lootPreview.grid;
+    const auto now = GetTickCount64();
+    if (g_lootPreview.lastPollMs && now - g_lootPreview.lastPollMs < (grid.reveal ? 12u : 50u))
+        return;
+    g_lootPreview.lastPollMs = now;
+
+    std::uintptr_t dialog{}, current{}, container{};
+    if (!ReadLootPointer(battle + rr::BattleModel::InventoryDialogModel, dialog)) return;
+    if (dialog <= 0x10000) { ClearLootGrid(); return; }
+    if (grid.dialog && grid.dialog != dialog) ClearLootGrid();
+    if (LootObjectClass(dialog) != "InventoryDialogModel" ||
+        !ReadLootPointer(dialog + rr::InventoryDialogModel::CurrentInventoryModel, current))
+        return;
+    if (current <= 0x10000) { ClearLootGrid(); return; }
+    if (grid.current && grid.current != current) ClearLootGrid();
+    if (!ReadLootPointer(current + rr::CurrentInventoryModel::RevealContainerModel, container)) return;
+    if (container <= 0x10000 || (grid.container && grid.container != container)) ClearLootGrid();
+    if (LootObjectClass(container) != "RevealContainerModel") return;
+
+    if (!g_lootPreview.screensUpdater &&
+        (!g_lootPreview.lastResolveMs || now - g_lootPreview.lastResolveMs >= 250)) {
+        g_lootPreview.lastResolveMs = now;
+        g_lootPreview.screensUpdater = FindScreensUpdater(cachedGame);
+    }
+    const auto screens = g_lootPreview.screensUpdater;
+    if (screens <= 0x10000) return;
+    bool inactive = false;
+    const bool recheckUpdater = !grid.screenConfirmedMs || now - grid.screenConfirmedMs >= 250;
+    const auto screenUpdater = FindOpenLootDialogUpdater(screens, dialog,
+        recheckUpdater ? 0 : grid.screenUpdater, inactive);
+    if (inactive) { ClearLootGrid(); return; }
+    if (!screenUpdater) return;
+    if (grid.screenUpdater && grid.screenUpdater != screenUpdater) ClearLootGrid();
+    if (recheckUpdater) grid.screenConfirmedMs = now;
+
+    if (!grid.reveal) {
+        const auto dialogUpdater = FindInventoryContainerUpdater(screenUpdater, battle);
+        if (!dialogUpdater) return;
+        const auto reveal = FindLootRevealUpdater(dialogUpdater, container);
+        if (!reveal) return;
+        grid.dialog = dialog;
+        grid.current = current;
+        grid.container = container;
+        grid.screenUpdater = screenUpdater;
+        grid.reveal = reveal;
+    }
+
+    std::uintptr_t revealContainer{};
+    if (!ReadLootPointer(grid.reveal + rr::InventoryCellsRevealUpdater::RevealContainerModel, revealContainer))
+        return;
+    if (revealContainer != container) { ClearLootGrid(); return; }
+    ReadLootLabels(grid, now);
+}
+} // namespace
 
 static void ReadInGameMapState()
 {
@@ -3270,8 +3992,9 @@ static void ReadFastVehicles()
 {
     const auto& rcfg = ConfigInstance.Radar;
     const bool wantMapVehicles = (rcfg.InGameMinimap || rcfg.InGameFullMap) && rcfg.InGameMapVehicles;
+    const bool wantRadarVehicles = rcfg.WebRadarEnabled || (rcfg.Enabled && rcfg.ShowVehicles);
     const bool wantWorldVehicles = ConfigInstance.World.Vehicles || ConfigInstance.LootFilter.Enabled;
-    if ((!wantMapVehicles && !wantWorldVehicles) || cachedBattleEntities <= 0x10000)
+    if ((!wantMapVehicles && !wantRadarVehicles && !wantWorldVehicles) || cachedBattleEntities <= 0x10000)
     {
         fastVehicles.clear();
         return;
@@ -4795,13 +5518,16 @@ static void UpdateInternal()
                     if (nameStr > 0x10000) {
                         std::wstring w;
                         if (RobRunMemory::ReadString(nameStr, w, 64) && !w.empty()) {
-                            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w));
+                            const std::string norm = NormalizeRoleName(RobRunMemory::WideToUtf8(w), roleScratch.isCivilianRole);
                             if (!norm.empty()) roleScratch.roleName = norm;
                         }
                     }
                 }
-                if (roleScratch.role != 0) det.role = roleScratch.role;
-                if (!roleScratch.roleName.empty()) det.roleName = std::move(roleScratch.roleName);
+                det.isCivilianRole = roleScratch.isCivilianRole && roleScratch.role != 6;
+                if (roleScratch.role != 0 || !roleScratch.roleName.empty()) {
+                    det.role = roleScratch.role;
+                    det.roleName = std::move(roleScratch.roleName);
+                }
 
                 // Reload
                 det.isReloading = false;
@@ -4823,22 +5549,19 @@ static void UpdateInternal()
 
                 // Knockdown (bounded remaining window to reject INT64_MAX/garbage sentinels)
                 det.isKnockedDown = false;
-                if (battleNowMs > 0 && s.kdEndTs > kSentinelTs && s.kdEndTs > battleNowMs &&
-                    (s.kdEndTs - battleNowMs) <= kMaxKnockdownRemainMs &&
-                    s.kdLeaveActive == 0)
+                if (IsActiveCombatWindow(s.kdEndTs, battleNowMs, kMaxKnockdownRemainMs) && s.kdLeaveActive == 0)
                     det.isKnockedDown = true;
 
                 // Knockout (validate phase description, bound EndTs, and exclude active cuffing)
-                det.isKnockedOut = false;
-                if (s.koHandcuffing == 0) {
-                    if (IsActiveKnockoutPhaseDesc(s.koPhaseDesc))
-                        det.isKnockedOut = true;
-                    else if (battleNowMs > 0 && s.koEndTs > kSentinelTs && s.koEndTs > battleNowMs &&
-                        (s.koEndTs - battleNowMs) <= kMaxKnockoutRemainMs)
-                        det.isKnockedOut = true;
-                }
+                const bool timedKnockout = s.koHandcuffing == 0 &&
+                    IsActiveCombatWindow(s.koEndTs, battleNowMs, kMaxKnockoutRemainMs);
+                const bool knockoutPhase = s.koHandcuffing == 0 &&
+                    IsActiveKnockoutPhaseDesc(s.koPhaseDesc);
+                det.isKnockedOut = timedKnockout || knockoutPhase;
                 det.isSurrendered = s.koSurrendered != 0;
                 det.isHandcuffed = s.koHandcuffed != 0;
+                det.aimKnock = det.isKnockedDown || timedKnockout ? AimKnockEvidence::Timed :
+                    (knockoutPhase ? AimKnockEvidence::PhaseOnly : AimKnockEvidence::None);
 
                 // A player actively sprinting, firing, reloading, or inside a vehicle
                 // cannot be knocked down or knocked out.
@@ -4908,16 +5631,20 @@ static void UpdateInternal()
         // Hoist per-pass invariants outside the entity loop to avoid redundant
         // mutex locks, heap allocations, and matrix work when Chams are off.
         const bool needChamsMatrices = ConfigInstance.Player.Chams;
-        const bool wantVisCheck = ConfigInstance.Player.VisCheck ||
-            ConfigInstance.Player.WallCheck || ConfigInstance.Aim.VisibleBonesOnly;
+        const bool aimVisibleBonesOnly = ConfigInstance.Aim.VisibleBonesOnly;
+        const bool wantVisBadges = ConfigInstance.Player.VisCheck || ConfigInstance.Player.WallCheck;
+        const bool checkTeammateVis = wantVisBadges && !ConfigInstance.Player.HideTeammates;
+        const bool wantBoneVis = wantVisBadges || aimVisibleBonesOnly ||
+            (needChamsMatrices && ConfigInstance.Player.ChamsVisCheck);
         const bool wantOffscreenArrows = ConfigInstance.Player.OffscreenArrows;
         const float visMaxDist = ConfigInstance.Player.VisMaxDistance;
-        const int visRayCount = ConfigInstance.Player.VisRayCount;
+        const int visRayCount = wantBoneVis ? ConfigInstance.Player.VisRayCount : 2;
         const bool haveLocalPosPass = RobRunMemory::Finite(localPosition) && !localPosition.IsZero();
-        const auto passBvh = wantVisCheck ? LoadBvhSnapshot() : nullptr;
-        const bool passBvhUsable = passBvh && passBvh->valid && IsBvhActiveForCurrentLocation();
+        const auto visibilityBvh = (wantBoneVis || ConfigInstance.Player.StatusRing) ? GetVisibilityBvh() : VisibilityBvh{};
+        const auto& passBvh = visibilityBvh.scene;
+        const bool passBvhUsable = passBvh && passBvh->valid && IsBvhActiveForCurrentLocation(false);
         RobRunCamera::CameraState liveVisCam = visCamera;
-        if (wantVisCheck && passBvhUsable && !fullMapFastMode) {
+        if (passBvhUsable && !fullMapFastMode) {
             RobRunCamera::CameraState freshNow{};
             if (GetFreshCamera(freshNow) && freshNow.valid)
                 liveVisCam = freshNow;
@@ -4969,6 +5696,7 @@ static void UpdateInternal()
             entity.isCrouching = detail.isCrouching;
             entity.role = detail.role;
             entity.roleName = detail.roleName;
+            entity.isCivilianRole = detail.isCivilianRole;
             entity.inVehicle = detail.inVehicle;
             entity.vehicleId = detail.vehicleId;
             entity.nickname = detail.nickname;
@@ -5203,22 +5931,11 @@ static void UpdateInternal()
                     };
                     auto& relPts = rig.relPtsHist[slot];
                     relPts = tmpPoints;
-                    relPts.head          = subVec(tmpPoints.head);
-                    relPts.neck          = subVec(tmpPoints.neck);
-                    relPts.chest         = subVec(tmpPoints.chest);
-                    relPts.pelvis        = subVec(tmpPoints.pelvis);
-                    relPts.leftShoulder  = subVec(tmpPoints.leftShoulder);
-                    relPts.leftElbow     = subVec(tmpPoints.leftElbow);
-                    relPts.leftHand      = subVec(tmpPoints.leftHand);
-                    relPts.rightShoulder = subVec(tmpPoints.rightShoulder);
-                    relPts.rightElbow    = subVec(tmpPoints.rightElbow);
-                    relPts.rightHand     = subVec(tmpPoints.rightHand);
-                    relPts.leftHip       = subVec(tmpPoints.leftHip);
-                    relPts.leftKnee      = subVec(tmpPoints.leftKnee);
-                    relPts.leftFoot      = subVec(tmpPoints.leftFoot);
-                    relPts.rightHip      = subVec(tmpPoints.rightHip);
-                    relPts.rightKnee     = subVec(tmpPoints.rightKnee);
-                    relPts.rightFoot     = subVec(tmpPoints.rightFoot);
+                    for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+                        if ((relPts.available & (1u << b)) == 0) continue;
+                        auto point = Skeleton::kAimBones[b].point;
+                        relPts.*point = subVec(tmpPoints.*point);
+                    }
 
                     rig.poseHistCursor = (slot + 1) % 3;
                     if (rig.poseHistCount < 3) ++rig.poseHistCount;
@@ -5244,22 +5961,16 @@ static void UpdateInternal()
                         const auto& p0 = rig.relPtsHist[0];
                         const auto& p1 = rig.relPtsHist[1];
                         const auto& p2 = rig.relPtsHist[2];
-                        tmpPoints.head          = med3v(p0.head, p1.head, p2.head);
-                        tmpPoints.neck          = med3v(p0.neck, p1.neck, p2.neck);
-                        tmpPoints.chest         = med3v(p0.chest, p1.chest, p2.chest);
-                        tmpPoints.pelvis        = med3v(p0.pelvis, p1.pelvis, p2.pelvis);
-                        tmpPoints.leftShoulder  = med3v(p0.leftShoulder, p1.leftShoulder, p2.leftShoulder);
-                        tmpPoints.leftElbow     = med3v(p0.leftElbow, p1.leftElbow, p2.leftElbow);
-                        tmpPoints.leftHand      = med3v(p0.leftHand, p1.leftHand, p2.leftHand);
-                        tmpPoints.rightShoulder = med3v(p0.rightShoulder, p1.rightShoulder, p2.rightShoulder);
-                        tmpPoints.rightElbow    = med3v(p0.rightElbow, p1.rightElbow, p2.rightElbow);
-                        tmpPoints.rightHand     = med3v(p0.rightHand, p1.rightHand, p2.rightHand);
-                        tmpPoints.leftHip       = med3v(p0.leftHip, p1.leftHip, p2.leftHip);
-                        tmpPoints.leftKnee      = med3v(p0.leftKnee, p1.leftKnee, p2.leftKnee);
-                        tmpPoints.leftFoot      = med3v(p0.leftFoot, p1.leftFoot, p2.leftFoot);
-                        tmpPoints.rightHip      = med3v(p0.rightHip, p1.rightHip, p2.rightHip);
-                        tmpPoints.rightKnee     = med3v(p0.rightKnee, p1.rightKnee, p2.rightKnee);
-                        tmpPoints.rightFoot     = med3v(p0.rightFoot, p1.rightFoot, p2.rightFoot);
+                        const auto common = p0.available & p1.available & p2.available;
+                        for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+                            const auto bit = 1u << b;
+                            if ((tmpPoints.available & bit) == 0) continue;
+                            auto point = Skeleton::kAimBones[b].point;
+                            if (common & bit)
+                                tmpPoints.*point = med3v(p0.*point, p1.*point, p2.*point);
+                            else
+                                tmpPoints.*point = anchor + relPts.*point;
+                        }
                     }
 
                     // Commit every pass so world position stays at full worker rate.
@@ -5369,27 +6080,15 @@ static void UpdateInternal()
                             dst.y = dst.y * inv + src.y * alpha;
                             dst.z = dst.z * inv + src.z * alpha;
                         };
-                        rig.smoothedPoints.valid = rig.points.valid;
-                        rig.smoothedPoints.hasHead = rig.points.hasHead;
-                        rig.smoothedPoints.hasNeck = rig.points.hasNeck;
-                        rig.smoothedPoints.hasChest = rig.points.hasChest;
-                        rig.smoothedPoints.hasPelvis = rig.points.hasPelvis;
-                        lerpVec(rig.smoothedPoints.head, rig.points.head);
-                        lerpVec(rig.smoothedPoints.neck, rig.points.neck);
-                        lerpVec(rig.smoothedPoints.chest, rig.points.chest);
-                        lerpVec(rig.smoothedPoints.pelvis, rig.points.pelvis);
-                        lerpVec(rig.smoothedPoints.leftShoulder, rig.points.leftShoulder);
-                        lerpVec(rig.smoothedPoints.leftElbow, rig.points.leftElbow);
-                        lerpVec(rig.smoothedPoints.leftHand, rig.points.leftHand);
-                        lerpVec(rig.smoothedPoints.rightShoulder, rig.points.rightShoulder);
-                        lerpVec(rig.smoothedPoints.rightElbow, rig.points.rightElbow);
-                        lerpVec(rig.smoothedPoints.rightHand, rig.points.rightHand);
-                        lerpVec(rig.smoothedPoints.leftHip, rig.points.leftHip);
-                        lerpVec(rig.smoothedPoints.leftKnee, rig.points.leftKnee);
-                        lerpVec(rig.smoothedPoints.leftFoot, rig.points.leftFoot);
-                        lerpVec(rig.smoothedPoints.rightHip, rig.points.rightHip);
-                        lerpVec(rig.smoothedPoints.rightKnee, rig.points.rightKnee);
-                        lerpVec(rig.smoothedPoints.rightFoot, rig.points.rightFoot);
+                        auto smoothed = rig.points;
+                        const auto common = rig.points.available & rig.smoothedPoints.available;
+                        for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+                            if ((common & (1u << b)) == 0) continue;
+                            auto point = Skeleton::kAimBones[b].point;
+                            smoothed.*point = rig.smoothedPoints.*point;
+                            lerpVec(smoothed.*point, rig.points.*point);
+                        }
+                        rig.smoothedPoints = smoothed;
 
                         if (needChamsMatrices && rig.smoothedWorldMatrices.size() == rig.worldMatrices.size()) {
                             for (std::size_t i = 0; i < rig.worldMatrices.size(); ++i) {
@@ -5481,150 +6180,93 @@ static void UpdateInternal()
                     }
                 }
             }
-            entity.visible = rig.animatorActive;
+            const bool isTeammate = entity.entityId != localEntityId && entity.IsTeammate();
+            entity.visible = isTeammate || rig.animatorActive;
 
-            // Camera-occlusion pass. VisCheck colours each bone by whether the
-            // camera can see it; WallCheck also hides the whole character from
-            // the aim gate when every bone is occluded. Both need the BVH, so
-            // without it the animator fallback above stays in effect and the
-            // menu says the occluder file is missing.
-            // Skip VisCheck completely for teammates (party, clan, or manually marked):
-            // saves BVH raycasts and ensures teammates never get occluded/red vischeck state.
             const float entDist = haveLocalPosPass ? Distance(entity.position, localPosition) : 0.f;
-            if (entity.entityId != localEntityId && entity.IsTeammate()) {
-                entity.visible = true;
-                for (auto& seg : entity.bones) {
-                    seg.visible = true;
-                }
-            }
-            else if (visMaxDist > 0.f && entDist > visMaxDist) {
-                if (!ConfigInstance.Aim.VisibleBonesOnly) {
+            const bool outOfVisRange = visMaxDist > 0.f && entDist > visMaxDist;
+            if (!isTeammate) {
+                if (outOfVisRange && !aimVisibleBonesOnly)
                     entity.visible = false;
-                    for (auto& seg : entity.bones) {
-                        seg.visible = false;
-                    }
-                }
+                else if (!outOfVisRange && !passBvhUsable && aimVisibleBonesOnly)
+                    entity.visible = true;
             }
-            else if (!passBvhUsable && ConfigInstance.Aim.VisibleBonesOnly) {
-                // No valid BVH for this map (e.g., Hub/Cottage) — don't falsely reject
-                // standing-still players based on animator motion alone.
-                entity.visible = true;
-            }
-            else if (!fullMapFastMode &&
-                wantVisCheck &&
-                passBvhUsable &&
-                entity.entityId != localEntityId)
-            {
-                if (liveVisCam.valid) {
-                const CollisionBVH::Float3 cam = {
-                    liveVisCam.position.x,
-                    liveVisCam.position.y,
-                    liveVisCam.position.z };
 
-                // Skip raycasting players well behind the camera unless offscreen
-                // arrows need live visibility tinting.
-                bool behindCamera = false;
-                if (!wantOffscreenArrows && entDist > 3.0f) {
-                    const float tx = entity.position.x - cam.x;
-                    const float ty = (entity.position.y + 1.0f) - cam.y;
-                    const float tz = entity.position.z - cam.z;
-                    const float lenSq = tx * tx + ty * ty + tz * tz;
-                    if (lenSq > 1.0f) {
-                        const float fwdDot = (tx * liveVisCam.forward.x +
-                                              ty * liveVisCam.forward.y +
-                                              tz * liveVisCam.forward.z) / std::sqrt(lenSq);
-                        behindCamera = (fwdDot < -0.25f);
-                    }
-                }
-
+            if ((!isTeammate || checkTeammateVis) && !outOfVisRange && !fullMapFastMode &&
+                passBvhUsable && liveVisCam.valid && RobRunMemory::Finite(liveVisCam.position) &&
+                entity.entityId != localEntityId) {
+                const Vector3& cameraPosition = liveVisCam.position;
+                const Vector3 toBody = entity.position + Vector3(0.f, 1.f, 0.f) - cameraPosition;
+                const float bodyDistance = toBody.Length();
+                const bool behindCamera = !wantOffscreenArrows && entDist > 3.f && bodyDistance > 1.f &&
+                    Vector3::Dot(toBody, liveVisCam.forward) < -0.25f * bodyDistance;
                 if (behindCamera) {
-                    entity.visible = false;
-                    for (auto& seg : entity.bones)
-                        seg.visible = false;
+                    entity.visible = isTeammate;
                 } else {
-                const auto& bvh = passBvh;
-                bool anyVisible = false;
-                const int rayCount = visRayCount;
-                const int skipVeh1 = passLocalVehicleId;
-                const int skipVeh2 = entity.inVehicle ? entity.vehicleId : 0;
-                // In car: no dynamic vehicle collision (static map BVH walls/buildings
-                // and smokes still apply). Outside of car: full vehicle collision
-                // (except the local player's own car so driving never self-occludes).
-                const bool skipVehicles =
-                    (passLocalInVehicle && passLocalVehicleId <= 0) ||
-                    entity.inVehicle;
+                    const CollisionBVH::Float3 origin{ cameraPosition.x, cameraPosition.y, cameraPosition.z };
+                    const int targetVehicleId = entity.inVehicle ? entity.vehicleId : 0;
+                    const bool skipVehicles = (passLocalInVehicle && passLocalVehicleId <= 0) || entity.inVehicle;
+                    const auto isVisible = [&](const Vector3& point) {
+                        return !CollisionBVH::IsOccluded(*passBvh, origin, { point.x, point.y, point.z },
+                            &dynCopy, carCabinSolid, kVisibilityRayStart, passLocalVehicleId, targetVehicleId,
+                            skipVehicles, visibilityBvh.ignoredTriangles.get());
+                    };
 
-                if (rayCount <= 2 || entity.bones.empty()) {
-                    // Level 1 (or fallback when Skeleton ESP is off / bones empty):
-                    // 2 Rays (Torso + Head). Never leaves anyVisible=false just because bones weren't built.
-                    const CollisionBVH::Float3 torso = {
-                        entity.position.x,
-                        entity.position.y + (entity.inVehicle ? 0.75f : 0.95f),
-                        entity.position.z };
-                    const CollisionBVH::Float3 head = {
-                        entity.position.x,
-                        entity.position.y + (entity.inVehicle ? 1.12f : 1.65f),
-                        entity.position.z };
-
-                    bool torsoVis = !CollisionBVH::IsOccluded(*bvh, cam, torso, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool headVis = !CollisionBVH::IsOccluded(*bvh, cam, head, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    anyVisible = torsoVis || headVis;
-                    for (auto& seg : entity.bones) {
-                        seg.visible = anyVisible;
-                    }
-                } else if (rayCount <= 6) {
-                    // Level 2: 6 Rays (Head, Chest, Pelvis, Left Hand, Right Hand, Feet)
                     const auto& bp = entity.bonePoints;
-                    const CollisionBVH::Float3 pHead = bp.hasHead ?
-                        CollisionBVH::Float3{ bp.head.x, bp.head.y, bp.head.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 1.12f : 1.70f), entity.position.z };
-                    const CollisionBVH::Float3 pChest = bp.hasChest ?
-                        CollisionBVH::Float3{ bp.chest.x, bp.chest.y, bp.chest.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 0.85f : 1.25f), entity.position.z };
-                    const CollisionBVH::Float3 pPelvis = bp.hasPelvis ?
-                        CollisionBVH::Float3{ bp.pelvis.x, bp.pelvis.y, bp.pelvis.z } :
-                        CollisionBVH::Float3{ entity.position.x, entity.position.y + (entity.inVehicle ? 0.55f : 0.85f), entity.position.z };
-                    const CollisionBVH::Float3 pLHand = (std::abs(bp.leftHand.x) > 0.01f) ?
-                        CollisionBVH::Float3{ bp.leftHand.x, bp.leftHand.y, bp.leftHand.z } :
-                        CollisionBVH::Float3{ entity.position.x - 0.40f, entity.position.y + 1.0f, entity.position.z };
-                    const CollisionBVH::Float3 pRHand = (std::abs(bp.rightHand.x) > 0.01f) ?
-                        CollisionBVH::Float3{ bp.rightHand.x, bp.rightHand.y, bp.rightHand.z } :
-                        CollisionBVH::Float3{ entity.position.x + 0.40f, entity.position.y + 1.0f, entity.position.z };
-                    const CollisionBVH::Float3 pFeet = { entity.position.x, entity.position.y + 0.15f, entity.position.z };
+                    const float maxBoneDist = entity.inVehicle ? 12.f : 3.f;
+                    const Vector3 head = bp.hasHead && Skeleton::IsValidBone(bp.head, entity.position, maxBoneDist)
+                        ? bp.head
+                        : entity.position + Vector3(0.f, entity.inVehicle ? 1.12f : 1.70f, 0.f);
+                    entity.headVisible = isVisible(head);
+                    bool anyVisible = entity.headVisible;
 
-                    bool vHead   = !CollisionBVH::IsOccluded(*bvh, cam, pHead, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool vChest  = !CollisionBVH::IsOccluded(*bvh, cam, pChest, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool vPelvis = !CollisionBVH::IsOccluded(*bvh, cam, pPelvis, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool vLHand  = !CollisionBVH::IsOccluded(*bvh, cam, pLHand, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool vRHand  = !CollisionBVH::IsOccluded(*bvh, cam, pRHand, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                    bool vFeet   = !CollisionBVH::IsOccluded(*bvh, cam, pFeet, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-
-                    anyVisible = (vHead || vChest || vPelvis || vLHand || vRHand || vFeet);
-
-                    for (auto& seg : entity.bones) {
-                        const CollisionBVH::Float3 mid = {
-                            (seg.a.x + seg.b.x) * 0.5f,
-                            (seg.a.y + seg.b.y) * 0.5f,
-                            (seg.a.z + seg.b.z) * 0.5f };
-                        if (mid.y >= entity.position.y + 1.40f) seg.visible = vHead;
-                        else if (mid.y >= entity.position.y + 1.05f) seg.visible = (vChest || vLHand || vRHand);
-                        else if (mid.y >= entity.position.y + 0.65f) seg.visible = vPelvis;
-                        else seg.visible = vFeet;
+                    bool sampledSegments = false;
+                    if (visRayCount > 6) {
+                        for (auto& seg : entity.bones) {
+                            if (!Skeleton::IsValidBoneSegment(seg.a, seg.b, entity.position, maxBoneDist))
+                                continue;
+                            Skeleton::SampleBoneVisibility(seg, isVisible);
+                            anyVisible |= seg.visible;
+                            sampledSegments = true;
+                        }
                     }
-                } else {
-                    // Level 3: 18+ Rays (Full Rig segment evaluation for exact per-limb highlights)
-                    for (auto& seg : entity.bones) {
-                        const CollisionBVH::Float3 mid = {
-                            (seg.a.x + seg.b.x) * 0.5f,
-                            (seg.a.y + seg.b.y) * 0.5f,
-                            (seg.a.z + seg.b.z) * 0.5f };
-                        seg.visible = !CollisionBVH::IsOccluded(*bvh, cam, mid, &dynCopy, carCabinSolid, 0.20f, skipVeh1, skipVeh2, skipVehicles);
-                        if (seg.visible)
-                            anyVisible = true;
+
+                    if (!sampledSegments) {
+                        const bool sampleBodyRegions = visRayCount > 2 && visRayCount <= 6 && !entity.bones.empty();
+                        const float chestHeight = entity.inVehicle ? 0.85f : (sampleBodyRegions ? 1.25f : 0.95f);
+                        const Vector3 chest = bp.hasChest && Skeleton::IsValidBone(bp.chest, entity.position, maxBoneDist)
+                            ? bp.chest
+                            : entity.position + Vector3(0.f, chestHeight, 0.f);
+                        const bool chestVisible = isVisible(chest);
+                        anyVisible |= chestVisible;
+                        if (sampleBodyRegions) {
+                            const Vector3 pelvis = bp.hasPelvis && Skeleton::IsValidBone(bp.pelvis, entity.position, maxBoneDist)
+                                ? bp.pelvis
+                                : entity.position + Vector3(0.f, entity.inVehicle ? 0.55f : 0.85f, 0.f);
+                            const bool pelvisVisible = isVisible(pelvis);
+                            const bool leftHandVisible = Skeleton::IsValidBone(bp.leftHand, entity.position, maxBoneDist) &&
+                                isVisible(bp.leftHand);
+                            const bool rightHandVisible = Skeleton::IsValidBone(bp.rightHand, entity.position, maxBoneDist) &&
+                                isVisible(bp.rightHand);
+                            const bool feetVisible = isVisible(entity.position + Vector3(0.f, 0.15f, 0.f));
+                            const bool upperBodyVisible = chestVisible || leftHandVisible || rightHandVisible;
+                            anyVisible |= upperBodyVisible || pelvisVisible || feetVisible;
+
+                            for (auto& seg : entity.bones) {
+                                const float height = (seg.a.y + seg.b.y) * 0.5f - entity.position.y;
+                                if (height >= 1.40f) seg.visible = entity.headVisible;
+                                else if (height >= 1.05f) seg.visible = upperBodyVisible;
+                                else if (height >= 0.65f) seg.visible = pelvisVisible;
+                                else seg.visible = feetVisible;
+                            }
+                        } else {
+                            for (auto& seg : entity.bones)
+                                seg.visible = anyVisible;
+                        }
                     }
-                }
-                entity.visible = anyVisible;
-                }
+
+                    entity.visible = anyVisible;
+                    entity.visibilityChecked = true;
                 }
             }
 
@@ -5641,6 +6283,7 @@ static void UpdateInternal()
             }
 
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=F (pre-push)", uiCount);
+            entity.aimKnocked = IsAimKnocked(entity, detail.aimKnock);
             entities.push_back(std::move(entity));
             if (uiCount <= 3) DLOG("UpdateInternal #%d: cp=G (entity done)", uiCount);
         }
@@ -5818,6 +6461,78 @@ static void UpdateInternal()
     failureCount = 0;
 }
 
+static void UpdateGrenadePrediction()
+{
+    static const char* previousStatus = nullptr;
+    static std::uint64_t lastStatusMs = 0;
+    auto report = [](const char* status, std::size_t discovered = 0,
+        std::size_t samples = 0, std::size_t paths = 0) {
+        const auto now = GetTickCount64();
+        if (previousStatus && std::strcmp(previousStatus, status) == 0) return;
+        if (lastStatusMs && now - lastStatusMs < 120) return;
+        previousStatus = status;
+        lastStatusMs = now;
+        VeoxDiag("[Grenade prediction] %s (models=%zu, positions=%zu, paths=%zu)",
+            status, discovered, samples, paths);
+    };
+    const auto battle = cachedBattleModel.load();
+    if (!g_grenadePredictionEnabled.load() || battle <= 0x10000) {
+        if (g_nextGrenadePoll != std::chrono::steady_clock::time_point{}) ResetGrenadePrediction();
+        previousStatus = nullptr;
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now < g_nextGrenadePoll) return;
+    g_nextGrenadePoll = now + std::chrono::milliseconds(30);
+    const auto generation = sessionGeneration.load();
+    if (!g_grenadeWorld)
+        g_grenadeWorld = RobRunWorld::FindWorldEntities(battle, cachedBattleEntities.load());
+
+    std::vector<RobRunWorld::GrenadeSample> samples;
+    std::size_t discovered = 0;
+    if (!g_grenadeWorld || !RobRunWorld::ReadGrenadeSamples(g_grenadeWorld, g_cachedEntityEntries,
+        g_grenadeContactLayout, samples, discovered)) {
+        report(g_grenadeWorld ? "Grenade collection read failed" : "Waiting for world", discovered);
+        g_nextGrenadePoll = now + std::chrono::milliseconds(100);
+        g_grenadeWorld = 0;
+        return;
+    }
+
+    const auto stamp = GetTickCount64();
+    const auto sampleTime = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    for (auto& sample : samples) {
+        if (!sample.description) continue;
+        auto radius = g_grenadeEffectRadii.find(sample.description);
+        if (radius == g_grenadeEffectRadii.end()) {
+            const float value = RobRunWorld::ReadGrenadeEffectRadius(sample.description);
+            if (g_grenadeEffectRadii.size() >= 64) g_grenadeEffectRadii.clear();
+            radius = g_grenadeEffectRadii.emplace(sample.description, value).first;
+            if (value > 0.f) VeoxDiag("[Grenade prediction] In-game effect radius: %.2f m", value);
+        }
+        sample.effectRadius = radius->second;
+    }
+    const auto scene = IsBvhActiveForCurrentLocation() ? LoadBvhSnapshot() : nullptr;
+    const auto ground = !localPosition.IsZero() && RobRunMemory::Finite(localPosition)
+        ? std::optional<CollisionBVH::Float3>{ { localPosition.x, localPosition.y, localPosition.z } }
+        : std::nullopt;
+    auto paths = g_grenadePredictor.Update(sampleTime, samples, scene.get(), ground);
+    const bool hasRing = std::any_of(paths.begin(), paths.end(), [](const auto& path) {
+        return path.effectRadius > 0.f && (path.flight.hitsSurface || path.rebound.hitsSurface);
+    });
+    report(!discovered ? "Waiting for thrown grenade" : samples.empty() ? "No readable grenade positions" :
+        hasRing ? "Publishing landing ring" : paths.empty() ? "Collecting flight samples" : "Publishing path",
+        discovered, samples.size(), paths.size());
+    if (generation != sessionGeneration.load() || battle != cachedBattleModel.load() ||
+        !g_grenadePredictionEnabled.load() || paths.empty()) {
+        g_grenadePrediction.store(nullptr);
+        return;
+    }
+    g_grenadePrediction.store(std::make_shared<const RobRunGrenades::Preview>(
+        RobRunGrenades::Preview{ generation, stamp, std::move(paths) }));
+}
+
 void Update()
 {
     static int updateCount = 0;
@@ -5829,7 +6544,10 @@ void Update()
         TryLoadBvh(false);
 
         UpdateInternal();
+        RefreshTrackedAimKnock();
         PublishSnapshot();
+        UpdateLootPreview();
+        UpdateGrenadePrediction();
     } catch (const std::exception& e) {
         DLOG("Update EXCEPTION #%d: %s", updateCount, e.what());
     } catch (...) {
@@ -5898,6 +6616,11 @@ std::string GetLocationId()
 }
 
 void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
+void SetLootPreviewEnabled(bool enabled) { g_lootPreviewEnabled.store(enabled, std::memory_order_relaxed); }
+std::shared_ptr<const LootPreview> GetLootPreview() { return g_publishedLootPreview.load(); }
+void SetGrenadePredictionEnabled(bool enabled) { g_grenadePredictionEnabled.store(enabled); }
+std::shared_ptr<const RobRunGrenades::Preview> GetGrenadePrediction() { return g_grenadePrediction.load(); }
+void SetTrackedAimEntity(int entityId) { g_trackedAimEntity.store(entityId, std::memory_order_relaxed); }
 
 struct CameraStepResult {
     bool active = false;
@@ -6301,7 +7024,8 @@ bool ProjectWorld(const Matrix4x4& viewProjection, const Vector3& world,
 
 BvhStatus GetBvhStatus()
 {
-    const auto bvh = LoadBvhSnapshot();
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    const auto& bvh = g_bvhScene;
     BvhStatus s;
     if (bvh) {
         s.loaded = bvh->valid;
@@ -6309,6 +7033,7 @@ BvhStatus GetBvhStatus()
         s.triCount = (uint32_t)bvh->tris.size();
         s.path = bvh->loadedPath;
     }
+    s.ignoredSurfaces = g_bvhIgnoreHistory.size();
     return s;
 }
 
@@ -6320,6 +7045,68 @@ void ReloadBvh()
 std::shared_ptr<const CollisionBVH::Scene> GetBvhScene()
 {
     return LoadBvhSnapshot();
+}
+
+VisibilityBvh GetVisibilityBvh()
+{
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    return { g_bvhScene, g_bvhIgnoredTriangles };
+}
+
+bool PickVisibilitySurface(const VisibilityBvh& bvh, float maxDistance, CollisionBVH::SegmentHit& hit)
+{
+    if (!bvh.scene || !bvh.scene->valid || !IsBvhActiveForCurrentLocation(false) || maxDistance <= kVisibilityRayStart)
+        return false;
+    RobRunCamera::CameraState camera{};
+    if (!GetFreshCamera(camera)) {
+        const auto snapshot = GetSnapshot();
+        if (snapshot) camera = snapshot->camera;
+    }
+    if (!camera.valid || !RobRunMemory::Finite(camera.position) || !RobRunMemory::Finite(camera.forward))
+        return false;
+
+    const CollisionBVH::Float3 origin{ camera.position.x, camera.position.y, camera.position.z };
+    const CollisionBVH::Float3 forward{ camera.forward.x, camera.forward.y, camera.forward.z };
+    const float length = std::sqrt(CollisionBVH::dot(forward, forward));
+    if (!std::isfinite(length) || length <= 1e-6f) return false;
+    return CollisionBVH::TraceStatic<true>(*bvh.scene, origin, forward * (1.f / length), maxDistance,
+        kVisibilityRayStart, ConfigInstance.Player.CarCabinSolid, &hit, bvh.ignoredTriangles.get());
+}
+
+bool IgnoreVisibilitySurface(const std::shared_ptr<const CollisionBVH::Scene>& scene, const CollisionBVH::SegmentHit& hit)
+{
+    if (!scene || !scene->valid) return false;
+    auto surface = CollisionBVH::CollectCoplanarSurface(*scene, hit);
+    if (surface.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    if (scene != g_bvhScene) return false;
+    const auto& previous = g_bvhIgnoredTriangles;
+    if (previous && (*previous)[hit.triangleIndex]) return false;
+    auto next = previous ? std::make_shared<std::vector<std::uint8_t>>(*previous)
+                         : std::make_shared<std::vector<std::uint8_t>>(scene->tris.size(), 0);
+    std::erase_if(surface, [&](std::uint32_t index) { return (*next)[index] != 0; });
+    for (const auto index : surface)
+        (*next)[index] = 1;
+    g_bvhIgnoreHistory.push_back(std::move(surface));
+    g_bvhIgnoredTriangles = std::move(next);
+    return true;
+}
+
+void UndoVisibilitySurfaceIgnore()
+{
+    std::lock_guard<std::mutex> lock(g_bvhMutex);
+    if (g_bvhIgnoreHistory.empty()) return;
+    if (g_bvhIgnoreHistory.size() == 1) {
+        g_bvhIgnoreHistory.pop_back();
+        g_bvhIgnoredTriangles.reset();
+        return;
+    }
+    auto next = std::make_shared<std::vector<std::uint8_t>>(*g_bvhIgnoredTriangles);
+    for (const auto index : g_bvhIgnoreHistory.back())
+        (*next)[index] = 0;
+    g_bvhIgnoreHistory.pop_back();
+    g_bvhIgnoredTriangles = std::move(next);
 }
 
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin, bool checkDynamic,

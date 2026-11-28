@@ -62,7 +62,6 @@ std::uint64_t g_vehMotionSession = 0;
 
 std::uint64_t g_localPublicId = 0;
 std::uint64_t g_localPubSession = 0;
-std::string g_lastAutoLocationId;
 
 const void* g_cachedLootWorldPtr = nullptr;
 std::uint64_t g_cachedLootVer = 0;
@@ -292,28 +291,14 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 	const auto& cfg = ConfigInstance.Radar;
 	const auto& pcfg = ConfigInstance.Player;
 
-	// Auto-select map if location changed (thread-safe RequestSetMap)
-	if (cfg.AutoMapSelect && !loc.empty() && loc != g_lastAutoLocationId) {
-		g_lastAutoLocationId = loc;
-		const char* mapped = Radar::MapFileForLocation(loc);
-		if (mapped) {
-			const auto& files = Radar::GetMapFiles();
-			for (int i = 0; i < (int)files.size(); ++i) {
-				if (files[i] == mapped) {
-					Radar::RequestSetMap(i);
-					break;
-				}
-			}
-		}
-	}
-
 	json j;
 	j["status"] = "ok";
 	j["locationId"] = loc;
 
-	const std::string activeMap = Radar::GetCurrentMapName();
-	j["mapName"] = activeMap;
-	j["mapUrl"] = "/maps/" + activeMap;
+	const auto map = Radar::GetMapView();
+	j["mapName"] = map.name;
+	j["mapUrl"] = map.name.empty() ? "" : "/maps/" + map.name;
+	j["autoMap"] = map.automatic;
 	j["availableMaps"] = Radar::GetMapFiles();
 
 	// Sync VeoxMenu accent color live
@@ -330,10 +315,10 @@ std::string BuildStateJson(bool forceIncludeLoot, std::uint64_t& clientLootVer)
 	}
 
 	j["bounds"] = {
-		{ "minX", cfg.WorldMinX },
-		{ "maxX", cfg.WorldMaxX },
-		{ "minZ", cfg.WorldMinZ },
-		{ "maxZ", cfg.WorldMaxZ }
+		{ "minX", map.minX },
+		{ "maxX", map.maxX },
+		{ "minZ", map.minZ },
+		{ "maxZ", map.maxZ }
 	};
 
 	j["defaults"] = {
@@ -1045,12 +1030,13 @@ void RunServerLoop(int port)
 					const auto amp = rawName.find('&');
 					if (amp != std::string::npos) rawName.resize(amp);
 					const std::string name = UrlDecode(rawName);
-					const auto& files = Radar::GetMapFiles();
-					for (int i = 0; i < (int)files.size(); ++i) {
-						if (files[i] == name) {
-							Radar::RequestSetMap(i);
-							break;
-						}
+					if (name.empty()) {
+						Radar::RequestAutoMap();
+					} else {
+						const auto& files = Radar::GetMapFiles();
+						const auto it = std::find(files.begin(), files.end(), name);
+						if (it != files.end())
+							Radar::RequestSetMap(static_cast<int>(it - files.begin()));
 					}
 				}
 				const std::string body = "{\"status\":\"ok\"}";

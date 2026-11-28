@@ -49,10 +49,10 @@ void OverlayNotify::Draw()
 	{
 		const PlayerConfig& cfg = ConfigInstance.Player;
 		const StatusEntry entries[4] = {
-			{ "Player ESP", cfg.BoxEsp || cfg.Skeleton || cfg.Chams || cfg.NameByRole },
-			{ "Skeleton", cfg.Skeleton },
-			{ "Health", cfg.Health },
-			{ "Distance", cfg.Distance },
+			{ "Player ESP", cfg.EspEnabled },
+			{ "Skeleton", cfg.EspEnabled && cfg.Skeleton },
+			{ "Health", cfg.EspEnabled && cfg.Health },
+			{ "Distance", cfg.EspEnabled && cfg.Distance },
 		};
 		constexpr int count = 4;
 

@@ -1,4 +1,5 @@
 #pragma once
+#include "../Input/Hotkey.h"
 #include "pch.h"
 
 // Last on-screen position (and size, when the window is resizable) of one of
@@ -63,14 +64,16 @@ public:
 	int BackdropWidth = 1920;
 	int BackdropHeight = 1080;
 	// When enabled, only player ESP is drawn (world ESP, radar and the money
-	// HUD are suppressed). Driven by BattleModeKey (Hold or Toggle).
+	// HUD are suppressed). Driven by the Battle Mode binding (Hold or Toggle).
 	bool BattleMode = false;
-	int BattleModeKey = 0;           // index into Aim::KeyNames()
+	int BattleModeBinding = VK_RBUTTON;
 	int BattleModeBehavior = 0;      // 0 = Hold, 1 = Toggle
-	int MenuKey = 0;                 // 0=Insert, 1=Home, 2=Delete, 3=End, 4=F11, 5=F12, 6=Right Shift
+	int MenuBinding = VK_INSERT;
+	int TransparencyBinding = VK_F10;
+	int ExitBinding = VK_END;
 	bool PanicMode = false;          // true = immediately blank overlay & stop targeting
-	int PanicKey = 0;                // 0=None, 1=End, 2=F8, 3=F9, 4=F10, 5=F11, 6=F12
-	int ReattachKey = 0;             // 0=Off, 1=F1, 2=F2...
+	int PanicBinding = Hotkey::Off;
+	int ReattachBinding = Hotkey::Off;
 	bool MemWriteMaster = false;     // master gate: must be true for any DMA memory write feature to run
 	bool CustomCameraDistance = false; // extended third-person camera
 	float CameraDistance = 3.5f;     // follow distance in meters (1.0 - 15.0)
@@ -120,12 +123,14 @@ public:
 		j[ConfigName][LIT("BackdropWidth")] = BackdropWidth;
 		j[ConfigName][LIT("BackdropHeight")] = BackdropHeight;
 		j[ConfigName][LIT("BattleMode")] = BattleMode;
-		j[ConfigName][LIT("BattleModeKey")] = BattleModeKey;
+		j[ConfigName][LIT("BattleModeBinding")] = BattleModeBinding;
 		j[ConfigName][LIT("BattleModeBehavior")] = BattleModeBehavior;
-		j[ConfigName][LIT("MenuKey")] = MenuKey;
+		j[ConfigName][LIT("MenuBinding")] = MenuBinding;
+		j[ConfigName][LIT("TransparencyBinding")] = TransparencyBinding;
+		j[ConfigName][LIT("ExitBinding")] = ExitBinding;
 		j[ConfigName][LIT("PanicMode")] = PanicMode;
-		j[ConfigName][LIT("PanicKey")] = PanicKey;
-		j[ConfigName][LIT("ReattachKey")] = ReattachKey;
+		j[ConfigName][LIT("PanicBinding")] = PanicBinding;
+		j[ConfigName][LIT("ReattachBinding")] = ReattachBinding;
 		j[ConfigName][LIT("MemWriteMaster")] = MemWriteMaster;
 		j[ConfigName][LIT("CustomCameraDistance")] = CustomCameraDistance;
 		j[ConfigName][LIT("CameraDistance")] = CameraDistance;
@@ -158,12 +163,14 @@ public:
 		BackdropWidth = s.value(LIT("BackdropWidth"), BackdropWidth);
 		BackdropHeight = s.value(LIT("BackdropHeight"), BackdropHeight);
 		BattleMode = s.value(LIT("BattleMode"), BattleMode);
-		BattleModeKey = s.value(LIT("BattleModeKey"), BattleModeKey);
+		BattleModeBinding = Hotkey::Read(s, LIT("BattleModeBinding"), LIT("BattleModeKey"), Hotkey::LegacyAim, VK_RBUTTON, Hotkey::AimInputs | Hotkey::AllowOff);
 		BattleModeBehavior = s.value(LIT("BattleModeBehavior"), BattleModeBehavior);
-		MenuKey = s.value(LIT("MenuKey"), MenuKey);
+		MenuBinding = Hotkey::Read(s, LIT("MenuBinding"), LIT("MenuKey"), Hotkey::LegacyMenu, VK_INSERT, 0);
+		TransparencyBinding = Hotkey::Read(s, LIT("TransparencyBinding"), LIT("TransparencyKey"), Hotkey::LegacyUtility, VK_F10, Hotkey::AllowOff);
+		ExitBinding = Hotkey::Read(s, LIT("ExitBinding"), LIT("ExitKey"), Hotkey::LegacyUtility, VK_END, Hotkey::AllowOff);
 		PanicMode = s.value(LIT("PanicMode"), PanicMode);
-		PanicKey = s.value(LIT("PanicKey"), PanicKey);
-		ReattachKey = s.value(LIT("ReattachKey"), ReattachKey);
+		PanicBinding = Hotkey::Read(s, LIT("PanicBinding"), LIT("PanicKey"), Hotkey::LegacyPanic, Hotkey::Off, Hotkey::AllowOff);
+		ReattachBinding = Hotkey::Read(s, LIT("ReattachBinding"), LIT("ReattachKey"), Hotkey::LegacyUtility, Hotkey::Off, Hotkey::AllowOff);
 		MemWriteMaster = s.value(LIT("MemWriteMaster"), false);
 		CustomCameraDistance = s.value(LIT("CustomCameraDistance"), CustomCameraDistance);
 		CameraDistance = s.value(LIT("CameraDistance"), CameraDistance);

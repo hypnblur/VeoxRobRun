@@ -75,23 +75,8 @@ static bool ProjectWithRadius(const Matrix4x4& vp, const Vector3& world, float w
 	return true;
 }
 
-static inline bool IsValidBone(const Vector3& p, const Vector3& root, float maxDist = 3.0f)
-{
-	if (std::abs(p.x) < 0.1f && std::abs(p.y) < 0.1f && std::abs(p.z) < 0.1f)
-		return false;
-	if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z))
-		return false;
-	const float d = Distance(p, root);
-	return d <= maxDist;
-}
-
-static inline bool IsValidBoneSegment(const Vector3& a, const Vector3& b, const Vector3& root, float maxDist = 3.0f)
-{
-	if (!IsValidBone(a, root, maxDist) || !IsValidBone(b, root, maxDist))
-		return false;
-	const float len = Distance(a, b);
-	return len >= 0.02f && len <= 1.25f;
-}
+using Skeleton::IsValidBone;
+using Skeleton::IsValidBoneSegment;
 
 static void DrawCapsuleSegment(ImDrawList* dl, const Matrix4x4& vp, int screenW, int screenH,
 	const Vector3& a, float radiusA, const Vector3& b, float radiusB,
@@ -150,7 +135,8 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 	ImU32 chamsCol = ent.IsTeammate()
 		? Esp::ShadeColour(pcfg.TeammateColour, pcfg.ChamsAlpha)
 		: Esp::ShadeColour(pcfg.ChamsColour, pcfg.ChamsAlpha);
-	if (!ent.IsTeammate() && pcfg.ChamsVisCheck) {
+	const bool chamsVisActive = !ent.IsTeammate() && pcfg.ChamsVisCheck && ent.visibilityChecked;
+	if (chamsVisActive) {
 		chamsCol = ent.visible
 			? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
 			: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
@@ -421,7 +407,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 				continue;
 
 			ImU32 segChamsCol = chamsCol;
-			if (!ent.IsTeammate() && pcfg.ChamsVisCheck) {
+			if (chamsVisActive) {
 				segChamsCol = seg.visible
 					? Esp::ShadeColour(pcfg.ChamsVisibleColour, pcfg.ChamsAlpha)
 					: Esp::ShadeColour(pcfg.ChamsHiddenColour, pcfg.ChamsAlpha);
@@ -434,7 +420,7 @@ static void DrawPlayerChams(ImDrawList* dl, const RobRunReader::EntityData& ent,
 
 static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
 	const Vector3& targetPos, const RobRunCamera::CameraState& cam,
-	float distMeters, ImU32 color, ImFont* font, float fontSize)
+	bool showDistance, float distMeters, ImU32 color, ImFont* font, float fontSize)
 {
 	const float cx = (float)screenW * 0.5f;
 	const float cy = (float)screenH * 0.5f;
@@ -466,6 +452,8 @@ static void DrawOffscreenArrow(ImDrawList* dl, int screenW, int screenH,
 
 	dl->AddTriangleFilled(tip, left, right, color);
 	dl->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 200), 1.2f);
+
+	if (!showDistance) return;
 
 	char distBuf[16];
 	std::snprintf(distBuf, sizeof(distBuf), "%.0fm", distMeters);
@@ -542,6 +530,9 @@ void DrawPlayers()
 		const bool isTeammate = ent.IsTeammate();
 		if (pcfg.HideTeammates && isTeammate)
 			continue;
+		const bool visRequested = pcfg.VisCheck || pcfg.WallCheck;
+		const bool visChecked = visRequested && ent.visibilityChecked;
+		const bool visActive = !isTeammate && visChecked;
 
 		const Vector3 entPos = ent.position;
 
@@ -569,18 +560,18 @@ void DrawPlayers()
 
 		if (!onScreen)
 		{
-			if (pcfg.OffscreenArrows && snapshot->camera.valid)
+			if (pcfg.EspEnabled && pcfg.OffscreenArrows && snapshot->camera.valid)
 			{
 				ImU32 offCol = isTeammate
 					? Esp::D2DColorToImU32(pcfg.TeammateColour)
 					: Esp::D2DColorToImU32(pcfg.OffscreenColour);
-				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
+				if (visActive) {
 					offCol = ent.visible
 						? Esp::D2DColorToImU32(pcfg.VisibleColour)
 						: Esp::D2DColorToImU32(pcfg.HiddenColour);
 				}
 				DrawOffscreenArrow(dl, screenW, screenH, entPos, snapshot->camera,
-					distF, offCol, font, fontSize);
+					pcfg.ShowOffscreenDistance, distF, offCol, font, fontSize);
 			}
 			continue;
 		}
@@ -591,11 +582,9 @@ void DrawPlayers()
 				nearestOnScreenDist = distF;
 		}
 
-		// Only dim to HiddenAlpha when visibility/wall checking is actually
-		// enabled; otherwise the fallback animator-motion heuristic dims idle
-		// or LOD-throttled players to grey and causes a white/grey strobe.
-		// Teammates skip VisCheck completely and render at full brightness.
-		const bool visActive = !isTeammate && (pcfg.VisCheck || pcfg.WallCheck);
+		if (!pcfg.EspEnabled)
+			continue;
+
 		const float alphaMult = (!visActive || ent.visible) ? 1.0f : std::clamp(pcfg.HiddenAlpha, 0.05f, 0.60f);
 		const ImU32 teamCol = Esp::D2DColorToImU32(pcfg.TeammateColour);
 		const ImU32 teamBoxCol = Esp::D2DColorToImU32(pcfg.TeammateBoxColour);
@@ -611,7 +600,7 @@ void DrawPlayers()
 		const ImU32 espCol = isTeammate ? teamSkelCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.TextColour), alphaMult);
 
 		// Status Ring: Subtle screen-space halo around torso/head centroid when visible (item 8)
-		if (!isTeammate && pcfg.StatusRing && ent.visible)
+		if (!isTeammate && pcfg.StatusRing && ent.visibilityChecked && ent.visible)
 		{
 			const Vector3 centroid = ent.bonePoints.hasChest ? ent.bonePoints.chest : Vector3(entPos.x, entPos.y + 1.25f, entPos.z);
 			ImVec2 screenCentroid;
@@ -637,14 +626,9 @@ void DrawPlayers()
 		float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
 
 		const bool drawSkeleton = isTeammate ? pcfg.TeammateSkeleton : pcfg.Skeleton;
-		const bool livePartialBoneVis =
-			!isTeammate &&
-			(pcfg.VisCheck || pcfg.WallCheck) &&
-			pcfg.VisRayCount >= 8 &&
-			RobRunReader::GetBvhStatus().loaded &&
-			(pcfg.VisMaxDistance <= 0.f || !haveLocalPosition || distF <= pcfg.VisMaxDistance);
 		const ImU32 visCol = Esp::D2DColorToImU32(pcfg.VisibleColour);
 		const ImU32 hidCol = Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+		const ImU32 visibleBoneCol = isTeammate ? teamSkelCol : visCol;
 
 		const float maxBoneDist = ent.inVehicle ? 12.0f : 3.0f;
 		for (const auto& seg : ent.bones)
@@ -658,35 +642,21 @@ void DrawPlayers()
 
 			if (drawSkeleton)
 			{
-				if (livePartialBoneVis) {
-					const bool visA = !RobRunReader::IsCameraOccluded(seg.a);
-					const bool visB = !RobRunReader::IsCameraOccluded(seg.b);
-					if (visA == visB) {
-						dl->AddLine(a, b, visA ? visCol : hidCol, pcfg.SkeletonThickness);
-					} else {
-						// Bone straddles a corner/wall: binary-search 3 steps (12.5% precision)
-						// to split the bone right at the real 3D occlusion edge.
-						float tLo = 0.f, tHi = 1.f;
-						for (int step = 0; step < 3; ++step) {
-							const float tMid = (tLo + tHi) * 0.5f;
-							const Vector3 pMid(
-								seg.a.x + (seg.b.x - seg.a.x) * tMid,
-								seg.a.y + (seg.b.y - seg.a.y) * tMid,
-								seg.a.z + (seg.b.z - seg.a.z) * tMid);
-							const bool visMid = !RobRunReader::IsCameraOccluded(pMid);
-							if (visMid == visA) tLo = tMid;
-							else tHi = tMid;
-						}
-						const float tSplit = (tLo + tHi) * 0.5f;
-						const ImVec2 splitPt(a.x + (b.x - a.x) * tSplit, a.y + (b.y - a.y) * tSplit);
-						dl->AddLine(a, splitPt, visA ? visCol : hidCol, pcfg.SkeletonThickness);
-						dl->AddLine(splitPt, b, visB ? visCol : hidCol, pcfg.SkeletonThickness);
+				if (visChecked && seg.visibilitySplits[0] < 1.f) {
+					ImVec2 start = a;
+					bool segmentVisible = seg.startsVisible;
+					for (const float split : seg.visibilitySplits) {
+						if (split >= 1.f) break;
+						ImVec2 point{};
+						if (!Project(viewProjection, Vector3::Lerp(seg.a, seg.b, split), screenW, screenH, point))
+							continue;
+						dl->AddLine(start, point, segmentVisible ? visibleBoneCol : hidCol, pcfg.SkeletonThickness);
+						start = point;
+						segmentVisible = !segmentVisible;
 					}
+					dl->AddLine(start, b, segmentVisible ? visibleBoneCol : hidCol, pcfg.SkeletonThickness);
 				} else {
-					ImU32 segCol = espCol;
-					if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
-						segCol = seg.visible ? visCol : hidCol;
-					}
+					const ImU32 segCol = visChecked ? (seg.visible ? visibleBoneCol : hidCol) : espCol;
 					dl->AddLine(a, b, segCol, pcfg.SkeletonThickness);
 				}
 			}
@@ -714,13 +684,7 @@ void DrawPlayers()
 				ProjectWithRadius(viewProjection, center, headRadius,
 					screenW, screenH, sc, sr))
 			{
-				ImU32 headCol = espCol;
-				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
-					const bool headVis = livePartialBoneVis
-						? !RobRunReader::IsCameraOccluded(center)
-						: ent.visible;
-					headCol = headVis ? visCol : hidCol;
-				}
+				const ImU32 headCol = visChecked ? (ent.headVisible ? visibleBoneCol : hidCol) : espCol;
 				dl->AddCircle(sc, sr, headCol, 0, 2.f);
 			}
 		}
@@ -750,10 +714,8 @@ void DrawPlayers()
 		if (boxValid && drawBox)
 		{
 			ImU32 currentBoxCol = boxCol;
-			if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
-				currentBoxCol = ent.visible
-					? Esp::D2DColorToImU32(pcfg.VisibleColour)
-					: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+			if (visActive) {
+				currentBoxCol = ent.visible ? visCol : hidCol;
 			}
 			Esp::DrawCornerBox(dl, ImVec2(minX - 4.f, minY - 4.f),
 				ImVec2(maxX + 4.f, maxY + 4.f), currentBoxCol, 1.5f, 25.f, true);
@@ -792,10 +754,8 @@ void DrawPlayers()
 				: screenPos;
 
 			ImU32 snapCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.SnaplineColour), alphaMult);
-			if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
-				snapCol = ent.visible
-					? Esp::D2DColorToImU32(pcfg.VisibleColour)
-					: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+			if (visActive) {
+				snapCol = ent.visible ? visCol : hidCol;
 			}
 			dl->AddLine(origin, snapTarget, snapCol, 1.2f);
 		}
@@ -811,10 +771,8 @@ void DrawPlayers()
 			if (Project(viewProjection, headPos, screenW, screenH, headScreen))
 			{
 				ImU32 headCol = isTeammate ? teamCol : Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HeadDotColour), alphaMult);
-				if (!isTeammate && (pcfg.VisCheck || pcfg.WallCheck)) {
-					headCol = ent.visible
-						? Esp::D2DColorToImU32(pcfg.VisibleColour)
-						: Esp::ScaleAlpha(Esp::D2DColorToImU32(pcfg.HiddenColour), alphaMult);
+				if (visActive) {
+					headCol = ent.headVisible ? visCol : hidCol;
 				}
 				dl->AddCircleFilled(headScreen, pcfg.HeadDotRadius, headCol);
 				dl->AddCircle(headScreen, pcfg.HeadDotRadius, IM_COL32(0, 0, 0, 180), 0, 1.0f);
@@ -873,10 +831,12 @@ void DrawPlayers()
 
 		// Top: name + clan tag
 		topSegs.clear();
-		if (!ent.nicknameUtf8.empty())
+		if (pcfg.ShowPlayerName && !ent.nicknameUtf8.empty())
 			topSegs.push_back({ ent.nicknameUtf8, roleBasedCol });
-		if (!ent.clanTagUtf8.empty())
-			topSegs.push_back({ " <" + ent.clanTagUtf8 + ">", roleBasedCol });
+		if (pcfg.ShowClanTag && !ent.clanTagUtf8.empty()) {
+			const char* prefix = topSegs.empty() ? "<" : " <";
+			topSegs.push_back({ prefix + ent.clanTagUtf8 + ">", roleBasedCol });
+		}
 
 		float topY = boxValid ? (minY - 6.f) : screenPos.y;
 		if (!topSegs.empty()) {
@@ -891,13 +851,14 @@ void DrawPlayers()
 		float botY = boxValid ? (maxY + 8.f) : (screenPos.y + 14.f);
 		{
 			const std::string& weapStr = ent.weaponNameUtf8;
+			const bool drawWeaponName = pcfg.WeaponEsp && !weapStr.empty();
 			char distBuf[32]{};
 			if (pcfg.Distance)
 				snprintf(distBuf, sizeof(distBuf), "%.1f m", distF);
 
 			float spriteW = 0.f, spriteH = 0.f;
 			WeaponSprites::SpriteInfo sprite{};
-			if (pcfg.WeaponEsp && pcfg.WeaponSprite && !weapStr.empty()) {
+			if (pcfg.WeaponSprite && !weapStr.empty()) {
 				sprite = WeaponSprites::Get(weapStr);
 				if (sprite.srv) {
 					spriteH = fontSize + 2.f;
@@ -909,7 +870,7 @@ void DrawPlayers()
 			float totalW = 0.f;
 			if (sprite.srv) totalW += spriteW + 3.f;
 			ImVec2 weapSz{};
-			if (pcfg.WeaponEsp && !weapStr.empty()) {
+			if (drawWeaponName) {
 				weapSz = MeasureText(weapStr.c_str(), fontSize);
 				totalW += weapSz.x;
 			}
@@ -927,13 +888,13 @@ void DrawPlayers()
 						ImVec2(cx, botY), ImVec2(cx + spriteW, botY + spriteH));
 					cx += spriteW + 3.f;
 				}
-				if (pcfg.WeaponEsp && !weapStr.empty()) {
+				if (drawWeaponName) {
 					Esp::DrawOutlinedText(dl, ImVec2(cx, botY), weapCol,
 						font, fontSize, weapStr.c_str());
 					cx += weapSz.x;
 				}
 				if (distBuf[0]) {
-					if (pcfg.WeaponEsp && !weapStr.empty()) cx += 6.f;
+					if (drawWeaponName || sprite.srv) cx += 6.f;
 					Esp::DrawOutlinedText(dl, ImVec2(cx, botY), distCol,
 						font, fontSize, distBuf);
 				}
@@ -943,13 +904,11 @@ void DrawPlayers()
 
 		// State indicators line
 		stateSegs.clear();
-		if (pcfg.VisCheck || pcfg.WallCheck)
-		{
-			const ImU32 visBadgeCol = ent.visible
-				? Esp::D2DColorToImU32(pcfg.VisibleColour)
-				: Esp::D2DColorToImU32(pcfg.HiddenColour);
-			stateSegs.push_back({ ent.visible ? "[VIS]" : "[WALL]", visBadgeCol });
-		}
+		if (pcfg.ShowVisibilityTags && visChecked)
+			stateSegs.push_back({ ent.visible ? "[VIS]" : "[WALL]",
+				ent.visible ? visCol : Esp::D2DColorToImU32(pcfg.HiddenColour) });
+		else if (pcfg.ShowVisibilityTags && visRequested)
+			stateSegs.push_back({ "[VIS ?]", stateCol });
 		if (pcfg.Health && ent.healthKnown)
 			stateSegs.push_back({ "[" + std::to_string((int)ent.health) + "hp]", hpTxtCol });
 		if (pcfg.ShowFiring && ent.isFiring)
@@ -968,12 +927,12 @@ void DrawPlayers()
 			const ImU32 stmCol = Esp::D2DColorToImU32(pcfg.StaminaColour);
 			stateSegs.push_back({ "[STM:" + std::to_string((int)ent.stamina) + "]", stmCol });
 		}
-		if (ent.isAimingAtLocal)
+		if (pcfg.ShowAimingTag && ent.isAimingAtLocal)
 			stateSegs.push_back({ "[AIMING]", lookCol });
-		if (ent.isKnockedDown) stateSegs.push_back({ "[KD]", stateCol });
-		if (ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
-		if (ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });
-		if (ent.isHandcuffed) stateSegs.push_back({ "[HC]", stateCol });
+		if (pcfg.ShowKnockedDownTag && ent.isKnockedDown) stateSegs.push_back({ "[KD]", stateCol });
+		if (pcfg.ShowKnockedOutTag && ent.isKnockedOut) stateSegs.push_back({ "[KO]", stateCol });
+		if (pcfg.ShowSurrenderedTag && ent.isSurrendered) stateSegs.push_back({ "[SUR]", stateCol });
+		if (pcfg.ShowHandcuffedTag && ent.isHandcuffed) stateSegs.push_back({ "[HC]", stateCol });
 		if (pcfg.HiddenPlayerEsp && snapshot->world &&
 			snapshot->world->hiddenEntityIds.count(ent.entityId))
 			stateSegs.push_back({ "[HIDING]", IM_COL32(255, 165, 0, 255) });
@@ -995,17 +954,21 @@ void DrawPlayers()
 			if (!roleLabel.empty())
 				stateSegs.push_back({ "[" + roleLabel + "]", roleTextCol });
 		}
-		if (ent.bagValue > 0) {
+		if (pcfg.ShowBagValueTag && ent.bagValue > 0) {
 			const char* bagTag = (ent.role != 0 && ent.roleName == "Police Officer")
 				? "CBAG" : "RBAG";
 			stateSegs.push_back({ "[" + std::string(bagTag) + ":$"
 				+ std::to_string(ent.bagValue) + "]",
 				IM_COL32(120, 255, 140, 255) });
 		}
-		if (ent.inVehicle) stateSegs.push_back({ "[V]", stateCol });
-		else if (ent.isCrouching) stateSegs.push_back({ "[C]", stateCol });
-		else if (ent.isSprinting) stateSegs.push_back({ "[S]", stateCol });
-		if (ent.healthKnown && ent.criticalHealth > 0.f && ent.health <= ent.criticalHealth)
+		if (ent.inVehicle) {
+			if (pcfg.ShowInVehicleTag) stateSegs.push_back({ "[V]", stateCol });
+		} else if (ent.isCrouching) {
+			if (pcfg.ShowCrouchingTag) stateSegs.push_back({ "[C]", stateCol });
+		} else if (ent.isSprinting && pcfg.ShowSprintingTag) {
+			stateSegs.push_back({ "[S]", stateCol });
+		}
+		if (pcfg.ShowCriticalHealthTag && ent.healthKnown && ent.criticalHealth > 0.f && ent.health <= ent.criticalHealth)
 			stateSegs.push_back({ "[!]", stateCol });
 		if (!stateSegs.empty())
 			botY = drawSegLine(stateSegs, botY);
@@ -1042,6 +1005,8 @@ void DrawPlayers()
 	}
 
 	RobRunReader::ReportRenderState(anyEnemyOnScreen, nearestOnScreenDist);
+	if (!pcfg.EspEnabled)
+		return;
 
 	if (pcfg.LookingAlert && !lookingNames.empty())
 	{
@@ -1143,11 +1108,30 @@ void DrawPlayers()
 	}
 }
 
+static struct {
+	int frame = -1;
+	std::weak_ptr<const CollisionBVH::Scene> scene;
+	CollisionBVH::SegmentHit hit;
+} g_bvhHighlight;
+
+bool HasHighlightedBvhSurface()
+{
+	return ConfigInstance.Player.ShowBvh && g_bvhHighlight.frame == ImGui::GetFrameCount() &&
+		!g_bvhHighlight.scene.expired();
+}
+
+bool IgnoreHighlightedBvhSurface()
+{
+	return HasHighlightedBvhSurface() &&
+		RobRunReader::IgnoreVisibilitySurface(g_bvhHighlight.scene.lock(), g_bvhHighlight.hit);
+}
+
 void DrawBvhDebug()
 {
 	if (!ConfigInstance.Player.ShowBvh) return;
 
-	const auto scene = RobRunReader::GetBvhScene();
+	const auto bvh = RobRunReader::GetVisibilityBvh();
+	const auto& scene = bvh.scene;
 	if (!scene || !scene->valid || scene->nodes.empty()) return;
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -1165,6 +1149,9 @@ void DrawBvhDebug()
 	const float maxDistSq = maxDist * maxDist;
 
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
+	const auto project = [&](const CollisionBVH::Float3& point, ImVec2& out) {
+		return Project(vp, Vector3(point.x, point.y, point.z), screenW, screenH, out);
+	};
 	const ImU32 col = IM_COL32(0, 235, 255, 110);
 	int drawnTris = 0;
 	constexpr int kMaxDebugTris = 2500;
@@ -1185,6 +1172,7 @@ void DrawBvhDebug()
 		const std::uint32_t start = node.triStart();
 		const std::uint32_t count = node.triCount();
 		for (std::uint32_t i = 0; i < count && drawnTris < kMaxDebugTris; ++i) {
+			if (bvh.ignoredTriangles && (*bvh.ignoredTriangles)[start + i]) continue;
 			const auto& t = scene->tris[start + i];
 			const auto e1 = t.v1 - t.v0;
 			const auto e2 = t.v2 - t.v0;
@@ -1194,13 +1182,23 @@ void DrawBvhDebug()
 			// Skip mostly-horizontal floor/ceiling triangles (|ny| >= 0.70)
 			if ((n.y * n.y) >= 0.49f * lenSq) continue;
 
-			Vector2 s0, s1, s2;
-			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v0.x, t.v0.y, t.v0.z), screenW, screenH, s0)) continue;
-			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v1.x, t.v1.y, t.v1.z), screenW, screenH, s1)) continue;
-			if (!RobRunReader::ProjectWorld(vp, Vector3(t.v2.x, t.v2.y, t.v2.z), screenW, screenH, s2)) continue;
-
-			dl->AddTriangle(ImVec2(s0.x, s0.y), ImVec2(s1.x, s1.y), ImVec2(s2.x, s2.y), col, 1.0f);
+			ImVec2 s0{}, s1{}, s2{};
+			if (!project(t.v0, s0) || !project(t.v1, s1) || !project(t.v2, s2)) continue;
+			dl->AddTriangle(s0, s1, s2, col, 1.0f);
 			++drawnTris;
 		}
 	}
+
+	CollisionBVH::SegmentHit hit{};
+	if (!RobRunReader::PickVisibilitySurface(bvh, maxDist, hit)) return;
+	const auto& triangle = scene->tris[hit.triangleIndex];
+	const ImU32 highlight = IM_COL32(255, 197, 65, 255);
+	ImVec2 a{}, b{}, c{}, point{};
+	if (project(triangle.v0, a) && project(triangle.v1, b) && project(triangle.v2, c)) {
+		dl->AddTriangleFilled(a, b, c, IM_COL32(255, 197, 65, 65));
+		dl->AddTriangle(a, b, c, highlight, 2.f);
+	}
+	if (!project(hit.point, point)) return;
+	dl->AddCircleFilled(point, 4.f, highlight);
+	g_bvhHighlight = { ImGui::GetFrameCount(), scene, hit };
 }

@@ -356,6 +356,169 @@ inline bool RayVehicleOBB(
     return RayVehicleOBBLocal(localOrig, dir, v, cosY, sinY, tMax, carCabinSolid, tMin);
 }
 
+struct SegmentHit {
+    Float3 point{};
+    Float3 normal{};
+    float fraction = 0.f;
+    uint16_t surface = Surface_DefaultOpaque;
+    uint32_t triangleIndex = UINT32_MAX;
+};
+
+template <bool FindNearest>
+inline bool TraceStatic(const Scene& scene, const Float3& origin, const Float3& d,
+    float tMax, float tMin, bool carCabinSolid, SegmentHit* nearest,
+    const std::vector<uint8_t>* ignoredTriangles = nullptr)
+{
+    if (!scene.valid || scene.nodes.empty()) return false;
+    const uint8_t* ignored = ignoredTriangles && ignoredTriangles->size() == scene.tris.size()
+        ? ignoredTriangles->data() : nullptr;
+
+    const Float3 invDir = {
+        std::abs(d.x) > 1e-8f ? 1.0f / d.x : std::copysign(1e8f, d.x),
+        std::abs(d.y) > 1e-8f ? 1.0f / d.y : std::copysign(1e8f, d.y),
+        std::abs(d.z) > 1e-8f ? 1.0f / d.z : std::copysign(1e8f, d.z),
+    };
+
+    float rootT = 0.f;
+    if (!RayAABBNear(origin, invDir, scene.nodes[0].aabbMin, scene.nodes[0].aabbMax, tMax, rootT))
+        return false;
+
+    uint32_t stack[128];
+    int sp = 0;
+    stack[sp++] = 0;
+
+    const bool hasSurfaces = !scene.surfaceTypes.empty();
+    const std::size_t surfSize = scene.surfaceTypes.size();
+
+    bool found = false;
+    float closest = tMax;
+    while (sp > 0) {
+        const BVHNode& node = scene.nodes[stack[--sp]];
+
+        if (node.isLeaf()) {
+            const uint32_t start = node.triStart();
+            const uint32_t end = start + node.triCount();
+            float t;
+            for (uint32_t i = start; i < end; ++i) {
+                if (ignored && ignored[i]) continue;
+                if (RayTriangle(origin, d, scene.tris[i], closest, t, tMin)) {
+                    if (hasSurfaces && i < surfSize) {
+                        const uint16_t surf = scene.surfaceTypes[i];
+                        if (surf == Surface_VehicleGlass && !carCabinSolid) {
+                            // Vehicle glass see-through allowed when car cabin solid mode is disabled
+                            continue;
+                        }
+                    }
+                    if constexpr (!FindNearest) return true;
+                    const auto& tri = scene.tris[i];
+                    const Float3 normal = cross(tri.v1 - tri.v0, tri.v2 - tri.v0);
+                    const float normalLength = std::sqrt(dot(normal, normal));
+                    if (normalLength <= 1e-8f) continue;
+                    const float sign = dot(d, normal) > 0.f ? -1.f : 1.f;
+                    *nearest = { origin + d * t, normal * (sign / normalLength), t / tMax,
+                        i < surfSize ? scene.surfaceTypes[i] : uint16_t{ Surface_DefaultOpaque }, i };
+                    closest = t;
+                    found = true;
+                }
+            }
+        } else {
+            const uint32_t leftIdx = node.left();
+            const uint32_t rightIdx = node.right();
+            float tLeft = 0.f, tRight = 0.f;
+            const bool hitLeft = RayAABBNear(origin, invDir,
+                scene.nodes[leftIdx].aabbMin, scene.nodes[leftIdx].aabbMax, closest, tLeft);
+            const bool hitRight = RayAABBNear(origin, invDir,
+                scene.nodes[rightIdx].aabbMin, scene.nodes[rightIdx].aabbMax, closest, tRight);
+
+            if (hitLeft && hitRight) {
+                if (sp < 126) {
+                    // Push farther child first so the nearer child pops next
+                    if (tLeft <= tRight) {
+                        stack[sp++] = rightIdx;
+                        stack[sp++] = leftIdx;
+                    } else {
+                        stack[sp++] = leftIdx;
+                        stack[sp++] = rightIdx;
+                    }
+                }
+            } else if (hitLeft) {
+                if (sp < 127) stack[sp++] = leftIdx;
+            } else if (hitRight) {
+                if (sp < 127) stack[sp++] = rightIdx;
+            }
+        }
+    }
+    return found;
+}
+
+// BVH1 has no collider IDs. Use the nearby triangles joined along the same
+// plane so a two-triangle panel can be ignored without also ignoring its sides.
+inline std::vector<uint32_t> CollectCoplanarSurface(const Scene& scene, const SegmentHit& hit)
+{
+    if (hit.triangleIndex >= scene.tris.size()) return {};
+    constexpr float radius = 5.f;
+    constexpr float planeTolerance = 0.01f;
+    constexpr float vertexToleranceSq = 0.001f * 0.001f;
+    constexpr std::size_t maxTriangles = 128;
+    const Float3 origin = scene.tris[hit.triangleIndex].v0;
+    const auto onPlane = [&](const Float3& vertex) {
+        return std::abs(dot(vertex - origin, hit.normal)) <= planeTolerance;
+    };
+    const auto sharesEdge = [&](const Triangle& a, const Triangle& b) {
+        int sharedVertices = 0;
+        for (const Float3 from : { a.v0, a.v1, a.v2 }) {
+            for (const Float3 to : { b.v0, b.v1, b.v2 }) {
+                const Float3 delta = from - to;
+                if (dot(delta, delta) <= vertexToleranceSq) {
+                    ++sharedVertices;
+                    break;
+                }
+            }
+        }
+        return sharedVertices >= 2;
+    };
+
+    std::vector<uint32_t> candidates;
+    for (const BVHNode& node : scene.nodes) {
+        if (!node.isLeaf() ||
+            node.aabbMin.x > hit.point.x + radius || node.aabbMax.x < hit.point.x - radius ||
+            node.aabbMin.y > hit.point.y + radius || node.aabbMax.y < hit.point.y - radius ||
+            node.aabbMin.z > hit.point.z + radius || node.aabbMax.z < hit.point.z - radius)
+            continue;
+
+        for (uint32_t i = node.triStart(); i < node.triStart() + node.triCount(); ++i) {
+            if (i == hit.triangleIndex) continue;
+            if (i < scene.surfaceTypes.size() && scene.surfaceTypes[i] != hit.surface) continue;
+            const Triangle& tri = scene.tris[i];
+            if (onPlane(tri.v0) && onPlane(tri.v1) && onPlane(tri.v2))
+                candidates.push_back(i);
+        }
+    }
+
+    std::vector<uint32_t> surface{ hit.triangleIndex };
+    for (std::size_t i = 0; i < surface.size() && surface.size() < maxTriangles; ++i) {
+        const auto& current = scene.tris[surface[i]];
+        for (std::size_t j = 0; j < candidates.size() && surface.size() < maxTriangles;) {
+            if (sharesEdge(current, scene.tris[candidates[j]])) {
+                surface.push_back(candidates[j]);
+                candidates[j] = candidates.back();
+                candidates.pop_back();
+            } else {
+                ++j;
+            }
+        }
+    }
+    return surface;
+}
+
+inline bool TraceSegment(const Scene& scene, const Float3& origin, const Float3& target, SegmentHit& hit)
+{
+    const Float3 delta = target - origin;
+    const float length = std::sqrt(dot(delta, delta));
+    return length > 1e-6f &&
+        TraceStatic<true>(scene, origin, delta * (1.f / length), length, 0.f, true, &hit);
+}
+
 inline bool IsOccluded(
     const Scene& scene,
     const Float3& origin, const Float3& target,
@@ -364,7 +527,8 @@ inline bool IsOccluded(
     float tMin = 0.20f,
     int skipVehicleId1 = 0,
     int skipVehicleId2 = 0,
-    bool skipAllVehicles = false)
+    bool skipAllVehicles = false,
+    const std::vector<uint8_t>* ignoredTriangles = nullptr)
 {
     const Float3 dir = target - origin;
     const float len = std::sqrt(dot(dir, dir));
@@ -420,73 +584,7 @@ inline bool IsOccluded(
         }
     }
 
-    // 2. Static BVH Scene Pass (near-child-first ordered traversal)
-    if (!scene.valid || scene.nodes.empty()) return false;
-
-    const Float3 invDir = {
-        std::abs(d.x) > 1e-8f ? 1.0f / d.x : std::copysign(1e8f, d.x),
-        std::abs(d.y) > 1e-8f ? 1.0f / d.y : std::copysign(1e8f, d.y),
-        std::abs(d.z) > 1e-8f ? 1.0f / d.z : std::copysign(1e8f, d.z),
-    };
-
-    float rootT = 0.f;
-    if (!RayAABBNear(origin, invDir, scene.nodes[0].aabbMin, scene.nodes[0].aabbMax, tMax, rootT))
-        return false;
-
-    uint32_t stack[128];
-    int sp = 0;
-    stack[sp++] = 0;
-
-    const bool hasSurfaces = !scene.surfaceTypes.empty();
-    const std::size_t surfSize = scene.surfaceTypes.size();
-
-    while (sp > 0) {
-        const BVHNode& node = scene.nodes[stack[--sp]];
-
-        if (node.isLeaf()) {
-            const uint32_t start = node.triStart();
-            const uint32_t end = start + node.triCount();
-            float t;
-            for (uint32_t i = start; i < end; ++i) {
-                if (RayTriangle(origin, d, scene.tris[i], tMax, t, tMin)) {
-                    if (hasSurfaces && i < surfSize) {
-                        const uint16_t surf = scene.surfaceTypes[i];
-                        if (surf == Surface_VehicleGlass && !carCabinSolid) {
-                            // Vehicle glass see-through allowed when car cabin solid mode is disabled
-                            continue;
-                        }
-                    }
-                    return true;
-                }
-            }
-        } else {
-            const uint32_t leftIdx = node.left();
-            const uint32_t rightIdx = node.right();
-            float tLeft = 0.f, tRight = 0.f;
-            const bool hitLeft = RayAABBNear(origin, invDir,
-                scene.nodes[leftIdx].aabbMin, scene.nodes[leftIdx].aabbMax, tMax, tLeft);
-            const bool hitRight = RayAABBNear(origin, invDir,
-                scene.nodes[rightIdx].aabbMin, scene.nodes[rightIdx].aabbMax, tMax, tRight);
-
-            if (hitLeft && hitRight) {
-                if (sp < 126) {
-                    // Push farther child first so the nearer child pops next
-                    if (tLeft <= tRight) {
-                        stack[sp++] = rightIdx;
-                        stack[sp++] = leftIdx;
-                    } else {
-                        stack[sp++] = leftIdx;
-                        stack[sp++] = rightIdx;
-                    }
-                }
-            } else if (hitLeft) {
-                if (sp < 127) stack[sp++] = leftIdx;
-            } else if (hitRight) {
-                if (sp < 127) stack[sp++] = rightIdx;
-            }
-        }
-    }
-    return false;
+    return TraceStatic<false>(scene, origin, d, tMax, tMin, carCabinSolid, nullptr, ignoredTriangles);
 }
 
 // Overload for backward compatibility

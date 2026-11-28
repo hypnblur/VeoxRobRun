@@ -48,7 +48,8 @@ of failing silently.
 | Key | Action |
 | --- | --- |
 | `Insert` | Toggle the menu |
-| `Delete` | Exit |
+| `F10` | Toggle transparency |
+| `End` | Exit |
 
 ## Notes
 

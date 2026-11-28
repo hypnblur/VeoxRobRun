@@ -25,6 +25,10 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 bool MenuOpen();
 void SetMenuOpen(bool open);
 void ToggleMenu();
+void BeginHotkeyCapture();
+bool HotkeyCaptureActive();
+int TakeCapturedHotkey();
+void EndHotkeyCapture(int binding = 0);
 
 bool PanicActive();
 void TogglePanic();

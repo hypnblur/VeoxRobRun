@@ -16,7 +16,11 @@ public:
 	bool Loot = true;
 	bool Vehicles = true;
 	bool Grenades = true;
-	bool Valuables = true;
+	bool GrenadePrediction = false;
+	bool LegacyContainers = true;
+	bool LegacyLoot = true;
+	bool LegacyCargo = true;
+	bool LegacyValuables = true;
 	bool ShowEmpty = true;
 	bool ShowDistance = true;
 	int MaxDistance = 600;
@@ -25,6 +29,7 @@ public:
 
 	bool InstantLoot = false;
 	bool InstantUnlock = false;
+	bool UnrevealedLootLabels = false;
 
 	// Per-collection toggles for the new metadata dump. The group flags above
 	// stay as master switches: turning "Containers" off hides every container
@@ -59,6 +64,8 @@ public:
 	bool Weed = true;
 	bool DefenseBlocks = true;
 	bool HouseEsp = true;
+	bool ShowWorkbenchLabels = true;
+	bool ShowWorkbenchContents = true;
 	int HouseMaxDistance = 300;
 
 	D2D1::ColorF ContainerColour = Colour(255, 190, 80);
@@ -129,17 +136,24 @@ public:
 	{
 		json j;
 		j[ConfigName][LIT("Enabled")] = Enabled;
+		j[ConfigName][LIT("LegacyContainers")] = LegacyContainers;
+		j[ConfigName][LIT("LegacyLoot")] = LegacyLoot;
+		j[ConfigName][LIT("LegacyCargo")] = LegacyCargo;
+		j[ConfigName][LIT("LegacyValuables")] = LegacyValuables;
+		j[ConfigName][LIT("ShowWorkbenchLabels")] = ShowWorkbenchLabels;
+		j[ConfigName][LIT("ShowWorkbenchContents")] = ShowWorkbenchContents;
 		j[ConfigName][LIT("Containers")] = Containers;
 		j[ConfigName][LIT("Loot")] = Loot;
 		j[ConfigName][LIT("Vehicles")] = Vehicles;
 		j[ConfigName][LIT("Grenades")] = Grenades;
-		j[ConfigName][LIT("Valuables")] = Valuables;
+		j[ConfigName][LIT("GrenadePrediction")] = GrenadePrediction;
 		j[ConfigName][LIT("ShowEmpty")] = ShowEmpty;
 		j[ConfigName][LIT("ShowDistance")] = ShowDistance;
 		j[ConfigName][LIT("MaxDistance")] = MaxDistance;
 		j[ConfigName][LIT("FontSize")] = FontSize;
 		j[ConfigName][LIT("MinValueFilter")] = MinValueFilter;
 		j[ConfigName][LIT("InstantLoot")] = InstantLoot;
+		j[ConfigName][LIT("UnrevealedLootLabels")] = UnrevealedLootLabels;
 		j[ConfigName][LIT("InstantUnlock")] = InstantUnlock;
 
 		ToJsonBool(&j, LIT("LootNodes"), LootNodes);
@@ -212,48 +226,94 @@ public:
 
 	void FromJson(const json& j)
 	{
+		const json empty = json::object();
+		const auto& settings = j.contains(ConfigName) ? j[ConfigName] : empty;
+		LegacyContainers = settings.value(LIT("LegacyContainers"), true);
+		LegacyLoot = settings.value(LIT("LegacyLoot"), true);
+		LegacyCargo = settings.value(LIT("LegacyCargo"), true);
+		LegacyValuables = settings.value(LIT("LegacyValuables"), true);
+		ShowWorkbenchLabels = settings.value(LIT("ShowWorkbenchLabels"), true);
+		ShowWorkbenchContents = settings.value(LIT("ShowWorkbenchContents"), true);
+		Containers = settings.value(LIT("Containers"), true);
+		Loot = settings.value(LIT("Loot"), true);
+		Grenades = settings.value(LIT("Grenades"), true);
+		Cargos = settings.value(LIT("Cargos"), true);
+		LootNodes = settings.value(LIT("LootNodes"), true);
+		SafeDoors = settings.value(LIT("SafeDoors"), true);
+		StorageBoxes = settings.value(LIT("StorageBoxes"), true);
+		Shelvings = settings.value(LIT("Shelvings"), true);
+		CollectionTables = settings.value(LIT("CollectionTables"), true);
+		PlotContainers = settings.value(LIT("PlotContainers"), true);
+		VehicleTrunks = settings.value(LIT("VehicleTrunks"), true);
+		DroppedBags = settings.value(LIT("DroppedBags"), true);
+		VehicleLoots = settings.value(LIT("VehicleLoots"), true);
+		PlotLoots = settings.value(LIT("PlotLoots"), true);
+		FurnitureLoots = settings.value(LIT("FurnitureLoots"), true);
+		BuildingLoots = settings.value(LIT("BuildingLoots"), true);
+		CargoBushes = settings.value(LIT("CargoBushes"), true);
+		CargoCrystals = settings.value(LIT("CargoCrystals"), true);
+		CargoDrugs = settings.value(LIT("CargoDrugs"), true);
+		CargoCash = settings.value(LIT("CargoCash"), true);
+		CargoExchange = settings.value(LIT("CargoExchange"), true);
+		CargoBoxes = settings.value(LIT("CargoBoxes"), true);
+		CargoGoods = settings.value(LIT("CargoGoods"), true);
+		CashLootNodes = settings.value(LIT("CashLootNodes"), true);
+		SettlementCash = settings.value(LIT("SettlementCash"), true);
+		MoneyWorkbenches = settings.value(LIT("MoneyWorkbenches"), true);
+		CryptoWorkbenches = settings.value(LIT("CryptoWorkbenches"), true);
+
+		// Convert the old group-or-subtype rules into effective subtype choices.
+		if (!settings.contains(LIT("LegacyContainers")) && Containers) {
+			LootNodes = true;
+			SafeDoors = true;
+			StorageBoxes = true;
+			Shelvings = true;
+			CollectionTables = true;
+			PlotContainers = true;
+			VehicleTrunks = true;
+		}
+		const bool oldLoot = !settings.contains(LIT("LegacyLoot")) && Loot;
+		const bool hasLegacyCargo = settings.contains(LIT("LegacyCargo"));
+		if (oldLoot) {
+			DroppedBags = true;
+			VehicleLoots = true;
+			PlotLoots = true;
+			FurnitureLoots = true;
+			BuildingLoots = true;
+		}
+		if (!hasLegacyCargo && (oldLoot || Cargos)) {
+			Cargos = true;
+			CargoBushes = true;
+			CargoCrystals = true;
+			CargoDrugs = true;
+			CargoCash = true;
+			CargoExchange = true;
+			CargoBoxes = true;
+			CargoGoods = true;
+		}
+		if (!settings.contains(LIT("LegacyValuables")) && settings.value(LIT("Valuables"), true)) {
+			CashLootNodes = true;
+			SettlementCash = true;
+			MoneyWorkbenches = true;
+			CryptoWorkbenches = true;
+		}
+
 		if (!j.contains(ConfigName))
 			return;
 		Enabled = j[ConfigName].value(LIT("Enabled"), Enabled);
-		Containers = j[ConfigName].value(LIT("Containers"), Containers);
-		Loot = j[ConfigName].value(LIT("Loot"), Loot);
 		Vehicles = j[ConfigName].value(LIT("Vehicles"), Vehicles);
-		Grenades = j[ConfigName].value(LIT("Grenades"), Grenades);
-		Valuables = j[ConfigName].value(LIT("Valuables"), Valuables);
+		GrenadePrediction = j[ConfigName].value(LIT("GrenadePrediction"), false);
 		ShowEmpty = j[ConfigName].value(LIT("ShowEmpty"), ShowEmpty);
 		ShowDistance = j[ConfigName].value(LIT("ShowDistance"), ShowDistance);
 		MaxDistance = j[ConfigName].value(LIT("MaxDistance"), MaxDistance);
 		FontSize = j[ConfigName].value(LIT("FontSize"), FontSize);
 		MinValueFilter = j[ConfigName].value(LIT("MinValueFilter"), MinValueFilter);
 		InstantLoot = j[ConfigName].value(LIT("InstantLoot"), InstantLoot);
+		UnrevealedLootLabels = j[ConfigName].value(LIT("UnrevealedLootLabels"), false);
 		InstantUnlock = j[ConfigName].value(LIT("InstantUnlock"), InstantUnlock);
 
-		FromJsonBool(j, LIT("LootNodes"), &LootNodes);
-		FromJsonBool(j, LIT("SafeDoors"), &SafeDoors);
-		FromJsonBool(j, LIT("StorageBoxes"), &StorageBoxes);
-		FromJsonBool(j, LIT("Shelvings"), &Shelvings);
-		FromJsonBool(j, LIT("CollectionTables"), &CollectionTables);
-		FromJsonBool(j, LIT("PlotContainers"), &PlotContainers);
-		FromJsonBool(j, LIT("DroppedBags"), &DroppedBags);
-		FromJsonBool(j, LIT("VehicleLoots"), &VehicleLoots);
-		FromJsonBool(j, LIT("Cargos"), &Cargos);
-		FromJsonBool(j, LIT("CargoBushes"), &CargoBushes);
-		FromJsonBool(j, LIT("CargoCrystals"), &CargoCrystals);
-		FromJsonBool(j, LIT("CargoDrugs"), &CargoDrugs);
-		FromJsonBool(j, LIT("CargoCash"), &CargoCash);
-		FromJsonBool(j, LIT("CargoExchange"), &CargoExchange);
-		FromJsonBool(j, LIT("CargoBoxes"), &CargoBoxes);
-		FromJsonBool(j, LIT("CargoGoods"), &CargoGoods);
-		FromJsonBool(j, LIT("PlotLoots"), &PlotLoots);
-		FromJsonBool(j, LIT("FurnitureLoots"), &FurnitureLoots);
-		FromJsonBool(j, LIT("BuildingLoots"), &BuildingLoots);
-		FromJsonBool(j, LIT("CashLootNodes"), &CashLootNodes);
-		FromJsonBool(j, LIT("SettlementCash"), &SettlementCash);
-		FromJsonBool(j, LIT("MoneyWorkbenches"), &MoneyWorkbenches);
 		FromJsonBool(j, LIT("SecurityAlarms"), &SecurityAlarms);
 		FromJsonBool(j, LIT("FirstAidCabinets"), &FirstAidCabinets);
-		FromJsonBool(j, LIT("CryptoWorkbenches"), &CryptoWorkbenches);
-		FromJsonBool(j, LIT("VehicleTrunks"), &VehicleTrunks);
 		FromJsonBool(j, LIT("DrugWorkbenches"), &DrugWorkbenches);
 		FromJsonBool(j, LIT("Weed"), &Weed);
 		FromJsonBool(j, LIT("DefenseBlocks"), &DefenseBlocks);

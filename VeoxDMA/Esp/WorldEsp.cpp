@@ -2,6 +2,7 @@
 #include "WorldEsp.h"
 #include "ConfigInstance.h"
 #include "RobRunReader.h"
+#include "../SDK/GrenadePrediction.h"
 #include "EspDraw.h"
 #include "IconSprites.h"
 #include "Diag.h"
@@ -12,6 +13,62 @@
 #include <cstring>
 #include <unordered_set>
 
+void DrawUnrevealedLootLabels(const RobRunReader::Snapshot* snapshot)
+{
+	if (!ConfigInstance.World.UnrevealedLootLabels || !snapshot)
+		return;
+	const auto current = RobRunReader::GetLootPreview();
+	if (!current) return;
+	const auto& preview = *current;
+	if (preview.sessionGeneration != snapshot->sessionGeneration ||
+		GetTickCount64() - preview.stampMs >= RobRunReader::LootPreview::MaxAgeMs)
+		return;
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	if (display.x <= 0.f || display.y <= 0.f)
+		return;
+	auto* draw = ImGui::GetBackgroundDrawList();
+	auto* font = ImGui::GetFont();
+	const ImVec2 viewportMin(std::max(0.f, preview.viewportMin.x * display.x),
+		std::max(0.f, preview.viewportMin.y * display.y));
+	const ImVec2 viewportMax(std::min(display.x, preview.viewportMax.x * display.x),
+		std::min(display.y, preview.viewportMax.y * display.y));
+	for (const auto& label : preview.labels) {
+		const ImVec2 min(label.min.x * display.x, label.min.y * display.y);
+		const ImVec2 max(label.max.x * display.x, label.max.y * display.y);
+		const ImVec2 clipMin(std::max(min.x, viewportMin.x), std::max(min.y, viewportMin.y));
+		const ImVec2 clipMax(std::min(max.x, viewportMax.x), std::min(max.y, viewportMax.y));
+		const float visibleHeight = clipMax.y - clipMin.y;
+		const float width = clipMax.x - clipMin.x - 6.f;
+		const float size = std::min(std::clamp((max.y - min.y) * 0.28f, 10.f, 16.f), visibleHeight - 2.f);
+		if (width < 10.f || size < 8.f)
+			continue;
+
+		const char* text = label.name.c_str();
+		std::string clipped;
+		auto textSize = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
+		if (textSize.x > width) {
+			const float suffixWidth = font->CalcTextSizeA(size, FLT_MAX, 0.f, "...").x;
+			if (width <= suffixWidth)
+				continue;
+			const char* end = nullptr;
+			font->CalcTextSizeA(size, width - suffixWidth, 0.f, text, nullptr, &end);
+			if (end == text)
+				continue;
+			clipped.assign(text, end);
+			clipped += "...";
+			text = clipped.c_str();
+			textSize = font->CalcTextSizeA(size, FLT_MAX, 0.f, text);
+		}
+
+		const ImVec2 pos((clipMin.x + clipMax.x - textSize.x) * 0.5f,
+			(clipMin.y + clipMax.y - textSize.y) * 0.5f);
+		draw->PushClipRect(clipMin, clipMax, true);
+		Esp::DrawOutlinedText(draw, pos, RarityColorU32(label.rarity), font, size, text);
+		draw->PopClipRect();
+	}
+}
+
 static bool IsEnabled(RobRunWorld::Kind kind)
 {
 	const auto& world = ConfigInstance.World;
@@ -19,49 +76,49 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 	switch (kind)
 	{
 	case RobRunWorld::Kind::Container:
-		return world.Containers;
+		return world.LegacyContainers && world.Containers;
 	case RobRunWorld::Kind::LootNode:
-		return world.Containers || world.LootNodes;
+		return world.LegacyContainers && world.LootNodes;
 	case RobRunWorld::Kind::SafeDoor:
-		return world.Containers || world.SafeDoors;
+		return world.LegacyContainers && world.SafeDoors;
 	case RobRunWorld::Kind::StorageBox:
-		return world.Containers || world.StorageBoxes;
+		return world.LegacyContainers && world.StorageBoxes;
 	case RobRunWorld::Kind::Shelving:
-		return world.Containers || world.Shelvings;
+		return world.LegacyContainers && world.Shelvings;
 	case RobRunWorld::Kind::CollectionTable:
-		return world.Containers || world.CollectionTables;
+		return world.LegacyContainers && world.CollectionTables;
 	case RobRunWorld::Kind::PlotContainer:
-		return world.Containers || world.PlotContainers;
+		return world.LegacyContainers && world.PlotContainers;
 	case RobRunWorld::Kind::Loot:
 	case RobRunWorld::Kind::StaticLoot:
 	case RobRunWorld::Kind::RandomLoot:
-		return world.Loot;
+		return world.LegacyLoot && world.Loot;
 	case RobRunWorld::Kind::DroppedBag:
-		return world.Loot || world.DroppedBags;
+		return world.LegacyLoot && world.DroppedBags;
 	case RobRunWorld::Kind::VehicleLoot:
-		return world.Loot || world.VehicleLoots;
+		return world.LegacyLoot && world.VehicleLoots;
 	case RobRunWorld::Kind::Cargo:
-		return world.Loot || world.Cargos;
+		return world.LegacyCargo && world.Cargos;
 	case RobRunWorld::Kind::CargoBush:
-		return world.Loot || world.Cargos || world.CargoBushes;
+		return world.LegacyCargo && world.CargoBushes;
 	case RobRunWorld::Kind::CargoCrystal:
-		return world.Loot || world.Cargos || world.CargoCrystals;
+		return world.LegacyCargo && world.CargoCrystals;
 	case RobRunWorld::Kind::CargoDrug:
-		return world.Loot || world.Cargos || world.CargoDrugs;
+		return world.LegacyCargo && world.CargoDrugs;
 	case RobRunWorld::Kind::CargoCash:
-		return world.Loot || world.Cargos || world.CargoCash;
+		return world.LegacyCargo && world.CargoCash;
 	case RobRunWorld::Kind::CargoExchange:
-		return world.Loot || world.Cargos || world.CargoExchange;
+		return world.LegacyCargo && world.CargoExchange;
 	case RobRunWorld::Kind::CargoBox:
-		return world.Loot || world.Cargos || world.CargoBoxes;
+		return world.LegacyCargo && world.CargoBoxes;
 	case RobRunWorld::Kind::CargoGoods:
-		return world.Loot || world.Cargos || world.CargoGoods;
+		return world.LegacyCargo && world.CargoGoods;
 	case RobRunWorld::Kind::PlotLoot:
-		return world.Loot || world.PlotLoots;
+		return world.LegacyLoot && world.PlotLoots;
 	case RobRunWorld::Kind::FurnitureLoot:
-		return world.Loot || world.FurnitureLoots;
+		return world.LegacyLoot && world.FurnitureLoots;
 	case RobRunWorld::Kind::BuildingLoot:
-		return world.Loot || world.BuildingLoots;
+		return world.LegacyLoot && world.BuildingLoots;
 	case RobRunWorld::Kind::Vehicle:
 	case RobRunWorld::Kind::Car:
 	case RobRunWorld::Kind::Helicopter:
@@ -69,13 +126,13 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 	case RobRunWorld::Kind::Grenade:
 		return world.Grenades;
 	case RobRunWorld::Kind::CashLootNode:
-		return world.Valuables || world.CashLootNodes;
+		return world.LegacyValuables && world.CashLootNodes;
 	case RobRunWorld::Kind::SettlementCash:
-		return world.Valuables || world.SettlementCash;
+		return world.LegacyValuables && world.SettlementCash;
 	case RobRunWorld::Kind::MoneyWorkbench:
-		return world.Valuables || world.MoneyWorkbenches;
+		return world.LegacyValuables && world.MoneyWorkbenches;
 	case RobRunWorld::Kind::CryptoWorkbench:
-		return world.Valuables || world.CryptoWorkbenches;
+		return world.LegacyValuables && world.CryptoWorkbenches;
 	case RobRunWorld::Kind::SecurityAlarm:
 	case RobRunWorld::Kind::LocationSecurityAlarm:
 	case RobRunWorld::Kind::SecurityPanel:
@@ -84,7 +141,7 @@ static bool IsEnabled(RobRunWorld::Kind kind)
 	case RobRunWorld::Kind::FirstAidCabinet:
 		return world.FirstAidCabinets;
 	case RobRunWorld::Kind::VehicleTrunk:
-		return world.Containers || world.VehicleTrunks;
+		return world.LegacyContainers && world.VehicleTrunks;
 	case RobRunWorld::Kind::DrugWorkbench:
 		return world.DrugWorkbenches;
 	case RobRunWorld::Kind::DefenseBlock:
@@ -173,7 +230,186 @@ static ImU32 ColourFor(RobRunWorld::Kind kind)
 	return IM_COL32(255, 255, 255, 255);
 }
 
-void DrawWorldEntities()
+static const char* WorkbenchName(RobRunWorld::WorkbenchKind kind)
+{
+	switch (kind) {
+	case RobRunWorld::WorkbenchKind::GrowthTable: return "Growth Table";
+	case RobRunWorld::WorkbenchKind::LabFreezer: return "Lab Freezer";
+	case RobRunWorld::WorkbenchKind::ChemicalReactor: return "Chemical Reactor";
+	}
+	return "Workbench";
+}
+
+static std::string WorkbenchCargoLabel(const RobRunWorld::WorkbenchCargo& item)
+{
+	const auto* def = ConfigInstance.LootFilter.FindItemForEntity(RobRunWorld::Kind::Cargo, item.id);
+	const bool known = def && (item.id == def->id || item.id == def->labelMatch);
+	std::string label = std::to_string(item.count) + "x " + (known ? def->displayName : item.id);
+	const bool numberedVariant = item.id.starts_with("bush_growing_") ||
+		item.id.starts_with("bush_mature_") || item.id.starts_with("soft_crystal_") ||
+		item.id.starts_with("hard_crystal_");
+	if (known && numberedVariant && item.id.back() >= '1' && item.id.back() <= '3') {
+		label += " (Variant ";
+		label += item.id.back();
+		label += ')';
+	}
+
+	static constexpr const char* rarityNames[] = {
+		"", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Exotic"
+	};
+	if (item.rarity > 0 && item.rarity < (int)std::size(rarityNames)) {
+		label += " [";
+		label += rarityNames[item.rarity];
+		label += ']';
+	}
+	return label;
+}
+
+static void DrawWorkbench(ImDrawList* dl, ImVec2& cursor, ImFont* font, float fs,
+	const RobRunWorld::WorkbenchInfo& workbench, bool showContents)
+{
+	Esp::DrawOutlinedText(dl, cursor, IM_COL32(175, 220, 255, 255), font, fs,
+		WorkbenchName(workbench.kind));
+	cursor.y += fs + 2.f;
+	if (!showContents) return;
+
+	const auto drawContent = [&](const char* text, ImU32 color) {
+		Esp::DrawOutlinedText(dl, ImVec2(cursor.x + 10.f, cursor.y), color, font, fs, text);
+		cursor.y += fs + 2.f;
+	};
+	for (const auto& item : workbench.cargo) {
+		const std::string label = WorkbenchCargoLabel(item);
+		drawContent(label.c_str(), IM_COL32(235, 235, 235, 255));
+	}
+	if (!workbench.contentsAvailable)
+		drawContent(workbench.cargo.empty() ? "Contents unavailable" : "Some contents unavailable",
+			IM_COL32(255, 200, 110, 255));
+	else if (workbench.cargo.empty())
+		drawContent("Empty", IM_COL32(190, 190, 190, 255));
+}
+
+static int CapWorldDistance(int range)
+{
+	const int global = ConfigInstance.LootFilter.GlobalMaxDistance;
+	if (global <= 0) return range;
+	return range > 0 ? std::min(range, global) : global;
+}
+
+static Vector3 WorldRangeOrigin(const Vector3& player)
+{
+	if (RobRunMemory::Finite(player) && !player.IsZero()) return player;
+	RobRunCamera::CameraState camera{};
+	if (RobRunReader::GetFreshCamera(camera) && RobRunMemory::Finite(camera.position))
+		return camera.position;
+	return {};
+}
+
+void DrawGrenadePrediction(const RobRunReader::Snapshot* snapshot)
+{
+	if (!snapshot || !ConfigInstance.World.Enabled || !ConfigInstance.World.GrenadePrediction) return;
+	const auto preview = RobRunReader::GetGrenadePrediction();
+	if (!preview || preview->sessionGeneration != snapshot->sessionGeneration ||
+		GetTickCount64() - preview->stampMs >= RobRunGrenades::Preview::MaxAgeMs) return;
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	const int screenW = static_cast<int>(display.x);
+	const int screenH = static_cast<int>(display.y);
+	Matrix4x4 viewProjection{};
+	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH)) return;
+
+	const Vector3 localPosition = WorldRangeOrigin(snapshot->localPosition);
+	ImDrawList* draw = ImGui::GetBackgroundDrawList();
+	const float range = static_cast<float>(CapWorldDistance(0));
+	const bool limitDistance = range > 0.f && !localPosition.IsZero();
+	const ImU32 color = Esp::D2DColorToImU32(ConfigInstance.World.GrenadeColour);
+	const ImU32 outline = IM_COL32(0, 0, 0, 210);
+	auto project = [&](const CollisionBVH::Float3& point, Vector2& screen) {
+		return RobRunReader::ProjectWorld(viewProjection, { point.x, point.y, point.z }, screenW, screenH, screen);
+	};
+	auto drawLine = [&](const Vector2& from, const Vector2& to, float thickness) {
+		draw->AddLine(ImVec2(from.x, from.y), ImVec2(to.x, to.y), outline, thickness + 2.f);
+		draw->AddLine(ImVec2(from.x, from.y), ImVec2(to.x, to.y), color, thickness);
+	};
+	auto drawEffectRing = [&](const CollisionBVH::Float3& center, float radius, bool dashed) {
+		constexpr int segments = 48;
+		constexpr float radPerSegment = 6.2831853f / segments;
+		Vector2 previous{};
+		bool previousVisible = project({ center.x + radius, center.y + 0.04f, center.z }, previous);
+		for (int i = 1; i <= segments; ++i) {
+			const float angle = i * radPerSegment;
+			const CollisionBVH::Float3 point{ center.x + radius * std::cos(angle),
+				center.y + 0.04f, center.z + radius * std::sin(angle) };
+			Vector2 current{};
+			const bool visible = project(point, current);
+			if (visible && previousVisible && (!dashed || ((i - 1) / 2) % 2 == 0))
+				drawLine(previous, current, 1.5f);
+			previous = current;
+			previousVisible = visible;
+		}
+	};
+	auto drawPath = [&](const RobRunGrenades::Path& path, bool dashed, const char* marker, float radius) {
+		if (path.points.empty()) return;
+		Vector2 previous{};
+		bool previousVisible = project(path.points.front(), previous);
+		for (std::size_t i = 1; i < path.points.size(); ++i) {
+			Vector2 current{};
+			const bool visible = project(path.points[i], current);
+			const bool inDash = !dashed || ((i - 1) / 2) % 2 == 0;
+			if (visible && previousVisible && inDash) drawLine(previous, current, 2.f);
+			previous = current;
+			previousVisible = visible;
+		}
+		if (path.hitsSurface && radius > 0.f)
+			drawEffectRing(path.points.back(), radius, path.estimatedImpact);
+		if (path.hitsSurface && previousVisible && previous.x >= 0 && previous.y >= 0 &&
+			previous.x < screenW && previous.y < screenH) {
+			const ImVec2 center(previous.x, previous.y);
+			draw->AddCircleFilled(center, 8.f, outline);
+			draw->AddCircle(center, 8.f, color, 0, 1.5f);
+			const ImVec2 size = ImGui::CalcTextSize(marker);
+			draw->AddText(ImVec2(center.x - size.x * 0.5f, center.y - size.y * 0.5f),
+				IM_COL32_WHITE, marker);
+		}
+	};
+	for (const auto& trajectory : preview->trajectories) {
+		const auto& position = trajectory.flight.points.front();
+		if (limitDistance && Distance(localPosition, { position.x, position.y, position.z }) > range)
+			continue;
+		const bool reboundLanding = trajectory.rebound.hitsSurface;
+		drawPath(trajectory.flight, false, "1", reboundLanding ? 0.f : trajectory.effectRadius);
+		drawPath(trajectory.rebound, true, "2", reboundLanding ? trajectory.effectRadius : 0.f);
+	}
+}
+
+static std::unordered_set<int> DrawWorkbenchLabels(const RobRunWorld::PlotState& plots,
+	const Vector3& localPosition, const Matrix4x4& viewProjection, int screenW, int screenH,
+	ImDrawList* dl, ImFont* font)
+{
+	std::unordered_set<int> drawn;
+	if (!plots.valid || !RobRunMemory::Finite(localPosition) || localPosition.IsZero()) return drawn;
+
+	const auto& config = ConfigInstance.World;
+	const float range = static_cast<float>(CapWorldDistance(config.HouseMaxDistance));
+	for (const auto& plot : plots.plots) {
+		if (range > 0.f && Distance(plot.position, localPosition) > range) continue;
+		for (const auto& room : plot.outbuildings) {
+			for (const auto& workbench : room.workbenches) {
+				if (!workbench.hasPosition || (range > 0.f && Distance(workbench.position, localPosition) > range) ||
+					(workbench.entityId >= 0 && drawn.contains(workbench.entityId))) continue;
+				Vector2 screen;
+				if (!RobRunReader::ProjectWorld(viewProjection, workbench.position, screenW, screenH, screen) ||
+					screen.x < 0.f || screen.x >= screenW || screen.y < 0.f || screen.y >= screenH) continue;
+
+				ImVec2 cursor(screen.x + 6.f, screen.y);
+				DrawWorkbench(dl, cursor, font, static_cast<float>(config.FontSize), workbench, config.ShowWorkbenchContents);
+				if (workbench.entityId >= 0) drawn.insert(workbench.entityId);
+			}
+		}
+	}
+	return drawn;
+}
+
+void DrawWorldEntities(const RobRunReader::Snapshot* snapshot)
 {
 	if (!ConfigInstance.World.Enabled)
 		return;
@@ -184,28 +420,25 @@ void DrawWorldEntities()
 	if (screenW <= 0 || screenH <= 0)
 		return;
 
-	const auto snapshot = RobRunReader::GetSnapshot();
-	if (!snapshot || !snapshot->world)
+	if (!snapshot)
 		return;
 
 	Matrix4x4 viewProjection{};
 	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
 		return;
 
-	Vector3 localPos = snapshot->localPosition;
-	bool haveLocalPosition = RobRunMemory::Finite(localPos) && !localPos.IsZero();
-	const char* rangeOrigin = haveLocalPosition ? "player" : "unavailable";
-	if (!haveLocalPosition) {
-		RobRunCamera::CameraState camera{};
-		if (RobRunReader::GetFreshCamera(camera) && RobRunMemory::Finite(camera.position) &&
-			!camera.position.IsZero()) {
-			localPos = camera.position;
-			haveLocalPosition = true;
-			rangeOrigin = "camera";
-		}
-	}
+	const Vector3 localPos = WorldRangeOrigin(snapshot->localPosition);
+	const bool haveLocalPosition = !localPos.IsZero();
+	const char* rangeOrigin = !haveLocalPosition ? "unavailable" :
+		(RobRunMemory::Finite(snapshot->localPosition) && !snapshot->localPosition.IsZero() ? "player" : "camera");
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
 	ImFont* font = ImGui::GetFont();
+	std::unordered_set<int> detailedWorkbenches;
+	if (ConfigInstance.World.HouseEsp && ConfigInstance.World.ShowWorkbenchLabels && snapshot->plots) {
+		detailedWorkbenches = DrawWorkbenchLabels(*snapshot->plots, localPos,
+			viewProjection, screenW, screenH, dl, font);
+	}
+	if (!snapshot->world) return;
 
 	// What the snapshot actually contains, once every few seconds. This is how we
 	// tell "cargo is filtered out" from "cargo never reached the entity list".
@@ -280,6 +513,9 @@ void DrawWorldEntities()
 
 	for (const auto& entity : snapshot->world->entities)
 	{
+		if (entity.kind == RobRunWorld::Kind::DrugWorkbench && detailedWorkbenches.contains(entity.id))
+			continue;
+
 		const auto& lf = ConfigInstance.LootFilter;
 		const LootFilter::ItemDef* itemDef = nullptr;
 		const ItemSettings* itemCfg = nullptr;
@@ -288,7 +524,8 @@ void DrawWorldEntities()
 			entity.kind == RobRunWorld::Kind::Car ||
 			entity.kind == RobRunWorld::Kind::Helicopter ||
 			entity.kind == RobRunWorld::Kind::Vehicle;
-		if (isVehicleEntity && localVehicleId > 0 && entity.id == localVehicleId)
+		if (isVehicleEntity && (!ConfigInstance.World.Vehicles ||
+			(localVehicleId > 0 && entity.id == localVehicleId)))
 			continue;
 
 		if (lf.Enabled) {
@@ -299,7 +536,7 @@ void DrawWorldEntities()
 			}
 		}
 
-		// Which set of switches decides whether this entity draws:
+		// After the world and vehicle switches, choose the item rules:
 		//   filter off  -> the legacy per-kind switches
 		//   filter on   -> the catalog, and when nothing matched, the generic row
 		//                  for that kind. Never the legacy switches: those would
@@ -334,18 +571,10 @@ void DrawWorldEntities()
 		const float distSq = dx * dx + dy * dy + dz * dz;
 		const bool hasItemRange = itemCfg && !itemCfg->useGlobalDistance && itemCfg->maxDistance > 0;
 
-		// With the filter on, the filter owns the range: the legacy ESP distance
-		// has no vote, and an unset filter range means a sane default, not zero.
-		int maxDist = lf.Enabled
-			? (lf.GlobalMaxDistance > 0 ? lf.GlobalMaxDistance : 200)
-			: ConfigInstance.World.MaxDistance;
-		if (lf.Enabled) {
-			const int catMax = lf.ResolvedMaxDistance(itemDef ? itemDef->category : LootFilter::Category::Misc);
-			if (catMax > 0) maxDist = catMax;
-			// Per-item range only applies when the row opts out of the global one.
-			if (hasItemRange)
-				maxDist = itemCfg->maxDistance;
-		}
+		const int markerRange = !lf.Enabled ? ConfigInstance.World.MaxDistance :
+			(hasItemRange ? itemCfg->maxDistance :
+				lf.ResolvedMaxDistance(itemDef ? itemDef->category : LootFilter::Category::Misc));
+		const int maxDist = CapWorldDistance(markerRange);
 
 		// Contents of a trunk or table draw only when their row opts in.
 		if (entity.inTable &&
@@ -358,9 +587,8 @@ void DrawWorldEntities()
 
 		// Keep items with an explicit limit hidden until an origin is available.
 		const float maxDistF = static_cast<float>(maxDist);
-		const bool outsideRange = haveLocalPosition
-			? maxDist > 0 && distSq > maxDistF * maxDistF
-			: hasItemRange;
+		const bool outsideRange = maxDist > 0 &&
+			(!haveLocalPosition || distSq > maxDistF * maxDistF);
 		if (kProbes && (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0))) {
 			static std::unordered_set<std::string> logged;
 			const std::string key = std::to_string(entity.id) + ":" + std::to_string(maxDist) +
@@ -441,10 +669,7 @@ void DrawWorldEntities()
 		float iconPx = 0.f;
 		if (wantIcon) {
 			const char* spriteName = nullptr;
-			const bool isVehicle = entity.kind == RobRunWorld::Kind::Car ||
-				entity.kind == RobRunWorld::Kind::Helicopter ||
-				entity.kind == RobRunWorld::Kind::Vehicle;
-			if (isVehicle && !entity.label.empty() &&
+			if (isVehicleEntity && !entity.label.empty() &&
 				IconSprites::Get(entity.label.c_str()).srv) {
 				spriteName = entity.label.c_str();
 			} else if (itemDef && itemDef->iconSprite[0]) {
@@ -546,15 +771,7 @@ void DrawWorldEntities()
 				? itemDef->rarity
 				: LootFilter::Rarity::Common;
 			if (entity.rarity > 0) {
-				switch (entity.rarity) {
-				case 1: nameRarity = LootFilter::Rarity::Common; break;
-				case 2: nameRarity = LootFilter::Rarity::Uncommon; break;
-				case 3: nameRarity = LootFilter::Rarity::Rare; break;
-				case 4: nameRarity = LootFilter::Rarity::Epic; break;
-				case 5: nameRarity = LootFilter::Rarity::Legendary; break;
-				case 6: nameRarity = LootFilter::Rarity::Exotic; break;
-				default: nameRarity = LootFilter::Rarity::Legendary; break;
-				}
+				nameRarity = LootRarityFromGame(entity.rarity, LootFilter::Rarity::Legendary);
 			}
 			const ImU32 nameCol = filterOn ? RarityColorU32(nameRarity) : markerCol;
 			drawLine(label, nameCol);
@@ -623,7 +840,7 @@ static void DrawBuildingLine(ImDrawList* dl, ImVec2& cursor, float indent,
 	cursor.y += fs + 2.f;
 }
 
-void DrawHouseInfo()
+void DrawHouseInfo(const RobRunReader::Snapshot* snapshot)
 {
 	const auto& cfg = ConfigInstance.World;
 	if (!cfg.Enabled || !cfg.HouseEsp)
@@ -634,15 +851,16 @@ void DrawHouseInfo()
 	const int screenH = (int)display.y;
 	if (screenW <= 0 || screenH <= 0) return;
 
-	const auto snapshot = RobRunReader::GetSnapshot();
 	if (!snapshot || !snapshot->plots || !snapshot->plots->valid) return;
 
 	Matrix4x4 viewProjection{};
 	if (!RobRunReader::ResolveViewProjection(viewProjection, screenW, screenH))
 		return;
 
-	const Vector3 localPos = snapshot->localPosition;
+	const Vector3 localPos = WorldRangeOrigin(snapshot->localPosition);
 	const bool haveLocal = !localPos.IsZero();
+	const int range = CapWorldDistance(cfg.HouseMaxDistance);
+	if (range > 0 && !haveLocal) return;
 	const float cx = display.x * 0.5f;
 	const float cy = display.y * 0.5f;
 	ImDrawList* dl = ImGui::GetBackgroundDrawList();
@@ -659,8 +877,9 @@ void DrawHouseInfo()
 		const float dx = plot.position.x - localPos.x;
 		const float dy = plot.position.y - localPos.y;
 		const float dz = plot.position.z - localPos.z;
-		const int metres = (int)std::sqrt(dx * dx + dy * dy + dz * dz);
-		if (haveLocal && metres > cfg.HouseMaxDistance) continue;
+		const float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (range > 0 && distance > static_cast<float>(range)) continue;
+		const int metres = static_cast<int>(distance);
 
 		Vector2 screen;
 		if (!RobRunReader::ProjectWorld(viewProjection, plot.position, screenW, screenH, screen))
@@ -767,8 +986,22 @@ void DrawHouseInfo()
 		DrawBuildingLine(dl, cursor, indent, best->mainBuilding, font, fs);
 		if (!best->compoundWall.name.empty())
 			DrawBuildingLine(dl, cursor, indent, best->compoundWall, font, fs);
-		for (const auto& ob : best->outbuildings)
+		for (const auto& ob : best->outbuildings) {
 			DrawBuildingLine(dl, cursor, indent, ob, font, fs);
+			ImVec2 workbenchCursor(cursor.x + indent * 2.f, cursor.y);
+			for (const auto& workbench : ob.workbenches)
+				DrawWorkbench(dl, workbenchCursor, font, fs, workbench, cfg.ShowWorkbenchContents);
+			if (cfg.ShowWorkbenchContents && ob.workbenchesUnavailable) {
+				const char* status = ob.workbenches.empty() ? "Contents unavailable" : "Some contents unavailable";
+				Esp::DrawOutlinedText(dl, workbenchCursor, IM_COL32(255, 200, 110, 255), font, fs, status);
+				workbenchCursor.y += lineH;
+			} else if (cfg.ShowWorkbenchContents && ob.isWorkbenchRoom && ob.workbenches.empty()) {
+				Esp::DrawOutlinedText(dl, workbenchCursor, IM_COL32(190, 190, 190, 255), font, fs,
+					"No workbenches found");
+				workbenchCursor.y += lineH;
+			}
+			cursor.y = workbenchCursor.y;
+		}
 		cursor.y += 2.f;
 	}
 }

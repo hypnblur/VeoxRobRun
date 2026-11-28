@@ -2,7 +2,9 @@
 #include "Overlay.h"
 #include "OverlayNotify.h"
 #include "ConfigInstance.h"
+#include "Misc/Diag.h"
 #include "Input/InputManager.h"
+#include "../Aim/AimController.h"
 #include "ImGUI/imgui.h"
 #include "ImGUI/imgui_impl_dx11.h"
 #include "ImGUI/imgui_impl_win32.h"
@@ -11,11 +13,12 @@
 #include <chrono>
 #include <cstdio>
 #include <d3d11.h>
-#include <dxgi1_5.h>
+#include <dxgi.h>
 #include <dwmapi.h>
 #include <exception>
 #include <thread>
 #include <timeapi.h>
+#include <utility>
 #include <vector>
 #include <intrin.h>
 #pragma comment(lib, "d3d11.lib")
@@ -35,21 +38,22 @@ ID3D11Device* g_device = nullptr;
 ID3D11DeviceContext* g_context = nullptr;
 IDXGISwapChain* g_swapChain = nullptr;
 ID3D11RenderTargetView* g_rtv = nullptr;
-HANDLE g_frameLatencyWaitable = nullptr;
 HANDLE g_paceTimer = nullptr;
-UINT g_swapChainFlags = 0;
-bool g_flipModel = false;
-bool g_tearingSupported = false;
-bool g_swapChainTransparent = false;
+bool g_resizePending = false;
+bool g_compositionDirty = true;
+bool g_dwmAlpha = false;
 std::atomic<float> g_currentFps{ 0.f };
 
 std::vector<RECT> g_monitors;
 int g_appliedMonitor = -1;
 
 std::atomic<bool> g_menuOpen{ true };
-bool g_transparent = false;
 bool g_clickThrough = true;
 bool g_alwaysOnTop = true;
+constexpr int kTransparencyHotkeyId = 1;
+int g_registeredTransparencyVk = 0;
+int g_requestedTransparencyVk = 0;
+bool g_transparencyPressed = false;
 int g_frameCap = 240;
 std::atomic<bool> g_requestExit{ false };
 
@@ -87,28 +91,20 @@ void CleanupRenderTarget()
 
 void CleanupSwapChain()
 {
-	if (g_context) {
-		g_context->OMSetRenderTargets(0, nullptr, nullptr);
-		g_context->Flush();
-	}
 	CleanupRenderTarget();
-	if (g_frameLatencyWaitable) {
-		CloseHandle(g_frameLatencyWaitable);
-		g_frameLatencyWaitable = nullptr;
-	}
 	if (g_swapChain) {
 		g_swapChain->Release();
 		g_swapChain = nullptr;
 	}
-	g_swapChainFlags = 0;
-	g_flipModel = false;
-	g_tearingSupported = false;
+	if (g_context) {
+		g_context->ClearState();
+		g_context->Flush();
+	}
 }
 
-bool CreateSwapChainForMode(HWND hWnd, bool transparent)
+bool CreateOverlaySwapChain(HWND hWnd)
 {
 	if (!g_device) return false;
-	CleanupSwapChain();
 
 	IDXGIDevice1* dxgiDevice = nullptr;
 	if (FAILED(g_device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || !dxgiDevice)
@@ -123,101 +119,46 @@ bool CreateSwapChainForMode(HWND hWnd, bool transparent)
 	if (FAILED(hr) || !adapter)
 		return false;
 
-	IDXGIFactory2* factory2 = nullptr;
-	hr = adapter->GetParent(IID_PPV_ARGS(&factory2));
+	IDXGIFactory* factory = nullptr;
+	hr = adapter->GetParent(IID_PPV_ARGS(&factory));
 	adapter->Release();
-	if (FAILED(hr) || !factory2)
+	if (FAILED(hr) || !factory)
 		return false;
 
-	factory2->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER);
+	factory->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER);
 
 	RECT rc{};
 	GetClientRect(hWnd, &rc);
 	const UINT width = (rc.right > rc.left) ? static_cast<UINT>(rc.right - rc.left) : 0;
 	const UINT height = (rc.bottom > rc.top) ? static_cast<UINT>(rc.bottom - rc.top) : 0;
 
-	bool created = false;
-	if (!transparent) {
-		// Opaque overlay (e.g. DMA fuser): use Flip-Discard + Waitable Frame
-		// Latency + Allow Tearing so Windows can promote the overlay to Direct
-		// / Independent Flip and scan out immediately without DWM copy lag.
-		BOOL allowTearing = FALSE;
-		IDXGIFactory5* factory5 = nullptr;
-		if (SUCCEEDED(factory2->QueryInterface(IID_PPV_ARGS(&factory5))) && factory5) {
-			if (FAILED(factory5->CheckFeatureSupport(
-				DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing)))) {
-				allowTearing = FALSE;
-			}
-			factory5->Release();
-		}
+	// Both modes use DWM composition. Transparency changes the clear color
+	// and alpha without replacing or rebinding the window's swap chain.
+	DXGI_SWAP_CHAIN_DESC sd{};
+	sd.BufferCount = 2;
+	sd.BufferDesc.Width = width;
+	sd.BufferDesc.Height = height;
+	sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	sd.OutputWindow = hWnd;
+	sd.SampleDesc.Count = 1;
+	sd.Windowed = TRUE;
+	sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-		DXGI_SWAP_CHAIN_DESC1 sd1{};
-		sd1.Width = width;
-		sd1.Height = height;
-		sd1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		sd1.SampleDesc.Count = 1;
-		sd1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		sd1.BufferCount = 2;
-		sd1.Scaling = DXGI_SCALING_STRETCH;
-		sd1.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-		sd1.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-		sd1.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-		if (allowTearing)
-			sd1.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-
-		IDXGISwapChain1* sc1 = nullptr;
-		hr = factory2->CreateSwapChainForHwnd(g_device, hWnd, &sd1, nullptr, nullptr, &sc1);
-		if (FAILED(hr) && allowTearing) {
-			allowTearing = FALSE;
-			sd1.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
-			hr = factory2->CreateSwapChainForHwnd(g_device, hWnd, &sd1, nullptr, nullptr, &sc1);
-		}
-		if (SUCCEEDED(hr) && sc1) {
-			g_swapChain = sc1;
-			g_swapChainFlags = sd1.Flags;
-			g_flipModel = true;
-			g_tearingSupported = (allowTearing != FALSE);
-			IDXGISwapChain2* sc2 = nullptr;
-			if (SUCCEEDED(sc1->QueryInterface(IID_PPV_ARGS(&sc2))) && sc2) {
-				sc2->SetMaximumFrameLatency(1);
-				g_frameLatencyWaitable = sc2->GetFrameLatencyWaitableObject();
-				sc2->Release();
-			}
-			created = true;
-		}
+	hr = factory->CreateSwapChain(g_device, &sd, &g_swapChain);
+	factory->Release();
+	if (FAILED(hr) || !g_swapChain) {
+		VeoxDiag("Overlay swap chain creation failed (0x%08lX)", static_cast<unsigned long>(hr));
+		return false;
 	}
 
-	if (!created) {
-		// Transparent layered mode (or fallback on older/WARP drivers): keeps
-		// per-pixel DWM alpha via DwmExtendFrameIntoClientArea while still
-		// honoring SetMaximumFrameLatency(1) above.
-		DXGI_SWAP_CHAIN_DESC sd{};
-		sd.BufferCount = 2;
-		sd.BufferDesc.Width = width;
-		sd.BufferDesc.Height = height;
-		sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-		sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-		sd.OutputWindow = hWnd;
-		sd.SampleDesc.Count = 1;
-		sd.Windowed = TRUE;
-		sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-		sd.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-
-		hr = factory2->CreateSwapChain(g_device, &sd, &g_swapChain);
-		if (SUCCEEDED(hr) && g_swapChain) {
-			g_swapChainFlags = sd.Flags;
-			g_flipModel = false;
-			g_tearingSupported = false;
-			created = true;
-		}
-	}
-
-	factory2->Release();
-	if (!created) return false;
-
-	g_swapChainTransparent = transparent;
 	CreateRenderTarget();
-	return g_rtv != nullptr;
+	if (!g_rtv) {
+		VeoxDiag("Overlay swap chain had no render target");
+		CleanupSwapChain();
+		return false;
+	}
+	return true;
 }
 
 bool CreateDeviceD3D(HWND hWnd)
@@ -231,7 +172,7 @@ bool CreateDeviceD3D(HWND hWnd)
 			levels, 2, D3D11_SDK_VERSION, &g_device, &level, &g_context);
 	if (FAILED(hr)) return false;
 
-	return CreateSwapChainForMode(hWnd, g_transparent);
+	return CreateOverlaySwapChain(hWnd);
 }
 
 void CleanupDeviceD3D()
@@ -268,47 +209,66 @@ void ApplyOverlayMonitor(HWND hWnd)
 	g_appliedMonitor = index;
 }
 
-void ApplyOverlayPerPixelTransparency(HWND hwnd, bool transparent)
+void ApplyOverlayWindowChrome(HWND hwnd, const ChromeState& wanted)
 {
-	BOOL composition = FALSE;
-	if (SUCCEEDED(DwmIsCompositionEnabled(&composition)) && composition) {
-		MARGINS margins{};
-		if (transparent) {
-			margins.cxLeftWidth = margins.cxRightWidth = margins.cyTopHeight = margins.cyBottomHeight = -1;
-			// A WS_EX_LAYERED window is never drawn until it has layered
-			// attributes; without this the overlay (and menu) stays invisible.
-			// Opaque layer alpha keeps DWM's per-pixel alpha from the swap chain.
-			SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
-		}
-		DwmExtendFrameIntoClientArea(hwnd, &margins);
-	}
-	else if (transparent) {
-		SetLayeredWindowAttributes(hwnd, RGB(0, 0, 0), 0, LWA_COLORKEY);
-	}
+	LONG ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+	if (wanted.clickThrough) ex |= WS_EX_TRANSPARENT; else ex &= ~WS_EX_TRANSPARENT;
+	ex |= WS_EX_APPWINDOW;
+	ex &= ~WS_EX_TOOLWINDOW;
+	SetWindowLong(hwnd, GWL_EXSTYLE, ex);
+	SetWindowPos(hwnd, wanted.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 void SyncOverlayWindowChrome(HWND hwnd)
 {
 	const bool clickThrough = g_clickThrough && !g_menuOpen.load(std::memory_order_relaxed);
-	const ChromeState wanted{ g_transparent, clickThrough, g_alwaysOnTop, true };
-	if (g_appliedChrome.valid
-		&& g_appliedChrome.transparent == wanted.transparent
-		&& g_appliedChrome.clickThrough == wanted.clickThrough
-		&& g_appliedChrome.alwaysOnTop == wanted.alwaysOnTop)
+	const ChromeState wanted{ ConfigInstance.Overlay.Transparent, clickThrough, g_alwaysOnTop, true };
+	const bool modeChanged = wanted.transparent != g_appliedChrome.transparent;
+	const bool refreshComposition = std::exchange(g_compositionDirty, false);
+	if (refreshComposition) {
+		const MARGINS margins{ -1, -1, -1, -1 };
+		g_dwmAlpha = SUCCEEDED(DwmExtendFrameIntoClientArea(hwnd, &margins));
+	}
+	if (refreshComposition || (!g_dwmAlpha && modeChanged)) {
+		// Keep the layered window and the DWM frame in both modes. The color
+		// key is only needed on systems where extended DWM alpha is unavailable.
+		SetLayeredWindowAttributes(hwnd, 0, 255, !g_dwmAlpha && wanted.transparent ? LWA_COLORKEY : LWA_ALPHA);
+	}
+	if (g_swapChain && modeChanged)
+		VeoxDiag("Overlay transparency %s (%s)", wanted.transparent ? "on" : "off", Overlay::PresentModeName());
+
+	if (!g_appliedChrome.valid ||
+		g_appliedChrome.clickThrough != wanted.clickThrough ||
+		g_appliedChrome.alwaysOnTop != wanted.alwaysOnTop)
+		ApplyOverlayWindowChrome(hwnd, wanted);
+	g_appliedChrome = wanted;
+}
+
+void ApplyPendingResize(HWND hwnd)
+{
+	if (!g_resizePending)
+		return;
+	g_resizePending = false;
+	if (!g_swapChain || IsIconic(hwnd))
 		return;
 
-	LONG ex = GetWindowLong(hwnd, GWL_EXSTYLE);
-	if (wanted.transparent) ex |= WS_EX_LAYERED; else ex &= ~WS_EX_LAYERED;
-	if (wanted.clickThrough) ex |= WS_EX_TRANSPARENT; else ex &= ~WS_EX_TRANSPARENT;
-	ex |= WS_EX_APPWINDOW;
-	ex &= ~WS_EX_TOOLWINDOW;
-	SetWindowLong(hwnd, GWL_EXSTYLE, ex);
-	ApplyOverlayPerPixelTransparency(hwnd, wanted.transparent);
-	SetWindowPos(hwnd, wanted.alwaysOnTop ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-		SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
-	if (g_device && wanted.transparent != g_swapChainTransparent)
-		CreateSwapChainForMode(hwnd, wanted.transparent);
-	g_appliedChrome = wanted;
+	RECT rect{};
+	if (!GetClientRect(hwnd, &rect) || rect.right <= 0 || rect.bottom <= 0)
+		return;
+	const auto width = static_cast<UINT>(rect.right);
+	const auto height = static_cast<UINT>(rect.bottom);
+	DXGI_SWAP_CHAIN_DESC desc{};
+	if (g_rtv && SUCCEEDED(g_swapChain->GetDesc(&desc)) &&
+		desc.BufferDesc.Width == width && desc.BufferDesc.Height == height)
+		return;
+
+	g_context->OMSetRenderTargets(0, nullptr, nullptr);
+	CleanupRenderTarget();
+	const HRESULT result = g_swapChain->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
+	if (FAILED(result))
+		VeoxDiag("Overlay resize failed (0x%08lX)", static_cast<unsigned long>(result));
+	CreateRenderTarget();
 }
 
 void WaitForFrameCap()
@@ -372,7 +332,24 @@ struct KeyEdgeState {
 	bool wasDown = false;
 };
 
-bool KeyJustPressed(int vk, KeyEdgeState& state)
+// The overlay window and menu run on the same thread.
+bool g_hotkeyCapture = false;
+int g_capturedHotkey = Hotkey::Off;
+int g_waitingForHotkeyRelease = Hotkey::Off;
+
+int CaptureVirtualKey(WPARAM key, LPARAM data)
+{
+	const bool extended = (data & (1 << 24)) != 0;
+	if (key == VK_CONTROL) return extended ? VK_RCONTROL : VK_LCONTROL;
+	if (key == VK_MENU) return extended ? VK_RMENU : VK_LMENU;
+	if (key == VK_SHIFT) {
+		const auto scan = static_cast<UINT>((data >> 16) & 0xff);
+		return MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX) == VK_RSHIFT ? VK_RSHIFT : VK_LSHIFT;
+	}
+	return static_cast<int>(key);
+}
+
+bool KeyJustPressed(int vk, KeyEdgeState& state, bool pollHost = true)
 {
 	if (vk <= 0 || vk > 255) {
 		state.lastVk = 0;
@@ -384,77 +361,26 @@ bool KeyJustPressed(int vk, KeyEdgeState& state)
 		state.wasDown = false;
 	}
 	const bool dmaDown = Keyboard::IsReady() && Keyboard::IsKeyDown(static_cast<uint32_t>(vk));
-	const bool hostDown = (GetAsyncKeyState(vk) & 0x8000) != 0;
+	const bool hostDown = pollHost && (GetAsyncKeyState(vk) & 0x8000) != 0;
 	const bool down = dmaDown || hostDown;
 	const bool pressed = down && !state.wasDown;
 	state.wasDown = down;
 	return pressed;
 }
 
-static const int kMenuKeyVk[] = {
-	VK_INSERT, // 0: Insert
-	VK_HOME,   // 1: Home
-	VK_DELETE, // 2: Delete
-	VK_END,    // 3: End
-	VK_F11,    // 4: F11
-	VK_F12,    // 5: F12
-	VK_RSHIFT  // 6: Right Shift
-};
-
-static const int kPanicKeyVk[] = {
-	0,         // 0: None
-	VK_END,    // 1: End
-	VK_F8,     // 2: F8
-	VK_F9,     // 3: F9
-	VK_F10,    // 4: F10
-	VK_F11,    // 5: F11
-	VK_F12     // 6: F12
-};
-
-static int GetMenuKeyVk()
+void SyncTransparencyHotkey(HWND hwnd, int vk)
 {
-	int idx = ConfigInstance.Overlay.MenuKey;
-	if (idx >= 0 && idx < (int)(sizeof(kMenuKeyVk) / sizeof(kMenuKeyVk[0])))
-		return kMenuKeyVk[idx];
-	return VK_INSERT;
-}
-
-static int GetPanicKeyVk()
-{
-	int idx = ConfigInstance.Overlay.PanicKey;
-	if (idx >= 0 && idx < (int)(sizeof(kPanicKeyVk) / sizeof(kPanicKeyVk[0])))
-		return kPanicKeyVk[idx];
-	return 0;
-}
-
-static const int kReattachKeyVk[] = {
-	0,         // 0: Off
-	VK_F1,     // 1: F1
-	VK_F2,     // 2: F2
-	VK_F3,     // 3: F3
-	VK_F4,     // 4: F4
-	VK_F5,     // 5: F5
-	VK_F6,     // 6: F6
-	VK_F7,     // 7: F7
-	VK_F8,     // 8: F8
-	VK_F9,     // 9: F9
-	VK_F10,    // 10: F10
-	VK_F11,    // 11: F11
-	VK_F12,    // 12: F12
-	VK_INSERT, // 13: Insert
-	VK_HOME,   // 14: Home
-	VK_END,    // 15: End
-	VK_DELETE, // 16: Delete
-	VK_PRIOR,  // 17: Page Up
-	VK_NEXT    // 18: Page Down
-};
-
-static int GetReattachKeyVk()
-{
-	int idx = ConfigInstance.Overlay.ReattachKey;
-	if (idx >= 0 && idx < (int)(sizeof(kReattachKeyVk) / sizeof(kReattachKeyVk[0])))
-		return kReattachKeyVk[idx];
-	return 0;
+	if (g_requestedTransparencyVk == vk)
+		return;
+	g_requestedTransparencyVk = vk;
+	g_transparencyPressed = false;
+	if (g_registeredTransparencyVk)
+		UnregisterHotKey(hwnd, kTransparencyHotkeyId);
+	g_registeredTransparencyVk = 0;
+	if (vk && RegisterHotKey(hwnd, kTransparencyHotkeyId, MOD_NOREPEAT, vk))
+		g_registeredTransparencyVk = vk;
+	else if (vk)
+		VeoxDiag("Overlay transparency hotkey registration unavailable. Polling key %d.", vk);
 }
 
 void DrawFps()
@@ -511,7 +437,7 @@ void DrawDebugOverlay()
 		(int)g_monitors.size());
 	line(buf, white);
 	std::snprintf(buf, sizeof(buf), "Menu: %s   Transparent: %s   Click-through: %s",
-		g_menuOpen ? "open" : "closed", g_transparent ? "on" : "off",
+		g_menuOpen ? "open" : "closed", g_appliedChrome.transparent ? "on" : "off",
 		(g_clickThrough && !g_menuOpen) ? "on" : "off");
 	line(buf, white);
 	std::snprintf(buf, sizeof(buf), "Always on top: %s", g_alwaysOnTop ? "on" : "off");
@@ -535,8 +461,25 @@ namespace Overlay {
 
 bool MenuOpen() { return g_menuOpen.load(std::memory_order_acquire); }
 
+void BeginHotkeyCapture()
+{
+	g_capturedHotkey = Hotkey::Off;
+	g_hotkeyCapture = true;
+}
+
+bool HotkeyCaptureActive() { return g_hotkeyCapture; }
+int TakeCapturedHotkey() { return std::exchange(g_capturedHotkey, Hotkey::Off); }
+
+void EndHotkeyCapture(int binding)
+{
+	g_hotkeyCapture = false;
+	g_waitingForHotkeyRelease = binding != Hotkey::Off ? binding : g_capturedHotkey;
+	g_capturedHotkey = Hotkey::Off;
+}
+
 void SetMenuOpen(bool open)
 {
+	if (!open && g_hotkeyCapture) EndHotkeyCapture();
 	g_menuOpen.store(open, std::memory_order_release);
 	g_appliedChrome.valid = false; // click-through depends on menu state
 }
@@ -559,13 +502,11 @@ void TogglePanic()
 	}
 }
 
-bool Transparent() { return g_transparent; }
+bool Transparent() { return ConfigInstance.Overlay.Transparent; }
 
 void SetTransparent(bool on)
 {
-	g_transparent = on;
 	ConfigInstance.Overlay.Transparent = on;
-	g_appliedChrome.valid = false;
 }
 
 bool ClickThrough() { return g_clickThrough; }
@@ -596,9 +537,7 @@ void SetFrameCap(int fps)
 
 const char* PresentModeName()
 {
-	if (g_flipModel)
-		return g_tearingSupported ? "FLIP+TEAR" : "FLIP";
-	return g_swapChainTransparent ? "DISCARD(transparent)" : "DISCARD";
+	return Transparent() ? "DISCARD(transparent)" : "DISCARD";
 }
 
 float CurrentFps()
@@ -642,29 +581,56 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 
 static LRESULT CALLBACK OverlayWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+	const bool keyboardMessage = message == WM_KEYDOWN || message == WM_SYSKEYDOWN ||
+		message == WM_KEYUP || message == WM_SYSKEYUP;
+	if (g_hotkeyCapture) {
+		if (message == WM_KILLFOCUS) {
+			Overlay::EndHotkeyCapture();
+		} else if (keyboardMessage) {
+			const bool fresh = ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) &&
+				(lParam & (1LL << 30)) == 0) || (message == WM_KEYUP && wParam == VK_SNAPSHOT);
+			const int key = CaptureVirtualKey(wParam, lParam);
+			if (fresh && !g_capturedHotkey && Hotkey::IsKeyboard(key)) g_capturedHotkey = key;
+			return 0;
+		} else if (message == WM_CHAR || message == WM_SYSCHAR) {
+			return 0;
+		} else if (message == WM_HOTKEY && wParam == kTransparencyHotkeyId) {
+			if (!g_capturedHotkey) g_capturedHotkey = HIWORD(lParam);
+			return 0;
+		}
+	}
+	if (keyboardMessage && g_waitingForHotkeyRelease != Hotkey::Off &&
+		CaptureVirtualKey(wParam, lParam) == g_waitingForHotkeyRelease)
+		return 0;
 	if (ImGui_ImplWin32_WndProcHandler(hWnd, message, wParam, lParam)) return true;
 	switch (message)
 	{
-	case WM_SIZE:
-		if (g_device && g_swapChain && wParam != SIZE_MINIMIZED) {
-			const UINT w = LOWORD(lParam);
-			const UINT h = HIWORD(lParam);
-			if (w > 0 && h > 0) {
-				if (g_context) g_context->OMSetRenderTargets(0, nullptr, nullptr);
-				CleanupRenderTarget();
-				if (SUCCEEDED(g_swapChain->ResizeBuffers(0, w, h, DXGI_FORMAT_UNKNOWN, g_swapChainFlags)))
-					CreateRenderTarget();
-			}
+	case WM_HOTKEY:
+		if (wParam == kTransparencyHotkeyId && g_registeredTransparencyVk &&
+			HIWORD(lParam) == g_registeredTransparencyVk) {
+			g_transparencyPressed = !g_transparencyPressed;
+			return 0;
 		}
+		break;
+	case WM_SYSKEYDOWN:
+	case WM_SYSKEYUP:
+		if (wParam == VK_F10 && g_requestedTransparencyVk == VK_F10)
+			return 0; // F10 is an overlay command here. Skip the system menu.
+		break;
+	case WM_DWMCOMPOSITIONCHANGED:
+		g_compositionDirty = true;
+		return 0;
+	case WM_SIZE:
+		g_resizePending = wParam != SIZE_MINIMIZED;
 		return 0;
 	case WM_DISPLAYCHANGE:
 		DetectMonitors();
-		ApplyOverlayMonitor(hWnd);
 		return 0;
 	case WM_CLOSE:
 		DestroyWindow(hWnd);
 		return 0;
 	case WM_DESTROY:
+		SyncTransparencyHotkey(hWnd, 0);
 		PostQuitMessage(0);
 		return 0;
 	}
@@ -677,11 +643,11 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	const Callbacks& callbacks)
 {
 	g_status = callbacks.status;
-	g_transparent = ConfigInstance.Overlay.Transparent;
 	g_clickThrough = ConfigInstance.Overlay.ClickThroughWhenClosed;
 	g_alwaysOnTop = ConfigInstance.Overlay.AlwaysOnTop;
 	g_frameCap = std::clamp(ConfigInstance.Overlay.FrameCap, 0, 1000);
 	g_appliedChrome.valid = false;
+	g_compositionDirty = true;
 
 	ImGui_ImplWin32_EnableDpiAwareness();
 
@@ -700,7 +666,7 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 	}
 
 	DetectMonitors();
-	HWND hWnd = CreateWindowEx(WS_EX_APPWINDOW, windowClass, title, WS_POPUP,
+	HWND hWnd = CreateWindowEx(WS_EX_APPWINDOW | WS_EX_LAYERED, windowClass, title, WS_POPUP,
 		0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN),
 		NULL, NULL, instance, NULL);
 	if (!hWnd)
@@ -711,6 +677,8 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		return -1;
 	}
 
+	ApplyOverlayMonitor(hWnd);
+	SyncOverlayWindowChrome(hWnd);
 	if (!CreateDeviceD3D(hWnd))
 	{
 		MessageBoxW(nullptr, L"Could not create the Direct3D 11 device.",
@@ -721,8 +689,6 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		return -1;
 	}
 
-	ApplyOverlayMonitor(hWnd);
-	SyncOverlayWindowChrome(hWnd);
 	ShowWindow(hWnd, SW_SHOWDEFAULT);
 	UpdateWindow(hWnd);
 
@@ -769,6 +735,8 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
 
 	KeyEdgeState menuEdge{};
+	KeyEdgeState transparencyEdge{};
+	KeyEdgeState exitEdge{};
 	KeyEdgeState panicEdge{};
 	KeyEdgeState reattachEdge{};
 #ifdef _DEBUG
@@ -788,14 +756,30 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		if (msg.message == WM_QUIT)
 			break;
 
-		if (g_requestExit.exchange(false))
+		const auto& config = ConfigInstance.Overlay;
+		// Keep actions paused through the release frame and still sample
+		// their edges so an already-held key cannot fire when capture ends.
+		const bool suppressHotkeys = g_hotkeyCapture || g_waitingForHotkeyRelease != Hotkey::Off ||
+			(MenuOpen() && GetForegroundWindow() == hWnd && ImGui::GetIO().WantTextInput);
+		if (g_waitingForHotkeyRelease != Hotkey::Off && !Aim::IsKeyHeld(g_waitingForHotkeyRelease))
+			g_waitingForHotkeyRelease = Hotkey::Off;
+		const int exitVk = config.ExitBinding;
+		if (g_requestExit.exchange(false) || (KeyJustPressed(exitVk, exitEdge) && !suppressHotkeys))
 		{
 			DestroyWindow(hWnd);
 			continue;
 		}
 
-		const int menuVk = GetMenuKeyVk();
-		if (KeyJustPressed(menuVk, menuEdge)) {
+		const int configuredTransparencyVk = config.TransparencyBinding;
+		const int transparencyVk = configuredTransparencyVk != exitVk ? configuredTransparencyVk : 0;
+		SyncTransparencyHotkey(hWnd, transparencyVk == VK_F10 && !suppressHotkeys ? VK_F10 : Hotkey::Off);
+		const bool polledTransparency = KeyJustPressed(transparencyVk, transparencyEdge, !g_registeredTransparencyVk);
+		if ((std::exchange(g_transparencyPressed, false) || polledTransparency) && !suppressHotkeys)
+			SetTransparent(!Transparent());
+
+		// On a shared binding, handle only the highest-priority action.
+		const int menuVk = config.MenuBinding;
+		if (KeyJustPressed(menuVk, menuEdge) && !suppressHotkeys && menuVk != transparencyVk) {
 			if (ConfigInstance.Overlay.PanicMode) {
 				TogglePanic();
 				SetMenuOpen(true);
@@ -804,27 +788,23 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 			}
 		}
 
-		const int panicVk = GetPanicKeyVk();
-		if (panicVk > 0 && KeyJustPressed(panicVk, panicEdge))
+		const int panicVk = config.PanicBinding;
+		if (KeyJustPressed(panicVk, panicEdge) && !suppressHotkeys && panicVk != transparencyVk && panicVk != menuVk)
 			TogglePanic();
 
-		const int reattachVk = GetReattachKeyVk();
-		if (reattachVk > 0 && KeyJustPressed(reattachVk, reattachEdge))
+		const int reattachVk = config.ReattachBinding;
+		if (KeyJustPressed(reattachVk, reattachEdge) && !suppressHotkeys &&
+			reattachVk != transparencyVk && reattachVk != menuVk && reattachVk != panicVk)
 			RequestReattach();
 
 #ifdef _DEBUG
-		if (KeyJustPressed(VK_DELETE, debugEdge))
+		if (KeyJustPressed(VK_DELETE, debugEdge) && !suppressHotkeys)
 			g_debugVisible = !g_debugVisible;
 #endif
 
 		ApplyOverlayMonitor(hWnd);
 		SyncOverlayWindowChrome(hWnd);
-
-		// Wait until the previous frame's slot is free BEFORE sampling the
-		// camera and building draw lists, so projected positions reflect the
-		// latest camera at the instant of submission.
-		if (g_frameLatencyWaitable)
-			WaitForSingleObjectEx(g_frameLatencyWaitable, 100, TRUE);
+		ApplyPendingResize(hWnd);
 
 		if (callbacks.tick) callbacks.tick();
 
@@ -850,12 +830,17 @@ int Run(HINSTANCE instance, const wchar_t* title, const wchar_t* windowClass,
 		if (g_rtv && g_context && g_swapChain)
 		{
 			const D2D1::ColorF& bg = ConfigInstance.Overlay.BackgroundColour;
-			const float clear[4] = { bg.r, bg.g, bg.b, g_transparent ? 0.f : 1.f };
+			const bool transparent = g_appliedChrome.transparent;
+			const float clear[4] = {
+				transparent ? 0.f : bg.r,
+				transparent ? 0.f : bg.g,
+				transparent ? 0.f : bg.b,
+				transparent ? 0.f : 1.f
+			};
 			g_context->OMSetRenderTargets(1, &g_rtv, nullptr);
 			g_context->ClearRenderTargetView(g_rtv, clear);
 			ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-			const UINT presentFlags = (g_flipModel && g_tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0;
-			g_swapChain->Present(0, presentFlags);
+			g_swapChain->Present(0, 0);
 		}
 		WaitForFrameCap();
 	}

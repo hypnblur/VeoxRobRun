@@ -65,6 +65,9 @@
     <ClCompile Include="SDK\WorldEntities.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SDK\GrenadePrediction.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="SDK\SkinChanger.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -126,6 +129,27 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ImGUI\imgui_impl_win32.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Config\ConfigFile.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Aim\AimController.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Overlay\Backdrop.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Esp\WeaponSprites.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\imgui_edited.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Input\DeviceBackend.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Input\DeviceSession.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -220,6 +244,9 @@
     <ClInclude Include="SDK\WorldEntities.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SDK\GrenadePrediction.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="SDK\SkinChanger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -262,6 +289,9 @@
     <ClInclude Include="Input\CtlState.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Input\Hotkey.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Input\HidTable.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -293,6 +323,45 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ImGUI\imstb_truetype.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Config\ConfigFile.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Config\AimConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Config\RadarConfig.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Esp\WeaponSprites.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Overlay\Backdrop.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Misc\Diag.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\imgui_edited.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\imgui_settings.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\font.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\textures.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Input\AimMotion.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Input\DeviceSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Aim\AimController.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -1351,29 +1351,15 @@ static bool BuildPoseOutput(const RigLayout& layout, std::vector<TRS>& local,
         points->hasChest = anchorOk(layout.chest);
         points->hasPelvis = anchorOk(layout.pelvis);
         points->valid = points->hasHead || points->hasNeck || points->hasChest || points->hasPelvis;
-        if (points->valid) {
-            auto fill = [&](int idx, Vec& dst) {
-                if (anchorOk(idx)) dst = world[idx];
-            };
-            fill(layout.head, points->head);
-            fill(layout.neck, points->neck);
-            fill(layout.chest, points->chest);
-            fill(layout.pelvis, points->pelvis);
-            fill(layout.leftShoulder, points->leftShoulder);
-            fill(layout.leftElbow, points->leftElbow);
-            fill(layout.leftHand, points->leftHand);
-            fill(layout.rightShoulder, points->rightShoulder);
-            fill(layout.rightElbow, points->rightElbow);
-            fill(layout.rightHand, points->rightHand);
-            fill(layout.leftHip, points->leftHip);
-            fill(layout.leftKnee, points->leftKnee);
-            fill(layout.leftFoot, points->leftFoot);
-            fill(layout.rightHip, points->rightHip);
-            fill(layout.rightKnee, points->rightKnee);
-            fill(layout.rightFoot, points->rightFoot);
+        for (int b = 0; b < kAimBoneCount; ++b) {
+            const auto& bone = kAimBones[b];
+            const int index = layout.*bone.index;
+            if (!anchorOk(index)) continue;
+            points->*bone.point = world[index];
+            points->available |= 1u << b;
         }
     }
-    return !out.empty() || (points && points->valid);
+    return !out.empty() || (points && points->available != 0);
 }
 
 bool SampleLayout(const RigLayout& layout, const Read& read,

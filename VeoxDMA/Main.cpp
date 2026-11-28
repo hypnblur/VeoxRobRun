@@ -233,6 +233,8 @@ void RequestReattach()
 	g_pendingReattach.store(true);
 }
 
+static bool g_ignoreBvhSurfacePressed = false;
+
 static void TickOverlay()
 {
 	if (g_pendingReattach.exchange(false))
@@ -263,6 +265,10 @@ static void TickOverlay()
 
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
 	Aim::SetDisplaySize(display.x, display.y);
+	RobRunReader::SetLootPreviewEnabled(ConfigInstance.World.UnrevealedLootLabels &&
+		!ConfigInstance.Overlay.PanicMode);
+	RobRunReader::SetGrenadePredictionEnabled(ConfigInstance.World.Enabled &&
+		ConfigInstance.World.GrenadePrediction && !ConfigInstance.Overlay.PanicMode);
 	Radar::ProcessPendingMap();
 	// Camera polling runs on RobRunReader's dedicated high-priority thread so
 	// the render thread never stalls waiting on DMA transactions.
@@ -270,17 +276,17 @@ static void TickOverlay()
 	if (g_pendingAttachToast.exchange(false))
 		Overlay::Notify("Attached to ROB RUN", 0xFF8CDC64u, 3.f);
 
-	// Battle mode suppresses world ESP/radar/money HUD so only player ESP is
-	// shown. Supports Hold (0: active only while key is held) and Toggle (1:
+	// Battle mode suppresses world markers, radar, and the money HUD.
+	// Supports Hold (0: active only while key is held) and Toggle (1:
 	// flips on rising edge). Ignore while the menu is open to avoid accidental
 	// triggers when changing the binding.
 	static bool battleKeyWasHeld = false;
 	if (!Overlay::MenuOpen()) {
-		const int key = ConfigInstance.Overlay.BattleModeKey;
-		const bool validKey = key >= 0 && key < Aim::KeyCount() && !Aim::IsAlwaysKey(key);
+		const int key = ConfigInstance.Overlay.BattleModeBinding;
+		const bool validKey = key != Hotkey::Off;
 		const bool held = validKey && Aim::IsKeyHeld(key);
 		if (ConfigInstance.Overlay.BattleModeBehavior == 0) {
-			// Hold mode: active strictly while BattleModeKey is held
+			// Hold mode: active strictly while the binding is held.
 			if (validKey)
 				ConfigInstance.Overlay.BattleMode = held;
 		} else {
@@ -288,7 +294,7 @@ static void TickOverlay()
 			if (held && !battleKeyWasHeld) {
 				ConfigInstance.Overlay.BattleMode = !ConfigInstance.Overlay.BattleMode;
 				Overlay::Notify(ConfigInstance.Overlay.BattleMode
-					? "Battle Mode: ON (player ESP only)"
+					? "Battle Mode: ON"
 					: "Battle Mode: OFF", 0xFF8CDC64u, 2.f);
 			}
 		}
@@ -299,10 +305,20 @@ static void TickOverlay()
 		battleKeyWasHeld = false;
 	}
 
-	// Persist settings whenever the menu closes, so a user does not have to
-	// remember a separate save step. Shutdown saves again as a backstop.
-	static bool wasMenuOpen = false;
 	const bool menuOpen = Overlay::MenuOpen();
+	static int previousSurfaceBinding = Hotkey::Off;
+	static bool surfaceKeyWasHeld = false;
+	const int surfaceBinding = ConfigInstance.Player.IgnoreBvhSurfaceBinding;
+	const bool surfaceKeyHeld = Aim::IsKeyHeld(surfaceBinding);
+	const bool editingInput = menuOpen && (Overlay::HotkeyCaptureActive() || ImGui::GetIO().WantTextInput);
+	g_ignoreBvhSurfacePressed = ConfigInstance.Player.ShowBvh && !editingInput &&
+		!ConfigInstance.Overlay.PanicMode && surfaceBinding == previousSurfaceBinding &&
+		surfaceKeyHeld && !surfaceKeyWasHeld;
+	previousSurfaceBinding = surfaceBinding;
+	surfaceKeyWasHeld = surfaceKeyHeld;
+
+	// Persist settings whenever the menu closes, with shutdown as a backstop.
+	static bool wasMenuOpen = false;
 	if (wasMenuOpen && !menuOpen)
 		ConfigFile::Save();
 	wasMenuOpen = menuOpen;
@@ -433,11 +449,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int)
 					DrawPlayers();
 					SetStage("draw:bvh");
 					DrawBvhDebug();
-					if (!ConfigInstance.Overlay.BattleMode) {
+					if (g_ignoreBvhSurfacePressed && IgnoreHighlightedBvhSurface())
+						Overlay::Notify("Surface ignored for VisCheck", 0xFF41C5FFu, 2.f);
+					SetStage("draw:grenades");
+					DrawGrenadePrediction(frameSnap.get());
+					const bool battleMode = ConfigInstance.Overlay.BattleMode;
+					if (!battleMode) {
 						SetStage("draw:world");
-						DrawWorldEntities();
+						DrawWorldEntities(frameSnap.get());
 						SetStage("draw:house");
-						DrawHouseInfo();
+						DrawHouseInfo(frameSnap.get());
+					}
+					SetStage("draw:loot-preview");
+					DrawUnrevealedLootLabels(frameSnap.get());
+					if (!battleMode) {
 						SetStage("draw:radar");
 						Radar::Draw();
 						SetStage("draw:fullmap");

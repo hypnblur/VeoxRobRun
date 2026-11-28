@@ -11,7 +11,60 @@
 namespace Skeleton {
 
 using Vec = Vector3;
-struct BoneSegment { Vec a, b; bool visible = true; };
+struct BoneSegment {
+    Vec a, b;
+    bool visible = true;
+    bool startsVisible = true;
+    // Each split is a fraction along a -> b. A split at 1 means the colour
+    // stays the same through the end of the segment.
+    float visibilitySplits[2] = { 1.f, 1.f };
+};
+
+template <typename IsVisible>
+void SampleBoneVisibility(BoneSegment& segment, IsVisible isVisible)
+{
+    const bool samples[] = {
+        isVisible(segment.a),
+        isVisible(Vec::Lerp(segment.a, segment.b, 0.5f)),
+        isVisible(segment.b)
+    };
+    segment.visible = samples[0] || samples[1] || samples[2];
+    segment.startsVisible = samples[0];
+    segment.visibilitySplits[0] = 1.f;
+    segment.visibilitySplits[1] = 1.f;
+
+    int splitCount = 0;
+    for (int half = 0; half < 2; ++half) {
+        if (samples[half] == samples[half + 1]) continue;
+        float lo = half * 0.5f;
+        float hi = lo + 0.5f;
+        for (int step = 0; step < 2; ++step) {
+            const float mid = (lo + hi) * 0.5f;
+            if (isVisible(Vec::Lerp(segment.a, segment.b, mid)) == samples[half])
+                lo = mid;
+            else
+                hi = mid;
+        }
+        segment.visibilitySplits[splitCount++] = (lo + hi) * 0.5f;
+    }
+}
+
+inline bool IsValidBone(const Vec& point, const Vec& root, float maxDist = 3.0f)
+{
+    if (std::abs(point.x) < 0.1f && std::abs(point.y) < 0.1f && std::abs(point.z) < 0.1f)
+        return false;
+    if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z))
+        return false;
+    return Distance(point, root) <= maxDist;
+}
+
+inline bool IsValidBoneSegment(const Vec& a, const Vec& b, const Vec& root, float maxDist = 3.0f)
+{
+    if (!IsValidBone(a, root, maxDist) || !IsValidBone(b, root, maxDist))
+        return false;
+    const float len = Distance(a, b);
+    return len >= 0.02f && len <= 1.25f;
+}
 
 // Full local pose of one bone. Animator-activity detection needs the rotation:
 // Unity skeletal animation changes local rotations while local positions often
@@ -22,8 +75,7 @@ struct BoneLocal {
     Vec scale{1.f, 1.f, 1.f};
 };
 
-// Named aim points resolved from the same pose as the skeleton. Only valid when
-// the rig exposed all four anchors.
+// Named aim points resolved from the same pose as the skeleton.
 struct BonePoints {
     Vec head{}, neck{}, chest{}, pelvis{};
     Vec leftShoulder{}, leftElbow{}, leftHand{};
@@ -31,6 +83,7 @@ struct BonePoints {
     Vec leftHip{}, leftKnee{}, leftFoot{};
     Vec rightHip{}, rightKnee{}, rightFoot{};
     bool hasHead = false, hasNeck = false, hasChest = false, hasPelvis = false, valid = false;
+    std::uint32_t available = 0;
 };
 
 using ReadFn = std::function<bool(uint64_t, void*, std::size_t)>;
@@ -57,6 +110,35 @@ struct RigLayout {
     std::int32_t leftHip = -1, leftKnee = -1, leftFoot = -1;
     std::int32_t rightHip = -1, rightKnee = -1, rightFoot = -1;
 };
+
+struct AimBone {
+    const char* name;
+    Vec BonePoints::*point;
+    std::int32_t RigLayout::*index;
+};
+
+// Keep the order stable. Aim profiles store one bit per entry.
+inline constexpr AimBone kAimBones[] = {
+    { "Head", &BonePoints::head, &RigLayout::head },
+    { "Neck", &BonePoints::neck, &RigLayout::neck },
+    { "Chest (Spine)", &BonePoints::chest, &RigLayout::chest },
+    { "Pelvis", &BonePoints::pelvis, &RigLayout::pelvis },
+    { "Left Shoulder", &BonePoints::leftShoulder, &RigLayout::leftShoulder },
+    { "Left Elbow", &BonePoints::leftElbow, &RigLayout::leftElbow },
+    { "Left Hand", &BonePoints::leftHand, &RigLayout::leftHand },
+    { "Right Shoulder", &BonePoints::rightShoulder, &RigLayout::rightShoulder },
+    { "Right Elbow", &BonePoints::rightElbow, &RigLayout::rightElbow },
+    { "Right Hand", &BonePoints::rightHand, &RigLayout::rightHand },
+    { "Left Hip", &BonePoints::leftHip, &RigLayout::leftHip },
+    { "Left Knee", &BonePoints::leftKnee, &RigLayout::leftKnee },
+    { "Left Foot", &BonePoints::leftFoot, &RigLayout::leftFoot },
+    { "Right Hip", &BonePoints::rightHip, &RigLayout::rightHip },
+    { "Right Knee", &BonePoints::rightKnee, &RigLayout::rightKnee },
+    { "Right Foot", &BonePoints::rightFoot, &RigLayout::rightFoot },
+};
+inline constexpr int kAimBoneCount = sizeof(kAimBones) / sizeof(kAimBones[0]);
+inline constexpr std::uint32_t kDefaultAimBones = 0x0f;
+inline constexpr std::uint32_t kAllAimBones = (1u << kAimBoneCount) - 1u;
 
 // Live transform chain of one character, re-navigated from the entity view.
 // The view is the per-entity registry entry (BattleEntitiesUpdater ->

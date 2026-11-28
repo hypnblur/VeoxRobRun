@@ -11,6 +11,9 @@
 #include "SkeletonExtractor.h"
 #include "CollisionBVH.h"
 
+namespace LootFilter { enum class Rarity : std::uint8_t; }
+namespace RobRunGrenades { struct Preview; }
+
 namespace RobRunReader {
 
 struct EntityData {
@@ -41,6 +44,7 @@ struct EntityData {
     // "Civilian", "Hubber"). Stored as text because the game's role ids are
     // hashed enums, not small indices.
     std::string roleName;
+    bool isCivilianRole = false; // Explicit role identity, independent of the display label.
     float criticalHealth = -1.f;
     std::wstring nickname;
     std::wstring clanTag;
@@ -63,13 +67,14 @@ struct EntityData {
     bool isAimingAtLocal = false;
     bool isKnockedDown = false;
     bool isKnockedOut = false;
+    bool aimKnocked = false; // Timed knock or knockout phase corroborated by pose or cuffs.
     bool isSurrendered = false;
     bool isHandcuffed = false;
     std::string reloadPhase;
-    // Aggregated animator/cull state for this character. All skeleton segments
-    // share it, so it doubles as the "visible bones only" aim gate. This is an
-    // animator check, not wall occlusion.
+    // Character result, with the legacy fallback used when no rays were cast.
     bool visible = true;
+    bool visibilityChecked = false;
+    bool headVisible = false;
     std::uintptr_t viewPtr = 0;
     std::uintptr_t characterModel = 0;
     std::uintptr_t privateModel = 0;
@@ -108,6 +113,24 @@ struct InGameMapState {
     InGameMapVariance fullscreen;
 };
 
+// Bounds are normalized to the game's canvas with the origin at the top left.
+struct LootLabel {
+    std::string name;
+    LootFilter::Rarity rarity;
+    Vector2 min;
+    Vector2 max;
+};
+
+struct LootPreview {
+    static constexpr std::uint64_t MaxAgeMs = 250;
+
+    std::uint64_t sessionGeneration = 0;
+    std::uint64_t stampMs = 0;
+    Vector2 viewportMin;
+    Vector2 viewportMax;
+    std::vector<LootLabel> labels;
+};
+
 struct FastVehicle {
     int id = 0;
     RobRunWorld::Kind kind = RobRunWorld::Kind::Car;
@@ -133,6 +156,7 @@ struct Snapshot {
     RobRunCamera::CameraState camera;
     InGameMapState inGameMap;
     std::int32_t localEntityId = -1;
+    bool localIsPolice = false;
     Vector3 localPosition{};
     float localYaw = 0.f;
     float localPitch = 0.f;
@@ -213,6 +237,11 @@ std::string GetLocationId();
 // Enables the one-off item-catalog class scan. Disabled by default because
 // the scan is intentionally bounded but not free.
 void SetReadCatalogEnabled(bool enabled);
+void SetLootPreviewEnabled(bool enabled);
+std::shared_ptr<const LootPreview> GetLootPreview();
+void SetGrenadePredictionEnabled(bool enabled);
+std::shared_ptr<const RobRunGrenades::Preview> GetGrenadePrediction();
+void SetTrackedAimEntity(int entityId);
 
 // Re-reads only the BattleCameraModel with uncached DMA reads and updates
 // a thread-safe camera state used by GetViewProjection. Call this from the
@@ -290,10 +319,20 @@ struct BvhStatus {
     uint32_t nodeCount = 0;
     uint32_t triCount = 0;
     std::string path;
+    std::size_t ignoredSurfaces = 0;
 };
 BvhStatus GetBvhStatus();
 void ReloadBvh();
 std::shared_ptr<const CollisionBVH::Scene> GetBvhScene();
+
+struct VisibilityBvh {
+    std::shared_ptr<const CollisionBVH::Scene> scene;
+    std::shared_ptr<const std::vector<std::uint8_t>> ignoredTriangles;
+};
+VisibilityBvh GetVisibilityBvh();
+bool PickVisibilitySurface(const VisibilityBvh& bvh, float maxDistance, CollisionBVH::SegmentHit& hit);
+bool IgnoreVisibilitySurface(const std::shared_ptr<const CollisionBVH::Scene>& scene, const CollisionBVH::SegmentHit& hit);
+void UndoVisibilitySurfaceIgnore();
 
 bool IsOccluded(const Vector3& origin, const Vector3& target, float tMin = 0.20f, bool checkDynamic = true,
                 bool targetInVehicle = false, int targetVehicleId = 0);

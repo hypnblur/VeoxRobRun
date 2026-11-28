@@ -33,6 +33,7 @@ static std::wstring PickConfigPath(bool save)
 #include "../Aim/AimController.h"
 #include "../Overlay/Overlay.h"
 #include "../Esp/Radar.h"
+#include "../Esp/PlayerEsp.h"
 #include "../Esp/WebRadar.h"
 #include "../Esp/IconSprites.h"
 #include "../Overlay/Backdrop.h"
@@ -229,6 +230,7 @@ constexpr SubTabDef kWorldSubs[] = {
 	{ "World & Loot",   IconKind::World },
 	{ "Value & Sizing", IconKind::Sliders },
 	{ "Catalog",        IconKind::List },
+	{ "Legacy ESP",     IconKind::World },
 };
 constexpr SubTabDef kRadarSubs[] = {
 	{ "2D & Web",    IconKind::Radar },
@@ -273,7 +275,6 @@ bool g_readCatalog = false;
 bool g_aimVarsSyncNeeded = true;
 bool g_compactRows = false;
 
-static const char* kMenuKeyLabels[] = { "Insert", "Home", "Delete", "End", "F11", "F12", "Right Shift" };
 
 std::map<ImGuiID, float> g_cardHeights;
 ImGuiID g_currentCard = 0;
@@ -284,9 +285,13 @@ struct SearchEntry { const char* label; int tab; int sub; const char* match = nu
 constexpr SearchEntry kSearchIndex[] = {
 	// Aim -> General
 	{ "Enable Aim", 0, 0 }, { "Aim Type", 0, 0 }, { "Target Bone", 0, 0 },
+	{ "Nearest Bone", 0, 0 }, { "Bone List", 0, 0 }, { "Bone Switch Delay", 0, 0 },
 	{ "Target Priority", 0, 0 }, { "Dynamic Bone Fallback", 0, 0 }, { "Aim Key", 0, 0 },
+	{ "Secondary Aim Key", 0, 0 },
+	{ "Head Override Key", 0, 0 },
 	{ "Write Camera Angles", 0, 0 }, { "Cursor Fallback", 0, 0 }, { "Response", 0, 0 },
-	{ "Aim FOV", 0, 0 }, { "Smoothing Curve", 0, 0 }, { "Smoothness", 0, 0 },
+	{ "Aim FOV", 0, 0 }, { "Dynamic FOV", 0, 0 }, { "Smoothing Curve", 0, 0 }, { "Smoothness", 0, 0 },
+	{ "Min Dynamic FOV", 0, 0 },
 	{ "Bezier Arc", 0, 0 }, { "Curve Speed", 0, 0 }, { "Hardware Gain", 0, 0 },
 	{ "Max Distance (Aim)", 0, 0, "Max Distance" }, { "Predict Targets", 0, 0 },
 	{ "Hard Lock", 0, 0 }, { "Switch Delay", 0, 0 },
@@ -306,6 +311,8 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Dual Gamepad Key", 0, 3 }, { "Gamepad Aim Key", 0, 3 }, { "Trigger Threshold", 0, 3 },
 	{ "Stick Deadzone", 0, 3 }, { "Require Stick Move", 0, 3 }, { "Stick Output Scale", 0, 3 },
 	// Visuals -> Player ESP
+	{ "Enable Player ESP", 1, 0 },
+	{ "Off-Screen Distance", 1, 0 },
 	{ "Hide Teammates", 1, 0 }, { "Team Handling", 1, 0 }, { "Teammate Box", 1, 0 },
 	{ "Teammate Bones", 1, 0 }, { "Teammate Color", 1, 0 }, { "Mark Players as Team", 1, 0 },
 	{ "Hidden Player ESP", 1, 0 }, { "Box ESP", 1, 0 },
@@ -320,19 +327,37 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Character Chams", 1, 1 }, { "Fill Opacity", 1, 1 }, { "Limb Thickness", 1, 1 },
 	{ "Chams Outline", 1, 1 }, { "Chams VisCheck", 1, 1 }, { "Enable VisCheck", 1, 1 },
 	{ "Enable WallCheck", 1, 1 }, { "Reload BVH", 1, 1 }, { "Show BVH", 1, 1 },
+	{ "Ignore Surface", 1, 1 }, { "Ignore Surface Key", 1, 1 }, { "Undo Ignore", 1, 1 },
 	{ "BVH Draw Dist", 1, 1 }, { "Vis Ray Count", 1, 1 }, { "Vis Max Dist", 1, 1 },
 	{ "Hidden Alpha", 1, 1 }, { "Car Cabin Solid", 1, 1 }, { "Vis Ring", 1, 1 }, { "Status Ring", 1, 1 },
 	// Visuals -> States & Colours
+	{ "Player Name", 1, 2 },
+	{ "Clan Tag", 1, 2 },
+	{ "Visibility Status Tags", 1, 2 },
+	{ "Aiming Tag", 1, 2 },
+	{ "Knocked Down Tag", 1, 2 },
+	{ "Knocked Out Tag", 1, 2 },
+	{ "Surrendered Tag", 1, 2 },
+	{ "Handcuffed Tag", 1, 2 },
+	{ "Bag Value Tag", 1, 2 },
+	{ "In Vehicle Tag", 1, 2 },
+	{ "Crouching Tag", 1, 2 },
+	{ "Sprinting Tag", 1, 2 },
+	{ "Critical Health Tag", 1, 2 },
 	{ "Firing", 1, 2 }, { "Reloading", 1, 2 }, { "Armor", 1, 2 }, { "Armor Value", 1, 2 },
-	{ "Stamina", 1, 2 }, { "State Tags", 1, 2 }, { "Name", 1, 2 }, { "Color names by role", 1, 2 },
+	{ "Stamina", 1, 2 }, { "State Tag Colour", 1, 2 }, { "Name", 1, 2 }, { "Color names by role", 1, 2 },
 	{ "Criminal", 1, 2 }, { "Police", 1, 2 }, { "Civilian", 1, 2 }, { "Hubber", 1, 2 },
 	{ "Pose Smoothing", 1, 2 }, { "Blend Alpha", 1, 2 }, { "Native Camera", 1, 2 },
 	// World -> World & Loot
-	{ "Enable World ESP", 2, 0 }, { "House Info", 2, 0 }, { "House Range", 2, 0 },
+	{ "Enable World ESP", 2, 0 }, { "Vehicle ESP", 2, 0 }, { "House Info", 2, 0 }, { "House Range", 2, 0 },
+	{ "Grenade Prediction", 2, 0 },
+	{ "Grenade Markers", 2, 0 },
+	{ "Detailed Workbench Labels", 2, 0 },
+	{ "Workbench Contents", 2, 0 },
 	{ "Show Empty Tag", 2, 0 }, { "Defense Blocks", 2, 0 }, { "Min Cash / Value", 2, 0 },
 	{ "House / Legacy Font", 2, 0 }, { "Enable Loot Filter", 2, 0 }, { "Show on Map", 2, 0 },
 	{ "Show on Minimap", 2, 0 }, { "Hide Empty Containers", 2, 0 }, { "Hide Looted Items", 2, 0 },
-	{ "Read Vehicle / Table Inventories", 2, 0 }, { "Base Dot Size", 2, 0 },
+	{ "Read Vehicle / Table Inventories", 2, 0 }, { "Unrevealed Loot Labels", 2, 0 }, { "Base Dot Size", 2, 0 },
 	{ "ESP Font Size", 2, 0 }, { "ESP Icon Size", 2, 0 }, { "Global Max Distance", 2, 0 },
 	// World -> Value & Sizing
 	{ "Filter By Min Price", 2, 1 }, { "Min Price", 2, 1 }, { "High Value", 2, 1 },
@@ -341,7 +366,51 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Export JSON", 2, 1 }, { "Import JSON", 2, 1 },
 	// World -> Catalog
 	{ "Loot Catalog", 2, 2 },
+	// World -> Legacy ESP
+	{ "Containers", 2, 3 },
+	{ "Generic Containers", 2, 3 },
+	{ "Loot Nodes", 2, 3 },
+	{ "Safes & Doors", 2, 3 },
+	{ "Storage Boxes", 2, 3 },
+	{ "Shelving", 2, 3 },
+	{ "Collection Tables", 2, 3 },
+	{ "Plot Containers", 2, 3 },
+	{ "Vehicle Trunks", 2, 3 },
+	{ "Loot", 2, 3 },
+	{ "Loose Loot", 2, 3 },
+	{ "Dropped Bags", 2, 3 },
+	{ "Vehicle Loot", 2, 3 },
+	{ "Plot Loot", 2, 3 },
+	{ "Furniture Loot", 2, 3 },
+	{ "Building Loot", 2, 3 },
+	{ "Cargo", 2, 3 },
+	{ "Generic Cargo", 2, 3 },
+	{ "Cargo Bushes", 2, 3 },
+	{ "Cargo Crystals", 2, 3 },
+	{ "Cargo Drugs", 2, 3 },
+	{ "Cargo Cash", 2, 3 },
+	{ "Cargo Exchange", 2, 3 },
+	{ "Cargo Boxes", 2, 3 },
+	{ "Cargo Goods", 2, 3 },
+	{ "Valuables", 2, 3 },
+	{ "Cash Loot Nodes", 2, 3 },
+	{ "Settlement Cash", 2, 3 },
+	{ "Money Workbenches", 2, 3 },
+	{ "Crypto Workbenches", 2, 3 },
+	{ "Show Distance", 2, 3 },
+	{ "Security Alarms", 2, 3 },
+	{ "First Aid Cabinets", 2, 3 },
+	{ "Drug Labs", 2, 3 },
+	{ "Weed", 2, 3 },
+	{ "Legacy Max Dist", 2, 3 },
 	// Radar -> 2D & Web
+	{ "Map Background", 3, 0 },
+	{ "Desktop Full Map Player Names", 3, 0 },
+	{ "Legacy Loot & Vehicle Names", 3, 0 },
+	{ "Filtered Loot Names", 3, 0 },
+	{ "Legacy Radar Containers", 3, 0 },
+	{ "Legacy Radar Dropped Bags", 3, 0 },
+	{ "Legacy Radar Valuables", 3, 0 },
 	{ "Enable Radar", 3, 0 }, { "Show Players", 3, 0 }, { "Show Vehicles", 3, 0 },
 	{ "Show Loot", 3, 0 }, { "Rotate With Camera", 3, 0 }, { "Full Map Window", 3, 0 },
 	{ "Radar Size", 3, 0 }, { "Radar Zoom", 3, 0 }, { "Radar Opacity", 3, 0 },
@@ -349,7 +418,7 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "Auto Map Select", 3, 0 }, { "Active Map", 3, 0 }, { "Calibrate to Map", 3, 0 },
 	// Radar -> In-Game Map
 	{ "Top-Left Minimap", 3, 1 }, { "Fullscreen Map (M)", 3, 1 }, { "Hide 3D ESP on Full Map", 3, 1 },
-	{ "Icon Scale", 3, 1 }, { "Player Arrows", 3, 1 }, { "Vehicle Icons", 3, 1 },
+	{ "Icon Scale", 3, 1 }, { "Player Arrows", 3, 1 }, { "Player Heading", 3, 1 }, { "Vehicle Icons", 3, 1 },
 	{ "Player Names (Full Map)", 3, 1 }, { "Dropped Bags", 3, 1 },
 	{ "Valuables & Loot", 3, 1 }, { "Cargo", 3, 1 },
 	// Misc -> Gameplay & Tools
@@ -367,6 +436,7 @@ constexpr SearchEntry kSearchIndex[] = {
 	{ "High Contrast Menu", 5, 0 }, { "Accent Colour", 5, 0 }, { "Show FPS", 5, 0 },
 	{ "Status Panel", 5, 0 }, { "Font", 5, 0 }, { "Frame Cap", 5, 0 },
 	{ "Display Monitor", 5, 0 }, { "Menu Key", 5, 0 }, { "Panic Mode", 5, 0 },
+	{ "Transparency Key", 5, 0 }, { "Exit Key", 5, 0 },
 	{ "Panic Key", 5, 0 }, { "Re-attach Key", 5, 0 }, { "Show Backdrop", 5, 0 },
 	// Settings -> Configs & Status
 	{ "Config Profiles", 5, 1 }, { "Save", 5, 1 }, { "Load", 5, 1 },
@@ -1633,6 +1703,123 @@ static void RunDumpItemPrices()
 // ===========================================================================
 // TAB 0: AIM
 // ===========================================================================
+void DrawNearestBoneList(std::uint32_t& mask)
+{
+	std::string preview;
+	for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+		if ((mask & (1u << b)) == 0) continue;
+		if (!preview.empty()) preview += ", ";
+		preview += Skeleton::kAimBones[b].name;
+	}
+	SectionLabel("Bone List");
+	ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+	if (ImGui::BeginCombo("##NearestBoneList", preview.c_str(), ImGuiComboFlags_HeightLarge)) {
+		for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+			const auto bit = 1u << b;
+			const auto nextMask = mask ^ bit;
+			if (ImGui::Selectable(Skeleton::kAimBones[b].name, (mask & bit) != 0,
+				ImGuiSelectableFlags_NoAutoClosePopups) && nextMask != 0) {
+				mask = nextMask;
+				g_dirty = true;
+			}
+		}
+		ImGui::EndCombo();
+	}
+}
+
+const char* ConflictingOverlayBinding(const int& binding, int key)
+{
+	const auto& cfg = ConfigInstance.Overlay;
+	const struct { const int* binding; const char* name; } commands[] = {
+		{ &cfg.MenuBinding, "Menu Key" },
+		{ &cfg.TransparencyBinding, "Transparency Key" },
+		{ &cfg.ExitBinding, "Exit Key" },
+		{ &cfg.PanicBinding, "Panic Key" },
+		{ &cfg.ReattachBinding, "Re-attach Key" },
+		{ &ConfigInstance.Player.IgnoreBvhSurfaceBinding, "Ignore Surface Key" },
+	};
+	for (const auto& command : commands) {
+		if (command.binding != &binding && *command.binding == key) return command.name;
+	}
+	return nullptr;
+}
+
+void HotkeyRow(const char* label, int& binding, int options, bool overlayCommand = false)
+{
+	static std::uint32_t padDown = 0;
+	static const char* conflict = nullptr;
+	ImGui::PushID(&binding);
+	const auto bindingLabel = Hotkey::Label(binding);
+	constexpr const char* popup = "Set hotkey";
+	if (ButtonRow(label, bindingLabel.c_str(), 152.f)) {
+		conflict = nullptr;
+		padDown = options & Hotkey::AllowPad ? Aim::GamepadBindingsDown() : 0;
+		Overlay::BeginHotkeyCapture();
+		ImGui::OpenPopup(popup);
+	}
+	if (ImGui::BeginPopupModal(popup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		if (!Overlay::HotkeyCaptureActive()) {
+			ImGui::CloseCurrentPopup();
+		} else {
+			ImGui::TextUnformatted(label);
+			ImGui::TextUnformatted(options & Hotkey::AllowPad
+				? "Press a keyboard key or gamepad input."
+				: "Press a key on this keyboard.");
+			int key = Overlay::TakeCapturedHotkey();
+			if (options & Hotkey::AllowPad) {
+				const auto down = Aim::GamepadBindingsDown();
+				const auto pressed = down & ~padDown;
+				padDown = down;
+				if (key == Hotkey::Off && pressed) {
+					for (int code = CTL_VK_A; code <= CTL_VK_RT; ++code) {
+						if (pressed & CtlVkBit(code)) { key = code; break; }
+					}
+					if (key == Hotkey::Off && (pressed & (1u << 31))) key = Hotkey::Stick;
+				}
+			}
+			if (options & Hotkey::AllowMouse) {
+				ImGui::Button("Click here to bind a mouse button");
+				if (key == Hotkey::Off && ImGui::IsItemHovered()) {
+					constexpr int mouseKeys[] = { VK_LBUTTON, VK_RBUTTON, VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2 };
+					for (int i = 0; i < IM_ARRAYSIZE(mouseKeys); ++i) {
+						if (ImGui::IsMouseClicked(i, false)) { key = mouseKeys[i]; break; }
+					}
+				}
+			}
+			if (conflict) ImGui::Text("Already assigned to %s.", conflict);
+
+			const bool cancel = ImGui::Button("Cancel");
+			int special = 1; // No special option selected.
+			if (options & Hotkey::AllowOff) {
+				ImGui::SameLine();
+				if (ImGui::Button("Off")) special = Hotkey::Off;
+			}
+			if (options & Hotkey::AllowAlways) {
+				ImGui::SameLine();
+				if (ImGui::Button("Always")) special = Hotkey::Always;
+			}
+			if (options & Hotkey::AllowInherit) {
+				ImGui::SameLine();
+				if (ImGui::Button("Inherit")) special = Hotkey::Inherit;
+			}
+			if (key != Hotkey::Off && Hotkey::Allowed(key, options)) {
+				conflict = overlayCommand && key != binding ? ConflictingOverlayBinding(binding, key) : nullptr;
+			}
+			const bool accepted = key != Hotkey::Off && Hotkey::Allowed(key, options) && !conflict;
+			if (cancel || special <= 0 || accepted) {
+				if (!cancel) {
+					const int next = special <= 0 ? special : key;
+					if (binding != next) { binding = next; g_dirty = true; }
+				}
+				Overlay::EndHotkeyCapture(key);
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::EndPopup();
+	}
+	ImGui::PopID();
+}
+
 void DrawAimGeneral()
 {
 	static const char* aimTypes[] = { "Memory Aim", "Hardware Aim" };
@@ -1646,11 +1833,21 @@ void DrawAimGeneral()
 		ToggleRow("Enable Aim", &ConfigInstance.Aim.Enabled);
 		ComboRow("Aim Type", &ConfigInstance.Aim.AimType, aimTypes, IM_ARRAYSIZE(aimTypes),
 			150.f, ConfigInstance.Aim.AimType == 0);
-		ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, kBones, IM_ARRAYSIZE(kBones));
+		ToggleRow("Nearest Bone", &ConfigInstance.Aim.NearestBone);
+		if (ConfigInstance.Aim.NearestBone) {
+			DrawNearestBoneList(ConfigInstance.Aim.NearestBoneMask);
+			SliderIntRow("Bone Switch Delay", &ConfigInstance.Aim.BoneSwitchDelay, 0, 1000, " ms");
+		} else {
+			ComboRow("Target Bone", &ConfigInstance.Aim.TargetBone, kBones, IM_ARRAYSIZE(kBones));
+			if (ConfigInstance.Aim.TargetBone != 4 && ConfigInstance.Aim.TargetBone != 5)
+				ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
+		}
 		ComboRow("Target Priority", &ConfigInstance.Aim.TargetPriority, priorities, IM_ARRAYSIZE(priorities));
-		if (ConfigInstance.Aim.TargetBone != 4 && ConfigInstance.Aim.TargetBone != 5)
-			ToggleRow("Dynamic Bone Fallback", &ConfigInstance.Aim.DynamicBoneFallback);
-		ComboRow("Aim Key", &ConfigInstance.Aim.AimKey, Aim::KeyNames(), Aim::KeyCount());
+		HotkeyRow("Aim Key", ConfigInstance.Aim.AimBinding, Hotkey::AimInputs | Hotkey::AllowAlways);
+		HotkeyRow("Secondary Aim Key", ConfigInstance.Aim.SecondaryAimBinding,
+			Hotkey::AimInputs | Hotkey::AllowAlways | Hotkey::AllowOff);
+		HotkeyRow("Head Override Key", ConfigInstance.Aim.HeadOverrideBinding,
+			Hotkey::AimInputs | Hotkey::AllowOff);
 		EndCard();
 
 		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
@@ -1674,6 +1871,9 @@ void DrawAimGeneral()
 	{
 		BeginCard("Tuning & Prediction", IconKind::Sliders, kCardW, 0.f, false, nullptr, true);
 		SliderIntRow("Aim FOV", &ConfigInstance.Aim.Fov, 5, 180, " deg");
+		ToggleRow("Dynamic FOV", &ConfigInstance.Aim.DynamicFov);
+		if (ConfigInstance.Aim.DynamicFov)
+			SliderIntRow("Min Dynamic FOV", &ConfigInstance.Aim.MinDynamicFov, 1, 180, " deg");
 		ComboRow("Smoothing Curve", &ConfigInstance.Aim.SmoothAlgorithm, kSmoothAlgos, IM_ARRAYSIZE(kSmoothAlgos));
 		SliderIntRow("Smoothness", &ConfigInstance.Aim.Smoothness, 1, 100);
 		if (ConfigInstance.Aim.SmoothAlgorithm == 2)
@@ -1699,6 +1899,7 @@ void DrawAimGeneral()
 		SectionLabel("Prediction & Lock");
 		ToggleRow("Predict Targets", &ConfigInstance.Aim.Prediction);
 		ToggleRow("Hard Lock", &ConfigInstance.Aim.HardLock);
+		ToggleRow("Keep Lock After Vehicle Exit", &ConfigInstance.Aim.KeepLockAfterVehicleExit);
 		SliderIntRow("Switch Delay", &ConfigInstance.Aim.TargetSwitchDelay, 0, 1000, " ms");
 		EndCard();
 	}
@@ -1779,7 +1980,7 @@ void DrawAimTriggerbot()
 	{
 		BeginCard("Triggerbot", IconKind::Bolt, kCardW, 0.f, false, nullptr, true);
 		ToggleRow("Enable Triggerbot", &ConfigInstance.Aim.TriggerEnabled);
-		ComboRow("Trigger Key", &ConfigInstance.Aim.TriggerKey, Aim::KeyNames(), Aim::KeyCount());
+		HotkeyRow("Trigger Key", ConfigInstance.Aim.TriggerBinding, Hotkey::AimInputs | Hotkey::AllowAlways);
 		ComboRow("Trigger Bone", &ConfigInstance.Aim.TriggerBone, kTriggerBones, IM_ARRAYSIZE(kTriggerBones));
 		if (SliderIntRow("Min Delay", &ConfigInstance.Aim.TriggerMinDelayMs, 0, 500, " ms")) {
 			if (ConfigInstance.Aim.TriggerMaxDelayMs < ConfigInstance.Aim.TriggerMinDelayMs)
@@ -1835,14 +2036,8 @@ void DrawAimTriggerbot()
 			SectionLabel("Profile Trigger");
 			ToggleRow("Allow Trigger", &wp.TriggerEnabled);
 
-			std::vector<const char*> trigKeyItems;
-			trigKeyItems.reserve(static_cast<std::size_t>(Aim::KeyCount()) + 1);
-			trigKeyItems.push_back("Inherit");
-			const char* const* baseKeys = Aim::KeyNames();
-			for (int i = 0; i < Aim::KeyCount(); ++i) trigKeyItems.push_back(baseKeys[i]);
-			int trigKeyUi = std::clamp(wp.TriggerKeyOverride + 1, 0, Aim::KeyCount());
-			if (ComboRow("Trigger Key##wp", &trigKeyUi, trigKeyItems.data(), (int)trigKeyItems.size()))
-				wp.TriggerKeyOverride = trigKeyUi - 1;
+			HotkeyRow("Trigger Key", wp.TriggerBindingOverride,
+				Hotkey::AimInputs | Hotkey::AllowAlways | Hotkey::AllowInherit);
 
 			if (SliderIntRow("Min Delay##wp", &wp.TriggerMinDelayMs, -1, 500, " ms", "Inherit")) {
 				if (wp.TriggerMaxDelayMs >= 0 && wp.TriggerMinDelayMs >= 0 && wp.TriggerMaxDelayMs < wp.TriggerMinDelayMs)
@@ -2064,7 +2259,7 @@ void DrawAimHardwarePad()
 		ComboRow("Host Pad Slot", &ConfigInstance.Aim.ControllerSlot, kControllerSlots, IM_ARRAYSIZE(kControllerSlots));
 		ToggleRow("Dual Gamepad Key", &ConfigInstance.Aim.ControllerSecondaryEnable);
 		if (ConfigInstance.Aim.ControllerSecondaryEnable)
-			ComboRow("Gamepad Aim Key", &ConfigInstance.Aim.ControllerAimKey, Aim::KeyNames(), Aim::KeyCount());
+			HotkeyRow("Gamepad Aim Key", ConfigInstance.Aim.ControllerAimBinding, Hotkey::AimInputs | Hotkey::AllowAlways);
 		SliderFloatRow("Trigger Threshold", &ConfigInstance.Aim.ControllerTriggerThreshold, 0.05f, 0.95f);
 		SliderFloatRow("Stick Deadzone", &ConfigInstance.Aim.ControllerStickDeadzone, 0.0f, 0.80f);
 		ToggleRow("Require Stick Move", &ConfigInstance.Aim.ControllerRequireStick);
@@ -2102,6 +2297,7 @@ void DrawVisualsEsp()
 	ImGui::BeginGroup();
 	{
 		BeginCard("Player ESP", IconKind::Visuals, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Enable Player ESP", &ConfigInstance.Player.EspEnabled);
 		ToggleRow("Hidden Player ESP", &ConfigInstance.Player.HiddenPlayerEsp);
 		ColorToggleRow("Box ESP", &ConfigInstance.Player.BoxEsp, ConfigInstance.Player.BoxColour);
 		ColorToggleRow("Health", &ConfigInstance.Player.Health, ConfigInstance.Player.HealthTextColour);
@@ -2110,6 +2306,7 @@ void DrawVisualsEsp()
 		if (ConfigInstance.Player.Snaplines)
 			ComboRow("Snapline Origin", &ConfigInstance.Player.SnaplineOrigin, snapOrigins, IM_ARRAYSIZE(snapOrigins));
 		ColorToggleRow("Off-Screen Indicators", &ConfigInstance.Player.OffscreenArrows, ConfigInstance.Player.OffscreenColour);
+		ToggleRow("Off-Screen Distance", &ConfigInstance.Player.ShowOffscreenDistance);
 		ColorToggleRow("Head Hitbox Dot", &ConfigInstance.Player.HeadDot, ConfigInstance.Player.HeadDotColour);
 		if (ConfigInstance.Player.HeadDot)
 			SliderFloatRow("Dot Radius", &ConfigInstance.Player.HeadDotRadius, 1.5f, 8.0f, " px");
@@ -2128,7 +2325,7 @@ void DrawVisualsEsp()
 			ColorToggleRow("Teammate Bones", &ConfigInstance.Player.TeammateSkeleton, ConfigInstance.Player.TeammateSkeletonColour);
 			ColorRow("Teammate Color", ConfigInstance.Player.TeammateColour);
 		}
-		Note("Auto-detects party, clan & police (when playing cop). Teammates skip VisCheck.");
+		Note("Auto-detects party, clan & police (when playing cop).");
 
 		SectionLabel("Mark Players as Team");
 		static char teamNameInput[64] = "";
@@ -2286,20 +2483,37 @@ void DrawVisualsSkeleton()
 			ColorRow("Occluded", ConfigInstance.Player.HiddenColour);
 		}
 		ToggleRow("Enable WallCheck", &ConfigInstance.Player.WallCheck);
+		const auto bvhStatus = RobRunReader::GetBvhStatus();
 		{
-			auto status = RobRunReader::GetBvhStatus();
 			char bvhBuf[96];
-			if (status.loaded)
+			if (bvhStatus.loaded)
 				std::snprintf(bvhBuf, sizeof(bvhBuf), "BVH: %uk nodes | %uk tris",
-					status.nodeCount / 1000u, status.triCount / 1000u);
+					bvhStatus.nodeCount / 1000u, bvhStatus.triCount / 1000u);
 			else
-				std::snprintf(bvhBuf, sizeof(bvhBuf), "BVH: not loaded (animator fallback)");
+				std::snprintf(bvhBuf, sizeof(bvhBuf), "BVH: not loaded");
 			if (ButtonRow(bvhBuf, "Reload BVH", 104.f))
 				RobRunReader::ReloadBvh();
+			if (bvhStatus.loaded && !bvhStatus.path.empty() && ImGui::IsItemHovered())
+				ImGui::SetTooltip("%s", bvhStatus.path.c_str());
 		}
 		ToggleRow("Show BVH", &ConfigInstance.Player.ShowBvh);
-		if (ConfigInstance.Player.ShowBvh)
+		if (ConfigInstance.Player.ShowBvh) {
 			SliderIntRow("BVH Draw Dist", &ConfigInstance.Player.BvhDrawDist, 10, 500, " m");
+			const bool surfaceHighlighted = HasHighlightedBvhSurface();
+			ImGui::BeginDisabled(!surfaceHighlighted);
+			if (ButtonRow(surfaceHighlighted ? "Highlighted for VisCheck" : "Look at a collision surface", "Ignore Surface", 128.f))
+				IgnoreHighlightedBvhSurface();
+			ImGui::EndDisabled();
+			HotkeyRow("Ignore Surface Key", ConfigInstance.Player.IgnoreBvhSurfaceBinding, Hotkey::AllowOff, true);
+		}
+		if (ConfigInstance.Player.ShowBvh || bvhStatus.ignoredSurfaces > 0) {
+			char ignored[48];
+			std::snprintf(ignored, sizeof(ignored), "Ignored surfaces: %zu", bvhStatus.ignoredSurfaces);
+			ImGui::BeginDisabled(bvhStatus.ignoredSurfaces == 0);
+			if (ButtonRow(ignored, "Undo Ignore", 128.f))
+				RobRunReader::UndoVisibilitySurfaceIgnore();
+			ImGui::EndDisabled();
+		}
 		SliderIntRow("Vis Ray Count", &ConfigInstance.Player.VisRayCount, 2, 12);
 		SliderFloatRow("Vis Max Dist", &ConfigInstance.Player.VisMaxDistance, 0.f, 500.f, " m");
 		SliderFloatRow("Hidden Alpha", &ConfigInstance.Player.HiddenAlpha, 0.f, 1.f);
@@ -2320,8 +2534,19 @@ void DrawVisualsStates()
 		ColorToggleRow("Armor", &ConfigInstance.Player.ShowArmor, ConfigInstance.Player.ArmorColour);
 		ToggleRow("Armor Value", &ConfigInstance.Player.ShowArmorValue);
 		ColorToggleRow("Stamina", &ConfigInstance.Player.ShowStamina, ConfigInstance.Player.StaminaColour);
-		SectionLabel("Tag Colour");
-		ColorRow("State Tags ([KD] [KO] [C] [S] [V])", ConfigInstance.Player.StateColour);
+		SectionLabel("State Tags");
+		ToggleRow("Visibility Status Tags", &ConfigInstance.Player.ShowVisibilityTags);
+		ToggleRow("Aiming Tag", &ConfigInstance.Player.ShowAimingTag);
+		ToggleRow("Knocked Down Tag", &ConfigInstance.Player.ShowKnockedDownTag);
+		ToggleRow("Knocked Out Tag", &ConfigInstance.Player.ShowKnockedOutTag);
+		ToggleRow("Surrendered Tag", &ConfigInstance.Player.ShowSurrenderedTag);
+		ToggleRow("Handcuffed Tag", &ConfigInstance.Player.ShowHandcuffedTag);
+		ToggleRow("Bag Value Tag", &ConfigInstance.Player.ShowBagValueTag);
+		ToggleRow("In Vehicle Tag", &ConfigInstance.Player.ShowInVehicleTag);
+		ToggleRow("Crouching Tag", &ConfigInstance.Player.ShowCrouchingTag);
+		ToggleRow("Sprinting Tag", &ConfigInstance.Player.ShowSprintingTag);
+		ToggleRow("Critical Health Tag", &ConfigInstance.Player.ShowCriticalHealthTag);
+		ColorRow("State Tag Colour", ConfigInstance.Player.StateColour);
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -2331,6 +2556,8 @@ void DrawVisualsStates()
 	ImGui::BeginGroup();
 	{
 		BeginCard("Name & Role Colours", IconKind::Palette, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Player Name", &ConfigInstance.Player.ShowPlayerName);
+		ToggleRow("Clan Tag", &ConfigInstance.Player.ShowClanTag);
 		ColorRow("Name", ConfigInstance.Player.NameColour);
 		ToggleRow("Color names by role", &ConfigInstance.Player.NameByRole);
 		if (ConfigInstance.Player.NameByRole)
@@ -2375,7 +2602,13 @@ void DrawWorldAndLoot()
 	{
 		BeginCard("World ESP", IconKind::World, kCardW, 0.f, false, nullptr, true);
 		ToggleRow("Enable World ESP", &ConfigInstance.World.Enabled);
+		ToggleRow("Vehicle ESP", &ConfigInstance.World.Vehicles);
+		ToggleRow("Grenade Prediction", &ConfigInstance.World.GrenadePrediction);
+		ToggleRow("Grenade Markers", &ConfigInstance.World.Grenades);
+		SliderIntRow("Global Max Distance", &lf.GlobalMaxDistance, 0, 3000, " m", "Unlimited");
 		ToggleRow("House Info", &ConfigInstance.World.HouseEsp);
+		ToggleRow("Detailed Workbench Labels", &ConfigInstance.World.ShowWorkbenchLabels);
+		ToggleRow("Workbench Contents", &ConfigInstance.World.ShowWorkbenchContents);
 		if (ConfigInstance.World.HouseEsp)
 			SliderIntRow("House Range", &ConfigInstance.World.HouseMaxDistance, 50, 1000, " m");
 		ToggleRow("Show Empty Tag", &ConfigInstance.World.ShowEmpty);
@@ -2384,19 +2617,9 @@ void DrawWorldAndLoot()
 		SliderIntRow("House / Legacy Font", &ConfigInstance.World.FontSize, 1, 24, " px");
 
 		if (lf.Enabled)
-		{
-			Note("Loot Filter owns item visibility & range. Turn Loot Filter off to use legacy switches.");
-		}
+			Note("Use World > Catalog to show or hide items and grenade markers.");
 		else
-		{
-			SectionLabel("Legacy Mode (Filter Off)");
-			ToggleRow("Show Distance", &ConfigInstance.World.ShowDistance);
-			SliderIntRow("Legacy Max Dist", &ConfigInstance.World.MaxDistance, 0, 2000, " m");
-			ToggleRow("Security Alarms", &ConfigInstance.World.SecurityAlarms);
-			ToggleRow("First Aid Cabinets", &ConfigInstance.World.FirstAidCabinets);
-			ToggleRow("Drug Labs", &ConfigInstance.World.DrugWorkbenches);
-			ToggleRow("Weed", &ConfigInstance.World.Weed);
-		}
+			Note("Use World > Legacy ESP for category visibility and range.");
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -2412,10 +2635,81 @@ void DrawWorldAndLoot()
 		ToggleRow("Hide Empty Containers", &lf.HideEmpty);
 		ToggleRow("Hide Looted Items", &lf.FilterTakenLoot);
 		ToggleRow("Read Vehicle / Table Inventories", &lf.ReadVehicleInventories);
+		ToggleRow("Unrevealed Loot Labels", &ConfigInstance.World.UnrevealedLootLabels);
 		SliderFloatRow("Base Dot Size", &lf.BaseDotSize, 1.5f, 8.f, " px");
 		SliderIntRow("ESP Font Size", &lf.FontSize, 8, 32, " px");
 		SliderIntRow("ESP Icon Size", &lf.IconSize, 16, 256, " px");
-		SliderIntRow("Global Max Distance", &lf.GlobalMaxDistance, 0, 3000, " m");
+		EndCard();
+	}
+	ImGui::EndGroup();
+}
+
+void DrawWorldLegacyEsp()
+{
+	auto& world = ConfigInstance.World;
+	if (ConfigInstance.LootFilter.Enabled)
+		Note("Loot Filter is on. Use World > Catalog for item visibility.");
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("Containers", IconKind::World, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Containers", &world.LegacyContainers);
+		ToggleRow("Generic Containers", &world.Containers);
+		ToggleRow("Loot Nodes", &world.LootNodes);
+		ToggleRow("Safes & Doors", &world.SafeDoors);
+		ToggleRow("Storage Boxes", &world.StorageBoxes);
+		ToggleRow("Shelving", &world.Shelvings);
+		ToggleRow("Collection Tables", &world.CollectionTables);
+		ToggleRow("Plot Containers", &world.PlotContainers);
+		ToggleRow("Vehicle Trunks", &world.VehicleTrunks);
+		EndCard();
+
+		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
+		BeginCard("Loot", IconKind::World, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Loot", &world.LegacyLoot);
+		ToggleRow("Loose Loot", &world.Loot);
+		ToggleRow("Dropped Bags", &world.DroppedBags);
+		ToggleRow("Vehicle Loot", &world.VehicleLoots);
+		ToggleRow("Plot Loot", &world.PlotLoots);
+		ToggleRow("Furniture Loot", &world.FurnitureLoots);
+		ToggleRow("Building Loot", &world.BuildingLoots);
+		EndCard();
+	}
+	ImGui::EndGroup();
+
+	if (!g_singleColumn) ImGui::SameLine(0.f, kGap);
+
+	ImGui::BeginGroup();
+	{
+		BeginCard("Cargo", IconKind::World, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Cargo", &world.LegacyCargo);
+		ToggleRow("Generic Cargo", &world.Cargos);
+		ToggleRow("Cargo Bushes", &world.CargoBushes);
+		ToggleRow("Cargo Crystals", &world.CargoCrystals);
+		ToggleRow("Cargo Drugs", &world.CargoDrugs);
+		ToggleRow("Cargo Cash", &world.CargoCash);
+		ToggleRow("Cargo Exchange", &world.CargoExchange);
+		ToggleRow("Cargo Boxes", &world.CargoBoxes);
+		ToggleRow("Cargo Goods", &world.CargoGoods);
+		EndCard();
+
+		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
+		BeginCard("Valuables", IconKind::World, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Valuables", &world.LegacyValuables);
+		ToggleRow("Cash Loot Nodes", &world.CashLootNodes);
+		ToggleRow("Settlement Cash", &world.SettlementCash);
+		ToggleRow("Money Workbenches", &world.MoneyWorkbenches);
+		ToggleRow("Crypto Workbenches", &world.CryptoWorkbenches);
+		EndCard();
+
+		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
+		BeginCard("Other Markers & Range", IconKind::Sliders, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Show Distance", &world.ShowDistance);
+		ToggleRow("Security Alarms", &world.SecurityAlarms);
+		ToggleRow("First Aid Cabinets", &world.FirstAidCabinets);
+		ToggleRow("Drug Labs", &world.DrugWorkbenches);
+		ToggleRow("Weed", &world.Weed);
+		SliderIntRow("Legacy Max Dist", &world.MaxDistance, 0, 2000, " m");
 		EndCard();
 	}
 	ImGui::EndGroup();
@@ -2989,6 +3283,18 @@ void DrawRadar2DWeb()
 		SliderFloatRow("Radar Zoom", &ConfigInstance.Radar.Zoom, 0.1f, 10.f, "x");
 		SliderFloatRow("Radar Opacity", &ConfigInstance.Radar.Opacity, 0.0f, 1.f);
 		EndCard();
+
+		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
+		BeginCard("Desktop Radar Display", IconKind::Radar, kCardW, 0.f, false, nullptr, true);
+		ToggleRow("Map Background", &ConfigInstance.Radar.ShowMap);
+		ToggleRow("Desktop Full Map Player Names", &ConfigInstance.Radar.ShowPlayerNames);
+		ToggleRow("Legacy Loot & Vehicle Names", &ConfigInstance.Radar.ShowLootNames);
+		ToggleRow("Filtered Loot Names", &ConfigInstance.Radar.ShowFilteredLootNames);
+		SectionLabel("Full Map Markers (Loot Filter Off)");
+		ToggleRow("Legacy Radar Containers", &ConfigInstance.Radar.ShowContainers);
+		ToggleRow("Legacy Radar Dropped Bags", &ConfigInstance.Radar.ShowDroppedBags);
+		ToggleRow("Legacy Radar Valuables", &ConfigInstance.Radar.ShowValuables);
+		EndCard();
 	}
 	ImGui::EndGroup();
 
@@ -3089,6 +3395,7 @@ void DrawRadarInGameMap()
 	{
 		BeginCard("Map Markers", IconKind::Radar, kCardW, 0.f, false, nullptr, true);
 		ToggleRow("Player Arrows", &ConfigInstance.Radar.InGameMapPlayers);
+		ToggleRow("Player Heading", &ConfigInstance.Radar.ShowInGameMapPlayerHeading);
 		ToggleRow("Vehicle Icons", &ConfigInstance.Radar.InGameMapVehicles);
 		ToggleRow("Player Names (Full Map)", &ConfigInstance.Radar.InGameMapPlayerNames);
 		ToggleRow("Dropped Bags", &ConfigInstance.Radar.InGameMapDroppedBags);
@@ -3132,10 +3439,10 @@ void DrawMiscGameplay()
 		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
 		BeginCard("Battle Mode", IconKind::Shield, kCardW, 0.f, false, nullptr, true);
 		ToggleRow("Battle Mode", &ConfigInstance.Overlay.BattleMode);
-		ComboRow("Battle Mode Key", &ConfigInstance.Overlay.BattleModeKey, Aim::KeyNames(), Aim::KeyCount());
+		HotkeyRow("Battle Mode Key", ConfigInstance.Overlay.BattleModeBinding, Hotkey::AimInputs | Hotkey::AllowOff);
 		ComboRow("Battle Mode Action", &ConfigInstance.Overlay.BattleModeBehavior,
 			kBattleModeActions, IM_ARRAYSIZE(kBattleModeActions));
-		if (Aim::IsAlwaysKey(ConfigInstance.Overlay.BattleModeKey))
+		if (ConfigInstance.Overlay.BattleModeBinding == Hotkey::Off)
 			Note("Choose a specific key to activate battle mode.");
 		else
 			Note("Suppresses World ESP, Radar & Money HUD so only Player ESP draws.");
@@ -3617,11 +3924,6 @@ void DrawMiscServer()
 // ===========================================================================
 void DrawSettingsOverlay()
 {
-	static const char* panicKeys[] = { "Off", "End", "F8", "F9", "F10", "F11", "F12" };
-	static const char* reattachKeys[] = {
-		"Off", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
-		"Insert", "Home", "End", "Delete", "Page Up", "Page Down"
-	};
 
 	ImGui::BeginGroup();
 	{
@@ -3677,10 +3979,12 @@ void DrawSettingsOverlay()
 		BeginCard("Hotkeys & Safety", IconKind::Shield, kCardW);
 		ToggleRow("Mem Write Master Switch", &ConfigInstance.Overlay.MemWriteMaster, true);
 		Note("Super switch for all MEM WRITE features. When OFF, all write toggles are turned off and locked.");
-		ComboRow("Menu Key", &ConfigInstance.Overlay.MenuKey, kMenuKeyLabels, IM_ARRAYSIZE(kMenuKeyLabels));
+		HotkeyRow("Menu Key", ConfigInstance.Overlay.MenuBinding, 0, true);
+		HotkeyRow("Transparency Key", ConfigInstance.Overlay.TransparencyBinding, Hotkey::AllowOff, true);
+		HotkeyRow("Exit Key", ConfigInstance.Overlay.ExitBinding, Hotkey::AllowOff, true);
 		ToggleRow("Panic Mode", &ConfigInstance.Overlay.PanicMode);
-		ComboRow("Panic Key", &ConfigInstance.Overlay.PanicKey, panicKeys, IM_ARRAYSIZE(panicKeys));
-		ComboRow("Re-attach Key", &ConfigInstance.Overlay.ReattachKey, reattachKeys, IM_ARRAYSIZE(reattachKeys));
+		HotkeyRow("Panic Key", ConfigInstance.Overlay.PanicBinding, Hotkey::AllowOff, true);
+		HotkeyRow("Re-attach Key", ConfigInstance.Overlay.ReattachBinding, Hotkey::AllowOff, true);
 		Note("Panic instantly blanks the overlay and halts targeting.");
 		EndCard();
 
@@ -3889,9 +4193,9 @@ void DrawSettingsConfigs(bool attached, const std::string& statusText)
 
 		ImGui::Dummy(ImVec2(0.f, kCardGap - 7.f));
 		BeginCard("About", IconKind::Settings, kCardW);
-		const int mkIdx = ImClamp(ConfigInstance.Overlay.MenuKey, 0, (int)IM_ARRAYSIZE(kMenuKeyLabels) - 1);
+		const auto menuKey = Hotkey::Label(ConfigInstance.Overlay.MenuBinding);
 		Note("ROB RUN External DMA Overlay");
-		Note("Menu Key: %s", kMenuKeyLabels[mkIdx]);
+		Note("Menu Key: %s", menuKey.c_str());
 		Note("External DMA reader - never injects into the game process. Rows marked MEM WRITE modify game memory over DMA.");
 		EndCard();
 	}
@@ -4225,9 +4529,9 @@ void DrawFooter(const ImVec2& pos, bool attached)
 
 	float rightBound = rBtn.Min.x - 12.f;
 	if (kW >= 820.f) {
-		const int mkIdx = ImClamp(ConfigInstance.Overlay.MenuKey, 0, (int)IM_ARRAYSIZE(kMenuKeyLabels) - 1);
+		const auto menuKey = Hotkey::Label(ConfigInstance.Overlay.MenuBinding);
 		char hintBuf[48];
-		std::snprintf(hintBuf, sizeof(hintBuf), "%s to close", kMenuKeyLabels[mkIdx]);
+		std::snprintf(hintBuf, sizeof(hintBuf), "%s to close", menuKey.c_str());
 		TextRight(font::inter_medium_small, rightBound,
 			RowTextY(fy, kFooter, font::inter_medium_small), C(kTextFaint), hintBuf);
 		rightBound -= TextW(font::inter_medium_small, hintBuf) + 12.f;
@@ -4496,7 +4800,8 @@ void Draw(bool attached, const std::string& statusText)
 		case 2:
 			if (sub == 0) DrawWorldAndLoot();
 			else if (sub == 1) DrawWorldValueSizing();
-			else DrawWorldCatalog();
+			else if (sub == 2) DrawWorldCatalog();
+			else DrawWorldLegacyEsp();
 			break;
 		case 3:
 			if (sub == 0) DrawRadar2DWeb();

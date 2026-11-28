@@ -82,6 +82,7 @@ inline constexpr std::uintptr_t offset         = 0x18; // int32
 namespace Il2CppType {
 inline constexpr std::uintptr_t code = 0x0A; // type-code byte
 inline constexpr std::uint8_t CodeBoolean        = 0x02;
+inline constexpr std::uint8_t CodeSingle         = 0x0C;
 inline constexpr std::uint8_t CodeClass          = 0x12;
 inline constexpr std::uint8_t CodeGenericInstance = 0x15;
 inline constexpr std::uint8_t CodeObject         = 0x1C;
@@ -733,7 +734,6 @@ inline constexpr std::uintptr_t NotSpawnedBattleCharacters = 0x480;inline conste
 inline constexpr std::uintptr_t Containers                 = 0x490;
 inline constexpr std::uintptr_t AccessEntities             = 0x498;
 inline constexpr std::uintptr_t SecurityAlarms             = 0x5E0;
-inline constexpr std::uintptr_t DroppedLootBags            = 0x4A0; // old "Loots"
 inline constexpr std::uintptr_t Loots                      = 0x4A0;
 inline constexpr std::uintptr_t VehicleLoots               = 0x4A8;
 inline constexpr std::uintptr_t Doors                      = 0x4B0;
@@ -807,7 +807,8 @@ inline constexpr std::uintptr_t PlotSlotDescription = 0x20;
 inline constexpr std::uintptr_t PlotDescription    = 0x28;
 inline constexpr std::uintptr_t MainBuilding       = 0x58;
 inline constexpr std::uintptr_t CompoundWall       = 0x68;
-inline constexpr std::uintptr_t Outbuildings       = 0x78; // Dictionary<OutbuildingDescription, OutbuildingModel>
+inline constexpr std::uintptr_t OutbuildingSlots  = 0x70; // Dictionary<OutbuildingSlotDescription, IPrimitiveModel<OutbuildingDescription>>
+inline constexpr std::uintptr_t Outbuildings       = 0x78; // Dictionary<OutbuildingSlotDescription, OutbuildingModel>
 }
 
 namespace PlotDescription {
@@ -876,6 +877,44 @@ inline constexpr std::uintptr_t CargoExchangeWorkbenches = 0xB8;
 inline constexpr std::uintptr_t CryptoWorkbenchModels    = 0xC0;
 inline constexpr std::uintptr_t CargoProductionWorkbenches = 0xC8;
 inline constexpr std::uintptr_t CargoChargeWorkbenches   = 0xD0;
+}
+
+namespace CargoChargeWorkbenchesModel {
+inline constexpr std::uintptr_t Models = 0x18; // Dictionary<slot description, CargoChargeWorkbenchModel>
+}
+
+namespace CargoChargeWorkbenchModel {
+inline constexpr std::uintptr_t LocationDescription = 0x20;
+inline constexpr std::uintptr_t CargoInventory = 0x40;
+}
+
+namespace CargoProductionWorkbenchModel {
+inline constexpr std::uintptr_t LocationDescription = 0x20;
+inline constexpr std::uintptr_t ResultCargoSlots = 0x60;
+}
+
+// Shared layout of LocationCargoChargeWorkbenchDescription and
+// LocationCargoProductionWorkbenchDescription.
+namespace LocationCargoWorkbench {
+inline constexpr std::uintptr_t EntityIds = 0x18;
+inline constexpr std::uintptr_t Position = 0x20;
+inline constexpr std::uintptr_t ModelEntityId = 0x10; // in the EntityIds object
+}
+
+namespace CargoInventoryModel {
+inline constexpr std::uintptr_t Slots = 0x10; // Dictionary<CargoInventorySlotDescription, CargoInventorySlotModel>
+}
+
+namespace CargoInventorySlotModel {
+inline constexpr std::uintptr_t CargoData = 0x10;
+}
+
+namespace CargoData {
+inline constexpr std::uintptr_t Description = 0x20; // IPrimitiveData<CargoDescription>
+}
+
+namespace CargoProductionWorkbenchResultCargoSlotModel {
+inline constexpr std::uintptr_t Cargo = 0x18; // IPrimitiveModel<CargoDescription>
 }
 
 namespace CompoundWallModel {
@@ -986,6 +1025,15 @@ namespace GrenadeTransformModel {
 inline constexpr std::uintptr_t Position = 0x18; // inline V3
 }
 
+namespace GrenadeEntityModel {
+inline constexpr std::uintptr_t ServerModel = 0x18; // GrenadeModel
+inline constexpr std::uintptr_t ClientModel = 0x20; // GrenadeClientModel
+}
+
+namespace GrenadeClientModel {
+inline constexpr std::uintptr_t Position = 0x20; // SetMovementModel
+}
+
 // ------------------------------------------------------------------
 // Extra world / valuable models (new metadata dump)
 // Positions are inline Vector3 fields inside the description model.
@@ -1069,13 +1117,6 @@ namespace CashAmountData {
 inline constexpr std::uintptr_t Value               = 0x18; // int32
 }
 
-namespace DroppedBagModel {
-inline constexpr std::uintptr_t Transform        = 0x20;
-inline constexpr std::uintptr_t InteractPosition = 0x28;
-inline constexpr std::uintptr_t BagDescription   = 0x30; // IPrimitiveModel<CharacterBagDescription>
-inline constexpr std::uintptr_t Role             = 0x38; // IPrimitiveModel<PlayerRoleDescription>
-}
-
 namespace VehicleLootModel {
 inline constexpr std::uintptr_t Transform        = 0x20;
 inline constexpr std::uintptr_t InteractPosition = 0x28;
@@ -1084,8 +1125,20 @@ inline constexpr std::uintptr_t HasCargo         = 0x38; // IPrimitiveModel<bool
 
 namespace CargoModel {
 inline constexpr std::uintptr_t Description      = 0x28; // CargoDescription (EnumItem -> Identified)
-inline constexpr std::uintptr_t Transform        = 0x30;
-inline constexpr std::uintptr_t InteractPosition = 0x38;
+inline constexpr std::uintptr_t Transform        = 0x30; // TransformModel with scalar coordinate wrappers
+}
+
+namespace CargoEntityModel {
+inline constexpr std::uintptr_t ServerModel = 0x18; // CargoModel
+inline constexpr std::uintptr_t ClientModel = 0x20; // CargoClientModel
+}
+
+namespace CargoClientModel {
+inline constexpr std::uintptr_t Position = 0x20; // SetMovementModel
+}
+
+namespace SetMovementModel {
+inline constexpr std::uintptr_t Position = 0x10; // inline XYZ floats
 }
 
 // CargoDescription is an EnumItem (id string at IdentifiedBase::Id) that also
@@ -1246,10 +1299,26 @@ inline constexpr std::uintptr_t RevealContainerModel = 0x18; // IRevealContainer
 }
 
 namespace ScreensUpdater {
+inline constexpr std::uintptr_t ScreensModel  = 0x18;
 inline constexpr std::uintptr_t DisposeModels = 0x20; // Dictionary<IScreenModel, ValueTuple<IUpdater, IDisposable>>
 inline constexpr std::uintptr_t EntryStride   = 0x20; // hash(4), next(4), key(8), updater(8), disposable(8)
 inline constexpr std::uintptr_t EntryKey      = 0x08;
 inline constexpr std::uintptr_t EntryUpdater  = 0x10;
+}
+
+namespace ScreensModel {
+inline constexpr std::uintptr_t Stack = 0x10; // List<IScreenModel>
+}
+
+namespace BattleScreensUpdater {
+inline constexpr std::uintptr_t BattleModel = 0x20;
+inline constexpr std::uintptr_t Updaters    = 0x28; // List<IUpdater>
+}
+
+namespace LootDialogUpdaters {
+// InventoryContainerDialogUpdater and its external inventory updaters.
+inline constexpr std::uintptr_t Updaters = 0x20; // List<IUpdater>
+inline constexpr std::uintptr_t ContainerBattleModel = 0x38;
 }
 
 namespace InventoryCellsRevealUpdater {
@@ -1262,6 +1331,10 @@ inline constexpr std::uintptr_t IsActive             = 0x40; // bool
 namespace InventoryCellsRevealSlotUpdater {
 inline constexpr std::uintptr_t Model                      = 0x20; // IRevealContainerModel
 inline constexpr std::uintptr_t ViewDescriptions           = 0x28; // InventoryRevealViewDescriptions
+inline constexpr std::uintptr_t InventoryView              = 0x30; // ScrolledCellsUiView
+inline constexpr std::uintptr_t SlotIndex                   = 0x58; // int32
+inline constexpr std::uintptr_t Content                     = 0x70; // IDisposableContent<InventoryCellsRevealView>
+inline constexpr std::uintptr_t CurrentItem                 = 0x78; // InventoryItemDescription
 inline constexpr std::uintptr_t State                      = 0x80; // int32: 0=Close, 1=Scan, 2=Preview, 3=Open
 inline constexpr std::uintptr_t ScanDuration               = 0x84; // float
 inline constexpr std::uintptr_t ShineDurationHasValue      = 0x88; // bool (Nullable<float>.hasValue)
@@ -1271,6 +1344,20 @@ inline constexpr std::uintptr_t IconRevealDurationValue    = 0x94; // float (Nul
 inline constexpr std::uintptr_t ScanEndTime                = 0x98; // float
 inline constexpr std::uintptr_t ShineEndTime               = 0x9C; // float
 inline constexpr std::uintptr_t IconRevealEndTime          = 0xA0; // float
+}
+
+namespace InventoryCellsRevealView {
+inline constexpr std::uintptr_t PooledContentValue = 0x18; // closed generic wrapper
+inline constexpr std::uintptr_t RectTransform      = 0x20;
+}
+
+namespace ScrolledCellsUiView {
+inline constexpr std::uintptr_t ScrollRect = 0x20;
+inline constexpr std::uintptr_t ScrollToSlotViewport = 0x28;
+}
+
+namespace UiScrollRect {
+inline constexpr std::uintptr_t Viewport = 0x40;
 }
 
 namespace InventoryRevealViewDescriptions {

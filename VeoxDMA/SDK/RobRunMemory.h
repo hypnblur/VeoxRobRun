@@ -50,6 +50,8 @@ bool ReadObjectString(std::uintptr_t object, std::wstring& out);
 // count and entries pointer before the snapshot is accepted.
 bool ReadDictInt(std::uintptr_t dictionary, std::vector<DictEntry>& out,
     bool requireStable = true);
+bool ReadDictIntFresh(std::uintptr_t dictionary, std::vector<DictEntry>& out,
+    std::int32_t maxCount);
 
 // Version-gated cached snapshot for Dictionary<int, reference>.
 // Every `checkIntervalMs` milliseconds, reads only the 24-byte header fresh;
@@ -79,6 +81,10 @@ bool ReadDictRef(std::uintptr_t dictionary, std::vector<RefDictEntry>& out,
 
 bool ReadList(std::uintptr_t list, std::vector<std::uintptr_t>& out,
     bool requireStable = true);
+
+// Use fresh reads and recheck the list version for transient UI collections.
+bool ReadListFresh(std::uintptr_t list, std::vector<std::uintptr_t>& out,
+    std::int32_t maxCount);
 
 // Returns true when the object's runtime class name matches.
 bool IsClass(std::uintptr_t object, const char* name);

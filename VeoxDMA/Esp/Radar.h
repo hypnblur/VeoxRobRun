@@ -5,6 +5,15 @@
 
 namespace Radar {
 
+struct MapView {
+	std::string name;
+	float minX = 0.f;
+	float maxX = 0.f;
+	float minZ = 0.f;
+	float maxZ = 0.f;
+	bool automatic = false;
+};
+
 void Init();
 void Draw();
 void DrawFullMap();
@@ -17,10 +26,10 @@ void SetMap(int index);
 // Thread-safe map switch request (e.g. from WebRadar HTTP thread). Applied on
 // the render thread by ProcessPendingMap() so D3D11/WIC stay single-threaded.
 void RequestSetMap(int index);
+void RequestAutoMap();
 void ProcessPendingMap();
+MapView GetMapView();
 std::string GetCurrentMapName();
-const char* MapFileForLocation(const std::string& locationId);
-void AutoSelectMap(const std::string& locationId);
 std::filesystem::path GetMapsDirectory();
 void CalibrateBoundsForMap(const std::string& mapName);
 

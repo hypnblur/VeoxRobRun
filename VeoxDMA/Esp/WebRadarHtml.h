@@ -942,7 +942,6 @@ inline const std::string& GetWebRadarHtml()
     mapUrl: "",
     accent: "#8b5cf6",
     accentBright: "#a884ff",
-    bounds: { minX: -1232.33, maxX: 1131.41, minZ: -460.78, maxZ: 914.29 },
     local: { valid: false, x: 0, y: 0, z: 0, yaw: 0 },
     inGameMap: { valid: false, fullscreenOpen: false, minimapCamSize: 0 },
     players: [],
@@ -995,6 +994,7 @@ inline const std::string& GetWebRadarHtml()
 
   // Map image & BVH cache
   let currentMapUrl = "";
+  let mapOptionsKey = null;
   let mapImage = new Image();
   let mapLoaded = false;
   let mapBgColor = "#101016";
@@ -1049,8 +1049,9 @@ inline const std::string& GetWebRadarHtml()
   resize();
 
   function fitMapToCanvas() {
-    const imgW = mapLoaded ? mapImage.width : 4380;
-    const imgH = mapLoaded ? mapImage.height : 2548;
+    if (!mapLoaded) return;
+    const imgW = mapImage.naturalWidth;
+    const imgH = mapImage.naturalHeight;
     const cw = canvas.width / dpr;
     const ch = canvas.height / dpr;
     const zx = (cw * 0.94) / imgW;
@@ -1067,8 +1068,8 @@ inline const std::string& GetWebRadarHtml()
     const b = state.bounds;
     const w = (b.maxX - b.minX) || 1.0;
     const h = (b.maxZ - b.minZ) || 1.0;
-    const imgW = mapLoaded ? mapImage.width : 2190;
-    const imgH = mapLoaded ? mapImage.height : 1274;
+    const imgW = mapImage.naturalWidth;
+    const imgH = mapImage.naturalHeight;
     const nx = (wx - b.minX) / w;
     const nz = (b.maxZ - wz) / h;
     return { x: nx * imgW, y: nz * imgH };
@@ -1084,7 +1085,7 @@ inline const std::string& GetWebRadarHtml()
   };
 
   btnCenter.onclick = () => {
-    if (state.local && state.local.valid) {
+    if (mapLoaded && state.local && state.local.valid) {
       const lp = worldToMapPixel(state.local.x, state.local.z);
       view.panX = lp.x;
       view.panY = lp.y;
@@ -1112,18 +1113,13 @@ inline const std::string& GetWebRadarHtml()
     valScale.textContent = iconScale.toFixed(2).replace(/\.00$/, ".0") + "x";
   };
 
-  mapSelect.onchange = () => {
-    if (mapSelect.value) {
-      menuMapSelect.value = mapSelect.value;
-      fetch("/api/setmap?name=" + encodeURIComponent(mapSelect.value));
-    }
-  };
-  menuMapSelect.onchange = () => {
-    if (menuMapSelect.value) {
-      mapSelect.value = menuMapSelect.value;
-      fetch("/api/setmap?name=" + encodeURIComponent(menuMapSelect.value));
-    }
-  };
+  function requestMap(name) {
+    mapSelect.value = name;
+    menuMapSelect.value = name;
+    fetch("/api/setmap?name=" + encodeURIComponent(name)).catch(() => {});
+  }
+  mapSelect.onchange = () => requestMap(mapSelect.value);
+  menuMapSelect.onchange = () => requestMap(menuMapSelect.value);
   btnPreviewMap.onclick = () => {
     previewingInMenu = true;
     menuOverlay.classList.add("hidden");
@@ -1280,6 +1276,24 @@ inline const std::string& GetWebRadarHtml()
       }
     }
 
+    // Keep the image and its incoming bounds together across async loads.
+    const mapUrl = data.mapUrl || "";
+    if (mapUrl !== currentMapUrl) {
+      currentMapUrl = mapUrl;
+      mapLoaded = false;
+      view.hasFitted = false;
+      interp.clear();
+      const image = new Image();
+      mapImage = image;
+      image.onload = () => {
+        if (image !== mapImage) return;
+        mapLoaded = true;
+        mapBgColor = detectMapEdgeColor(image);
+        fitMapToCanvas();
+      };
+      if (mapUrl) image.src = mapUrl;
+    }
+
     // Update interpolation targets
     if (data.local && data.local.valid) {
       updateTarget("local", data.local.x, data.local.z, data.local.yaw || 0);
@@ -1309,6 +1323,7 @@ inline const std::string& GetWebRadarHtml()
       if (wasInMatch) {
         wasInMatch = false;
         previewingInMenu = false;
+        interp.clear();
       }
       statusPill.className = "status-pill waiting";
       statusText.textContent = "IN MENU";
@@ -1322,38 +1337,24 @@ inline const std::string& GetWebRadarHtml()
     }
 
     // Map selector sync (topbar + menu card)
-    if (data.availableMaps && data.availableMaps.length > 0) {
-      if (mapSelect.options.length !== data.availableMaps.length) {
-        mapSelect.innerHTML = "";
-        menuMapSelect.innerHTML = "";
-        for (const m of data.availableMaps) {
-          const label = m.replace(/\.png$/i, "").replace(/_map$/i, " (BVH)").replace(/_/g, " ").toUpperCase();
-          const opt1 = document.createElement("option");
-          opt1.value = m; opt1.textContent = label;
-          mapSelect.appendChild(opt1);
-          const opt2 = document.createElement("option");
-          opt2.value = m; opt2.textContent = label;
-          menuMapSelect.appendChild(opt2);
+    const files = data.availableMaps || [];
+    const optionsKey = files.join("\n");
+    if (optionsKey !== mapOptionsKey) {
+      mapOptionsKey = optionsKey;
+      for (const select of [mapSelect, menuMapSelect]) {
+        select.replaceChildren(new Option("Auto", ""));
+        for (const file of files) {
+          const label = file.replace(/\.[^.]+$/, "").replace(/_map$/i, " (BVH)").replace(/_/g, " ").toUpperCase();
+          select.add(new Option(label, file));
         }
       }
-      if (data.mapName && mapSelect.value !== data.mapName) {
-        mapSelect.value = data.mapName;
-        menuMapSelect.value = data.mapName;
-      }
     }
-
-    // Map image load
-    if (data.mapUrl && data.mapUrl !== currentMapUrl) {
-      currentMapUrl = data.mapUrl;
-      mapLoaded = false;
-      view.hasFitted = false;
-      mapImage = new Image();
-      mapImage.onload = () => {
-        mapLoaded = true;
-        mapBgColor = detectMapEdgeColor(mapImage);
-        if (!view.hasFitted) fitMapToCanvas();
-      };
-      mapImage.src = data.mapUrl;
+    const active = files.indexOf(data.mapName);
+    const autoLabel = data.autoMap && active >= 0 ? "Auto · " + mapSelect.options[active + 1].textContent : "Auto";
+    const selection = data.autoMap || active < 0 ? "" : data.mapName;
+    for (const select of [mapSelect, menuMapSelect]) {
+      if (select.options[0].textContent !== autoLabel) select.options[0].textContent = autoLabel;
+      if (select.value !== selection) select.value = selection;
     }
 
     // Update live player list at 4 Hz (keeps DOM fast)
@@ -1371,6 +1372,7 @@ inline const std::string& GetWebRadarHtml()
       const row = document.createElement("div");
       row.className = "player-item";
       row.onclick = () => {
+        if (!mapLoaded) return;
         chkFollow.checked = false;
         const pt = worldToMapPixel(p.x, p.z);
         view.panX = pt.x;
@@ -1515,6 +1517,7 @@ inline const std::string& GetWebRadarHtml()
     // Seamless map-edge background fill (matches ocean/sand/dark map borders)
     ctx.fillStyle = mapLoaded ? mapBgColor : "#101016";
     ctx.fillRect(0, 0, cw, ch);
+    if (!mapLoaded) return;
 
     // Follow local player smoothly
     const localI = interp.get("local");
@@ -1557,19 +1560,9 @@ inline const std::string& GetWebRadarHtml()
     ctx.scale(view.zoom, view.zoom);
     ctx.translate(-view.panX, -view.panY);
 
-    const imgW = mapLoaded ? mapImage.width : 4380;
-    const imgH = mapLoaded ? mapImage.height : 2548;
-    if (mapLoaded) {
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(mapImage, 0, 0, imgW, imgH);
-    } else {
-      ctx.fillStyle = "#14141c";
-      ctx.fillRect(0, 0, imgW, imgH);
-      ctx.strokeStyle = "#1e1e29";
-      ctx.lineWidth = 2 / view.zoom;
-      ctx.strokeRect(0, 0, imgW, imgH);
-    }
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(mapImage, 0, 0);
 
     if (chkBvh.checked) {
       fetchBvhLines();

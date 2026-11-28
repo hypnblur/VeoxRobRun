@@ -23,6 +23,7 @@ public:
 	bool ShowValuables = true;
 	int MinLootValue = 0;
 	bool ShowLootNames = true;
+	bool ShowFilteredLootNames = true;
 	bool ShowPlayerNames = true;
 	bool ShowPlayerDistances = true;
 	bool RotateWithCamera = false;
@@ -55,7 +56,7 @@ public:
 	bool Hide3DEspOnFullMap = true;
 	bool InGameMapPlayers = true;
 	bool InGameMapVehicles = true;
-	bool InGameMapPlayerHeading = false;
+	bool ShowInGameMapPlayerHeading = true;
 	bool InGameMapPlayerNames = false;
 	bool InGameMapDroppedBags = false;
 	bool InGameMapValuables = false;
@@ -115,6 +116,7 @@ public:
 		j[ConfigName][LIT("ShowValuables")] = ShowValuables;
 		j[ConfigName][LIT("MinLootValue")] = MinLootValue;
 		j[ConfigName][LIT("ShowLootNames")] = ShowLootNames;
+		j[ConfigName][LIT("ShowFilteredLootNames")] = ShowFilteredLootNames;
 		j[ConfigName][LIT("ShowPlayerNames")] = ShowPlayerNames;
 		j[ConfigName][LIT("ShowPlayerDistances")] = ShowPlayerDistances;
 		j[ConfigName][LIT("RotateWithCamera")] = RotateWithCamera;
@@ -139,7 +141,7 @@ public:
 		j[ConfigName][LIT("Hide3DEspOnFullMap")] = Hide3DEspOnFullMap;
 		j[ConfigName][LIT("InGameMapPlayers")] = InGameMapPlayers;
 		j[ConfigName][LIT("InGameMapVehicles")] = InGameMapVehicles;
-		j[ConfigName][LIT("InGameMapPlayerHeading")] = InGameMapPlayerHeading;
+		j[ConfigName][LIT("ShowInGameMapPlayerHeading")] = ShowInGameMapPlayerHeading;
 		j[ConfigName][LIT("InGameMapPlayerNames")] = InGameMapPlayerNames;
 		j[ConfigName][LIT("InGameMapDroppedBags")] = InGameMapDroppedBags;
 		j[ConfigName][LIT("InGameMapValuables")] = InGameMapValuables;
@@ -164,9 +166,18 @@ public:
 
 	void FromJson(const json& j)
 	{
+		const json empty = json::object();
+		const auto& s = j.contains(ConfigName) ? j[ConfigName] : empty;
+		ShowContainers = s.value(LIT("ShowContainers"), true);
+		ShowDroppedBags = s.value(LIT("ShowDroppedBags"), true);
+		ShowValuables = s.value(LIT("ShowValuables"), true);
+		ShowLootNames = s.value(LIT("ShowLootNames"), true);
+		ShowFilteredLootNames = s.value(LIT("ShowFilteredLootNames"), true);
+		ShowPlayerNames = s.value(LIT("ShowPlayerNames"), true);
+		ShowMap = s.value(LIT("ShowMap"), true);
+		ShowInGameMapPlayerHeading = s.value(LIT("ShowInGameMapPlayerHeading"), true);
 		if (!j.contains(ConfigName))
 			return;
-		auto& s = j[ConfigName];
 		Enabled = s.value(LIT("Enabled"), Enabled);
 		Size = s.value(LIT("Size"), Size);
 		Zoom = s.value(LIT("Zoom"), Zoom);
@@ -174,15 +185,9 @@ public:
 		ShowPlayers = s.value(LIT("ShowPlayers"), ShowPlayers);
 		ShowVehicles = s.value(LIT("ShowVehicles"), ShowVehicles);
 		ShowLoot = s.value(LIT("ShowLoot"), ShowLoot);
-		ShowContainers = s.value(LIT("ShowContainers"), ShowContainers);
-		ShowDroppedBags = s.value(LIT("ShowDroppedBags"), ShowDroppedBags);
-		ShowValuables = s.value(LIT("ShowValuables"), ShowValuables);
 		MinLootValue = s.value(LIT("MinLootValue"), MinLootValue);
-		ShowLootNames = s.value(LIT("ShowLootNames"), ShowLootNames);
-		ShowPlayerNames = s.value(LIT("ShowPlayerNames"), ShowPlayerNames);
 		ShowPlayerDistances = s.value(LIT("ShowPlayerDistances"), ShowPlayerDistances);
 		RotateWithCamera = s.value(LIT("RotateWithCamera"), RotateWithCamera);
-		ShowMap = s.value(LIT("ShowMap"), ShowMap);
 		PopoutWindow = s.value(LIT("PopoutWindow"), PopoutWindow);
 		PopoutX = s.value(LIT("PopoutX"), PopoutX);
 		PopoutY = s.value(LIT("PopoutY"), PopoutY);
@@ -203,7 +208,6 @@ public:
 		Hide3DEspOnFullMap = s.value(LIT("Hide3DEspOnFullMap"), Hide3DEspOnFullMap);
 		InGameMapPlayers = s.value(LIT("InGameMapPlayers"), InGameMapPlayers);
 		InGameMapVehicles = s.value(LIT("InGameMapVehicles"), InGameMapVehicles);
-		InGameMapPlayerHeading = s.value(LIT("InGameMapPlayerHeading"), InGameMapPlayerHeading);
 		InGameMapPlayerNames = s.value(LIT("InGameMapPlayerNames"), InGameMapPlayerNames);
 		InGameMapDroppedBags = s.value(LIT("InGameMapDroppedBags"), InGameMapDroppedBags);
 		InGameMapValuables = s.value(LIT("InGameMapValuables"), InGameMapValuables);

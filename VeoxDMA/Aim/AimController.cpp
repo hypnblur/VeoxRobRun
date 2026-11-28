@@ -9,6 +9,7 @@
 #include "Il2Cpp.h"
 #include "Memory.h"
 #include "DeviceSession.h"
+#include "EspDraw.h"
 #include "ABCurves/ABCurvesPlanner.h"
 #include "ABCurves/ABCurvesRenderer.h"
 #include "CtlState.h"
@@ -23,8 +24,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <random>
 #include <unordered_map>
+#include <utility>
 #include <deque>
 
 namespace Aim {
@@ -32,91 +35,6 @@ namespace Aim {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-constexpr int kAlwaysKeyIndex = 18;
-constexpr int kStickDeflectKey = 0x1021;
-
-// Keep indices 0..18 stable so saved configs keep their bindings.
-// Gamepad keys start at index 19 using CTL_VK_* codes + kStickDeflectKey.
-const int kKeys[] = {
-    VK_RBUTTON,        // 0: Right Mouse
-    VK_LBUTTON,        // 1: Left Mouse
-    VK_LMENU,          // 2: Left Alt
-    VK_LSHIFT,         // 3: Left Shift
-    VK_XBUTTON1,       // 4: Mouse 4
-    VK_XBUTTON2,       // 5: Mouse 5
-    VK_MBUTTON,        // 6: Middle Mouse
-    VK_LCONTROL,       // 7: Left Ctrl
-    VK_CAPITAL,        // 8: Caps Lock
-    VK_SPACE,          // 9: Space
-    VK_TAB,            // 10: Tab
-    'C',               // 11: C
-    'V',               // 12: V
-    'E',               // 13: E
-    'F',               // 14: F
-    'Q',               // 15: Q
-    'X',               // 16: X
-    'Z',               // 17: Z
-    0,                 // 18: Always
-    CTL_VK_LT,         // 19: Gamepad LT
-    CTL_VK_RT,         // 20: Gamepad RT
-    CTL_VK_LB,         // 21: Gamepad LB
-    CTL_VK_RB,         // 22: Gamepad RB
-    CTL_VK_L3,         // 23: Gamepad L3
-    CTL_VK_R3,         // 24: Gamepad R3
-    CTL_VK_A,          // 25: Gamepad A
-    CTL_VK_B,          // 26: Gamepad B
-    CTL_VK_X,          // 27: Gamepad X
-    CTL_VK_Y,          // 28: Gamepad Y
-    CTL_VK_DPAD_UP,    // 29: Gamepad D-Up
-    CTL_VK_DPAD_DOWN,  // 30: Gamepad D-Down
-    CTL_VK_DPAD_LEFT,  // 31: Gamepad D-Left
-    CTL_VK_DPAD_RIGHT, // 32: Gamepad D-Right
-    CTL_VK_BACK,       // 33: Gamepad Back
-    CTL_VK_START,      // 34: Gamepad Start
-    kStickDeflectKey   // 35: Gamepad Stick
-};
-const char* const kKeyNames[] = {
-    "Right Mouse",
-    "Left Mouse",
-    "Left Alt",
-    "Left Shift",
-    "Mouse 4",
-    "Mouse 5",
-    "Middle Mouse",
-    "Left Ctrl",
-    "Caps Lock",
-    "Space",
-    "Tab",
-    "C",
-    "V",
-    "E",
-    "F",
-    "Q",
-    "X",
-    "Z",
-    "Always",
-    "Gamepad LT",
-    "Gamepad RT",
-    "Gamepad LB",
-    "Gamepad RB",
-    "Gamepad L3",
-    "Gamepad R3",
-    "Gamepad A",
-    "Gamepad B",
-    "Gamepad X",
-    "Gamepad Y",
-    "Gamepad D-Up",
-    "Gamepad D-Down",
-    "Gamepad D-Left",
-    "Gamepad D-Right",
-    "Gamepad Back",
-    "Gamepad Start",
-    "Gamepad Stick"
-};
-constexpr int kKeyCount = static_cast<int>(sizeof(kKeys) / sizeof(kKeys[0]));
-static_assert(sizeof(kKeys) / sizeof(kKeys[0]) == sizeof(kKeyNames) / sizeof(kKeyNames[0]),
-    "kKeys and kKeyNames must stay in sync");
-
 const char* const kWeaponClassNames[] = {
     "Rifle",
     "SMG",
@@ -135,6 +53,7 @@ static_assert(kWeaponClassCount == AimConfig::kWeaponProfileCount, "weapon profi
 // wrong time deltas.
 constexpr std::uint64_t kWriteIntervalUs = 8000;
 constexpr std::chrono::milliseconds kTickInterval{ 4 };
+constexpr std::uint64_t kVehicleExitLockMs = 300;
 
 inline std::uint64_t SteadyUs()
 {
@@ -145,10 +64,46 @@ inline std::uint64_t SteadyUs()
 
 std::uint64_t g_observation = 0;
 int g_lastTarget = -1;
+bool g_lastTargetInVehicle = false;
+std::uint64_t g_vehicleExitLockUntilMs = 0;
 std::uint64_t g_lastTargetSwitchMs = 0;
 bool g_wasAiming = false;
+bool g_headOverrideActive = false;
 DebugInfo g_debug{};
 std::atomic<int> g_activeFov{ 40 };
+std::atomic<int> g_fovTarget{ -1 };
+
+void ClearTargetLock()
+{
+    g_lastTarget = -1;
+    g_lastTargetInVehicle = false;
+    g_vehicleExitLockUntilMs = 0;
+}
+
+struct NearestBoneState {
+    int target = -1;
+    std::uint32_t mask = 0;
+    int delayMs = 0;
+    int active = -1;
+    int pending = -1;
+    std::uint64_t pendingSinceMs = 0;
+
+    int Select(int closest, bool activeEligible, std::uint64_t nowMs)
+    {
+        if (!activeEligible || closest == active || delayMs == 0) {
+            active = closest;
+            pending = -1;
+        } else if (pending != closest) {
+            pending = closest;
+            pendingSinceMs = nowMs;
+        } else if (nowMs - pendingSinceMs >= static_cast<std::uint64_t>(delayMs)) {
+            active = closest;
+            pending = -1;
+        }
+        return active;
+    }
+};
+NearestBoneState g_nearestBone{};
 
 // Smoothing state. Reset whenever the aim key is released or the target
 // changes, so a new pick starts from its own angle instead of sweeping across
@@ -158,14 +113,17 @@ float g_curYaw = 0.f;
 float g_curPitch = 0.f;
 float g_carryYaw = 0.f;
 float g_carryPitch = 0.f;
-int g_smoothTarget = -1;
+constexpr auto kNoMotionTarget = std::numeric_limits<std::uint64_t>::max();
+std::uint64_t g_smoothTarget = kNoMotionTarget;
 float g_bezierT = 0.f;
 float g_bezierBendSign = 1.f;
 Base::AimMotion::CurveState g_cursorCurve{};
 Base::ABCurves::ContinuousStream g_memAbPlanner;
+bool g_memUsesAb = false;
 Base::ABCurves::ContinuousStream g_cursorAbPlanner;
 Base::ABCurves::RendererStream g_cursorAbRenderer;
-int g_cursorAbTarget = -1;
+std::uint64_t g_cursorMotionTarget = kNoMotionTarget;
+bool g_cursorUsesAb = false;
 std::uint64_t g_lastWriteTick = 0;
 std::uint64_t g_targetLockUs = 0;
 Vector3 g_writtenForward{};
@@ -416,11 +374,6 @@ GamepadState PollGamepad(const AimConfig& cfg)
     return gp;
 }
 
-bool IsGamepadKeyCode(int vk)
-{
-    return IsCtlVk(vk) || vk == kStickDeflectKey;
-}
-
 bool GamepadKeyDown(int vk, const GamepadState& gp, const AimConfig& cfg)
 {
     if (!gp.connected) return false;
@@ -428,7 +381,7 @@ bool GamepadKeyDown(int vk, const GamepadState& gp, const AimConfig& cfg)
     const float stickDeadzone = std::clamp(cfg.ControllerStickDeadzone, 0.0f, 0.80f);
     if (vk == CTL_VK_LT) return gp.lt >= trigThresh;
     if (vk == CTL_VK_RT) return gp.rt >= trigThresh;
-    if (vk == kStickDeflectKey) {
+    if (vk == Hotkey::Stick) {
         const float rMag = std::hypot(gp.rx, gp.ry);
         const float lMag = std::hypot(gp.lx, gp.ly);
         return rMag >= stickDeadzone || lMag >= stickDeadzone;
@@ -437,16 +390,14 @@ bool GamepadKeyDown(int vk, const GamepadState& gp, const AimConfig& cfg)
     return bit != 0 && (gp.buttons & static_cast<std::uint16_t>(bit)) != 0;
 }
 
-bool Held(int keyIndex, const char** source, const GamepadState* cachedGp = nullptr)
+bool Held(int vk, const char** source, const GamepadState* cachedGp = nullptr)
 {
-    if (keyIndex < 0 || keyIndex >= kKeyCount) keyIndex = 0;
-    const int vk = kKeys[keyIndex];
-    if (vk == 0) {
+    if (vk == Hotkey::Always) {
         if (source) *source = "always";
         return true;
     }
 
-    if (IsGamepadKeyCode(vk)) {
+    if (Hotkey::IsPad(vk)) {
         const auto& cfg = ConfigInstance.Aim;
         const GamepadState localGp = cachedGp ? *cachedGp : PollGamepad(cfg);
         if (GamepadKeyDown(vk, localGp, cfg)) {
@@ -455,6 +406,8 @@ bool Held(int keyIndex, const char** source, const GamepadState* cachedGp = null
         }
         return false;
     }
+
+    if (!Hotkey::IsKeyboard(vk) && !Hotkey::IsMouse(vk)) return false;
 
     // Poll every source and OR the results. Short-circuiting on the DMA
     // keyboard was hiding a working device/host input: IsReady() only proves
@@ -472,15 +425,7 @@ bool Held(int keyIndex, const char** source, const GamepadState* cachedGp = null
         return true;
     }
 
-    auto isHostDown = [](int k) -> bool {
-        if ((GetAsyncKeyState(k) & 0x8000) != 0) return true;
-        if (k == VK_LMENU || k == VK_RMENU) return (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-        if (k == VK_LSHIFT || k == VK_RSHIFT) return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (k == VK_LCONTROL || k == VK_RCONTROL) return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-        return false;
-    };
-
-    if (isHostDown(vk)) {
+    if ((GetAsyncKeyState(vk) & 0x8000) != 0) {
         if (source) *source = "host keyboard";
         return true;
     }
@@ -521,7 +466,7 @@ EffectiveSettings ResolveEffectiveSettings(const AimConfig& cfg, const RobRunRea
     eff.smoothness = std::clamp(cfg.Smoothness, 1, 100);
     eff.smoothAlgorithm = std::clamp(cfg.SmoothAlgorithm, 0, 3);
     eff.triggerEnabled = cfg.TriggerEnabled;
-    eff.triggerKey = std::clamp(cfg.TriggerKey, 0, kKeyCount - 1);
+    eff.triggerKey = cfg.TriggerBinding;
     eff.triggerMinDelayMs = std::clamp(cfg.TriggerMinDelayMs, 0, 500);
     eff.triggerMaxDelayMs = std::clamp(cfg.TriggerMaxDelayMs, eff.triggerMinDelayMs, 500);
     eff.triggerHitboxScale = std::clamp(cfg.TriggerHitboxScale, 0.25f, 2.0f);
@@ -546,8 +491,8 @@ EffectiveSettings ResolveEffectiveSettings(const AimConfig& cfg, const RobRunRea
             if (p.SmoothAlgorithmOverride >= 0 && p.SmoothAlgorithmOverride <= 3)
                 eff.smoothAlgorithm = p.SmoothAlgorithmOverride;
             eff.triggerEnabled = cfg.TriggerEnabled && p.TriggerEnabled;
-            if (p.TriggerKeyOverride >= 0 && p.TriggerKeyOverride < kKeyCount)
-                eff.triggerKey = p.TriggerKeyOverride;
+            if (p.TriggerBindingOverride != Hotkey::Inherit)
+                eff.triggerKey = p.TriggerBindingOverride;
             if (p.TriggerMinDelayMs >= 0)
                 eff.triggerMinDelayMs = std::clamp(p.TriggerMinDelayMs, 0, 500);
             if (p.TriggerMaxDelayMs >= 0)
@@ -662,12 +607,13 @@ bool Finite(const Vector3& v)
 // fallbacks so the aim filter and the overlay never disagree about a target.
 // The teammate filter is party based: the reader resolves the local party's
 // member ids and marks each entity, so same-role strangers stay targetable.
-const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig& cfg)
+const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig& cfg, bool localIsPolice = false)
 {
     const std::string role = RobRunReader::RoleLabel(ent.role, ent.roleName);
     if (cfg.ExpIgnorePolice && role == "Police Officer") return "role:police";
     if (cfg.ExpIgnoreCriminal && role == "Criminal") return "role:criminal";
-    if (cfg.ExpIgnoreCivilian && role == "Civilian") return "role:civilian";
+    if ((cfg.ExpIgnoreCivilian || localIsPolice) && ent.role != 6 &&
+        (ent.isCivilianRole || role == "Civilian")) return "role:civilian";
     if (cfg.ExpIgnoreTeammates && ent.isPartyMember) return "team:party";
     if (cfg.ExpIgnoreTeammates && ent.isClanMate) return "team:clan";
     if (cfg.ExpIgnoreTeammates && ent.isPoliceMate) return "team:police";
@@ -679,6 +625,17 @@ const char* RoleSkipReason(const RobRunReader::EntityData& ent, const AimConfig&
 bool ShouldSkipByRole(const RobRunReader::EntityData& ent, const AimConfig& cfg)
 {
     return RoleSkipReason(ent, cfg) != nullptr;
+}
+
+const char* AimTargetSkipReason(const RobRunReader::EntityData& ent, const AimConfig& cfg,
+    const Vector3* localPosition, bool localIsPolice)
+{
+    if (ent.isDead) return "dead";
+    if (cfg.SkipKnocked && ent.aimKnocked)
+        return "knocked";
+    if (const char* role = RoleSkipReason(ent, cfg, localIsPolice)) return role;
+    if (localPosition && Distance(ent.position, *localPosition) > cfg.MaxDistance) return "max-dist";
+    return nullptr;
 }
 
 Vector3 BonePoint(const RobRunReader::EntityData& ent, int bone)
@@ -757,7 +714,7 @@ void SendRelative(int dx, int dy)
 
 float FovRadiusPixels(float fovDeg, float verticalFovDeg, float height)
 {
-    fovDeg = std::clamp(fovDeg, 5.f, 180.f);
+    fovDeg = std::clamp(fovDeg, 1.f, 180.f);
     if (fovDeg >= 179.f) return 1.0e6f; // effectively everything on screen
     const float vfov = std::clamp(verticalFovDeg, 1.f, 179.f);
     return std::tan(fovDeg * 0.5f * kPi / 180.f)
@@ -783,6 +740,74 @@ float ConeRadiusPixels(const Matrix4x4& viewProjection, float fovDeg,
 {
     return FovRadiusPixels(fovDeg,
         VerticalFovFromProjection(viewProjection, fallbackVerticalFov), height);
+}
+
+float ProjectedTargetWidth(const RobRunReader::EntityData& ent,
+    const Matrix4x4& viewProjection, int width, int height)
+{
+    // Use the same validated pose extents as the player ESP box.
+    const float maxBoneDist = ent.inVehicle ? 12.f : 3.f;
+    float minX = std::numeric_limits<float>::infinity();
+    float maxX = -minX;
+    for (const auto& seg : ent.bones) {
+        if (!Skeleton::IsValidBoneSegment(seg.a, seg.b, ent.position, maxBoneDist)) continue;
+        Vector2 a{}, b{};
+        if (!RobRunReader::ProjectWorld(viewProjection, seg.a, width, height, a) ||
+            !RobRunReader::ProjectWorld(viewProjection, seg.b, width, height, b)) continue;
+        minX = (std::min)({minX, a.x, b.x});
+        maxX = (std::max)({maxX, a.x, b.x});
+    }
+    if (maxX > minX) return maxX - minX;
+
+    const auto projector = [&](const Vector3& world, float& x, float& y) {
+        Vector2 screen{};
+        if (!RobRunReader::ProjectWorld(viewProjection, world, width, height, screen)) return false;
+        x = screen.x;
+        y = screen.y;
+        return true;
+    };
+    const Vector3 center(ent.position.x, ent.position.y + 0.95f, ent.position.z);
+    ImVec2 min{}, max{};
+    if (!Esp::ProjectWorldAABB(projector, center, 0.35f, 0.95f, min, max, 0.f)) return 0.f;
+    return max.x - min.x;
+}
+
+float TargetFovRadius(float configuredRadius, float boxWidth, float minimumRadius)
+{
+    return std::isfinite(boxWidth) && boxWidth > 0.f
+        ? std::clamp(boxWidth, (std::min)(minimumRadius, configuredRadius), configuredRadius)
+        : configuredRadius;
+}
+
+const RobRunReader::EntityData* FindFovPreviewTarget(const RobRunReader::Snapshot& snapshot,
+    const AimConfig& cfg, const Matrix4x4& projection, int width, int height, float radius)
+{
+    const auto* localPosition = snapshot.localPosition.IsZero() ? nullptr : &snapshot.localPosition;
+    const bool bvhLoaded = cfg.VisibleBonesOnly && RobRunReader::GetBvhStatus().loaded;
+    const float centerX = width * 0.5f;
+    const float centerY = height * 0.5f;
+    const RobRunReader::EntityData* closest = nullptr;
+    float closestDistance = radius;
+    for (const auto& ent : snapshot.entities) {
+        if (ent.entityId == snapshot.localEntityId ||
+            AimTargetSkipReason(ent, cfg, localPosition, snapshot.localIsPolice) ||
+            (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible))
+            continue;
+        // Check both ends of the upper body so the preview also works when
+        // the crosshair is over the head at close range.
+        for (const int bone : {2, 0}) {
+            const auto point = BonePoint(ent, bone);
+            Vector2 screen{};
+            if (!RobRunReader::ProjectWorld(projection, point, width, height, screen)) continue;
+            const float distance = std::hypot(screen.x - centerX, screen.y - centerY);
+            if (distance >= closestDistance) continue;
+            if (bvhLoaded && RobRunReader::IsCameraOccluded(point, 0.20f, true, ent.inVehicle, ent.vehicleId))
+                continue;
+            closest = &ent;
+            closestDistance = distance;
+        }
+    }
+    return closest;
 }
 
 // -------- angle helpers (same convention as the reference memory aim) ------
@@ -1371,15 +1396,19 @@ static void ResetMotionHistory()
 }
 
 
-const char* const* KeyNames() { return kKeyNames; }
-int KeyCount() { return kKeyCount; }
-bool IsAlwaysKey(int keyIndex) { return keyIndex == kAlwaysKeyIndex; }
-bool IsKeyHeld(int keyIndex)
-{
-    const char* source = nullptr;
-    return Held(keyIndex, &source);
-}
+bool IsKeyHeld(int binding) { return Held(binding, nullptr); }
 
+std::uint32_t GamepadBindingsDown()
+{
+    const auto& cfg = ConfigInstance.Aim;
+    const auto gp = PollGamepad(cfg);
+    std::uint32_t down = 0;
+    for (int key = CTL_VK_A; key <= CTL_VK_RT; ++key) {
+        if (GamepadKeyDown(key, gp, cfg)) down |= CtlVkBit(key);
+    }
+    if (GamepadKeyDown(Hotkey::Stick, gp, cfg)) down |= 1u << 31;
+    return down;
+}
 const char* const* WeaponClassNames() { return kWeaponClassNames; }
 int WeaponClassCount() { return kWeaponClassCount; }
 
@@ -1750,6 +1779,13 @@ static void StopAimWorkerLocked()
     g_aimWorkerStop.store(true, std::memory_order_relaxed);
     if (g_aimWorkerThread.joinable())
         g_aimWorkerThread.join();
+    ClearTargetLock();
+    g_nearestBone = {};
+    g_headOverrideActive = false;
+    g_smoothInit = false;
+    g_cursorMotionTarget = kNoMotionTarget;
+    g_fovTarget.store(-1, std::memory_order_relaxed);
+    RobRunReader::SetTrackedAimEntity(-1);
     ResetMotionHistory();
     ReleaseFireButton();
     g_triggerPhase = TriggerPhase::Idle;
@@ -2058,7 +2094,7 @@ void TickTrigger()
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
         if (ent.isDead) continue;
-        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) continue;
+        if (cfg.SkipKnocked && ent.aimKnocked) continue;
         if (ShouldSkipByRole(ent, cfg)) continue;
         // When BVH is loaded, rely on the live per-bone IsCameraOccluded check below
         // instead of pre-rejecting on a potentially stale snapshot ent.visible flag.
@@ -2185,10 +2221,16 @@ void Tick()
 	struct PublishDebug {
 		DebugInfo& info;
 		~PublishDebug() {
+			g_fovTarget.store(info.target, std::memory_order_relaxed);
+			RobRunReader::SetTrackedAimEntity(ConfigInstance.Aim.SkipKnocked ? info.target : -1);
 			std::lock_guard<std::mutex> lock(g_debugMutex);
 			g_debug = info;
 		}
 	} publishDebug{ dbg };
+
+    // Commit bone timing only when this tick ends with a selected target.
+    auto previousBone = std::exchange(g_nearestBone, {});
+    const bool hadHeadOverride = std::exchange(g_headOverrideActive, false);
 
     const GamepadState gp = PollGamepad(cfg);
     const auto snapshot = RobRunReader::GetSnapshot();
@@ -2227,6 +2269,7 @@ void Tick()
         g_carryYaw = g_carryPitch = 0.f;
         g_bezierT = 0.f;
         g_cursorCurve.Reset();
+        g_cursorMotionTarget = kNoMotionTarget;
         g_lastWriteTick = 0;
         g_haveWrittenForward = false;
         g_haveLastInputAngles = false;
@@ -2244,7 +2287,7 @@ void Tick()
         clearLastRejected();
         stopAiming();
         resetSmoothing();
-        g_lastTarget = -1;
+        ClearTargetLock();
         return;
     }
     if (ConfigInstance.Overlay.PanicMode) {
@@ -2252,7 +2295,7 @@ void Tick()
         clearLastRejected();
         stopAiming();
         resetSmoothing();
-        g_lastTarget = -1;
+        ClearTargetLock();
         return;
     }
     if (Overlay::MenuOpen()) {
@@ -2260,13 +2303,12 @@ void Tick()
         clearLastRejected();
         stopAiming();
         resetSmoothing();
-        g_lastTarget = -1;
+        ClearTargetLock();
         return;
     }
 
-    auto stickGateOk = [&](int keyIndex) -> bool {
-        const int idx = (keyIndex >= 0 && keyIndex < kKeyCount) ? keyIndex : 0;
-        if (!IsGamepadKeyCode(kKeys[idx]) || !cfg.ControllerRequireStick)
+    auto stickGateOk = [&](int binding) -> bool {
+        if (!Hotkey::IsPad(binding) || !cfg.ControllerRequireStick)
             return true;
         if (!gp.connected) return false;
         const float deadzone = std::clamp(cfg.ControllerStickDeadzone, 0.f, 0.80f);
@@ -2274,14 +2316,11 @@ void Tick()
     };
 
     const char* keySource = "-";
-    bool keyHeld = Held(cfg.AimKey, &keySource, &gp) && stickGateOk(cfg.AimKey);
-    if (!keyHeld && cfg.ControllerEnabled && cfg.ControllerSecondaryEnable) {
-        const char* padSource = "-";
-        if (Held(cfg.ControllerAimKey, &padSource, &gp) && stickGateOk(cfg.ControllerAimKey)) {
-            keyHeld = true;
-            keySource = padSource;
-        }
-    }
+    const auto activationHeld = [&](int index) {
+        return stickGateOk(index) && Held(index, &keySource, &gp);
+    };
+    const bool keyHeld = activationHeld(cfg.AimBinding) || activationHeld(cfg.SecondaryAimBinding) ||
+        (cfg.ControllerEnabled && cfg.ControllerSecondaryEnable && activationHeld(cfg.ControllerAimBinding));
     dbg.held = keyHeld;
     dbg.keySource = keySource;
     {
@@ -2298,15 +2337,20 @@ void Tick()
         clearLastRejected();
         stopAiming();
         resetSmoothing();
-        g_lastTarget = -1;
+        ClearTargetLock();
         ResetMotionHistory();
         return;
     }
+
+    const bool headOverride = Held(cfg.HeadOverrideBinding, nullptr, &gp);
+    if (headOverride != hadHeadOverride) resetSmoothing();
+    g_headOverrideActive = headOverride;
 
     if (!snapshot || snapshot->entities.empty()) {
         dbg.reason = "no entities";
         clearLastRejected();
         stopAiming();
+        ClearTargetLock();
         return;
     }
     dbg.entities = static_cast<int>(snapshot->entities.size());
@@ -2318,10 +2362,14 @@ void Tick()
         g_lastSessionGeneration = snapshot->sessionGeneration;
         resetSmoothing();
         g_humanize.Reset();
-        g_lastTarget = -1;
+        ClearTargetLock();
+        previousBone = {};
         ResetMotionHistory();
         g_writeBlockedUntil = GetTickCount64() + 1000;
     }
+
+    if (!cfg.KeepLockAfterVehicleExit)
+        g_vehicleExitLockUntilMs = 0;
 
     // One-off debug metadata dump (Debug builds only so Release never stalls
     // the first active tick or writes diagnostic files to C:\).
@@ -2362,20 +2410,26 @@ void Tick()
     const float verticalFov = haveFreshCamera
         ? freshCamera.verticalFov
         : (snapshot->camera.valid ? snapshot->camera.verticalFov : 60.f);
-    const float radiusPixels = ConeRadiusPixels(viewProjection, fovDeg, verticalFov, dispY);
+    const float configuredRadius = ConeRadiusPixels(viewProjection, fovDeg, verticalFov, dispY);
+    const bool selectSampledBone = headOverride || cfg.NearestBone;
+    const bool dynamicFov = cfg.DynamicFov;
+    const float minRadius = dynamicFov
+        ? ConeRadiusPixels(viewProjection, static_cast<float>(cfg.MinDynamicFov), verticalFov, dispY) : 0.f;
+    const auto boneMask = headOverride ? 1u : cfg.NearestBoneMask; // Head is the first bone.
+    const int boneDelay = std::clamp(cfg.BoneSwitchDelay, 0, 1000);
 
-    bool found = false;
-    int bestId = -1;
-    Vector3 bestPoint{};
-    Vector2 bestScreen{};
+    struct Candidate {
+        int id = -1;
+        Vector3 point{};
+        Vector2 screen{};
+        int leadMs = 0;
+        const char* predictionSource = "off";
+        float radius = 0.f;
+        NearestBoneState bone{};
+        bool inVehicle = false;
+    };
+    Candidate best, last, outsideHead;
     float bestScore = 0.f;
-    int bestLeadMs = 0;
-    const char* bestPredictionSource = "off";
-    bool lastValid = false;
-    Vector3 lastPoint{};
-    Vector2 lastScreen{};
-    int lastLeadMs = 0;
-    const char* lastPredictionSource = "off";
     // If the local transform could not be resolved the origin would reject
     // every target on distance, so only apply the range filter when we have a
     // real local position.
@@ -2412,28 +2466,78 @@ void Tick()
         }
     };
 
+    bool sawTrackedTarget = false;
     for (const auto& ent : snapshot->entities) {
         if (ent.entityId == snapshot->localEntityId) continue;
-        if (ent.isDead) { noteRejected(ent, "dead"); continue; }
-        if (cfg.SkipKnocked && (ent.isKnockedDown || ent.isKnockedOut)) {
-            noteRejected(ent, ent.isKnockedDown ? "knocked(kd)" : "knocked(ko)");
+        const bool tracked = ent.entityId == g_lastTarget;
+        sawTrackedTarget |= tracked;
+        if (const char* why = AimTargetSkipReason(ent, cfg,
+            haveLocalPosition ? &snapshot->localPosition : nullptr, snapshot->localIsPolice)) {
+            if (tracked)
+                ClearTargetLock();
+            noteRejected(ent, why);
             continue;
         }
-        if (const char* roleWhy = RoleSkipReason(ent, cfg)) { noteRejected(ent, roleWhy); continue; }
-        // When BVH is loaded, let the live per-bone IsCameraOccluded check below
-        // evaluate Head/Neck/Chest/Pelvis directly instead of pre-rejecting on a
-        // potentially stale snapshot ent.visible flag.
-        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) { noteRejected(ent, "vis(no-bvh)"); continue; }
-        if (haveLocalPosition &&
-            Distance(ent.position, snapshot->localPosition) > cfg.MaxDistance) { noteRejected(ent, "max-dist"); continue; }
 
+        if (tracked && cfg.KeepLockAfterVehicleExit) {
+            if (ent.inVehicle) {
+                g_vehicleExitLockUntilMs = 0;
+            } else if (g_lastTargetInVehicle) {
+                g_vehicleExitLockUntilMs = nowMs + kVehicleExitLockMs;
+            }
+            g_lastTargetInVehicle = ent.inVehicle;
+        }
+        if (cfg.VisibleBonesOnly && !bvhLoaded && !ent.visible) {
+            noteRejected(ent, "vis(no-bvh)");
+            continue;
+        }
+
+        const bool isLocked = tracked && cfg.HardLock;
+        const bool keepingAfterExit = tracked && nowMs < g_vehicleExitLockUntilMs;
+        const bool canKeepOutsideFov = tracked && (isLocked || headOverride);
+        const float boxWidth = dynamicFov ? ProjectedTargetWidth(ent, viewProjection, width, height) : 0.f;
+        const float targetRadius = TargetFovRadius(configuredRadius, boxWidth, minRadius);
         int activeBone = eff.targetBone;
-        if (activeBone == 5) {
+        if (!selectSampledBone && activeBone == 5) {
             // Head & Body (natural random variation per engagement)
             activeBone = g_humanize.PickHeadOrBodyBone(ent.entityId, SteadyUs());
         }
         Vector3 point{};
-        if (activeBone == 4) {
+        NearestBoneState bone{};
+        if (selectSampledBone) {
+            if (!headOverride) {
+                bone = {ent.entityId, boneMask, boneDelay};
+                if (previousBone.target == ent.entityId && previousBone.mask == boneMask &&
+                    previousBone.delayMs == boneDelay) {
+                    bone = previousBone;
+                }
+            }
+            const auto& points = ent.bonePoints;
+            const auto available = points.available & boneMask;
+            const float maxBoneDist = ent.inVehicle ? 12.f : 3.f;
+            int closest = -1;
+            bool activeEligible = false;
+            float closestDistance = std::numeric_limits<float>::infinity();
+            for (int b = 0; b < Skeleton::kAimBoneCount; ++b) {
+                if ((available & (1u << b)) == 0) continue;
+                const auto& bp = points.*Skeleton::kAimBones[b].point;
+                if (!Skeleton::IsValidBone(bp, ent.position, maxBoneDist)) continue;
+                Vector2 projected{};
+                if (!RobRunReader::ProjectWorld(viewProjection, bp, width, height, projected)) continue;
+                const float distance = std::hypot(projected.x - centerX, projected.y - centerY);
+                if (!canKeepOutsideFov && distance > targetRadius) continue;
+                if (cfg.VisibleBonesOnly && bvhLoaded &&
+                    RobRunReader::IsCameraOccluded(bp, 0.20f, true, ent.inVehicle, ent.vehicleId)) continue;
+                if (b == bone.active) activeEligible = true;
+                if (distance < closestDistance) {
+                    closest = b;
+                    closestDistance = distance;
+                }
+            }
+            if (closest < 0) { noteRejected(ent, headOverride ? "no eligible head" : "no eligible bone"); continue; }
+            activeBone = headOverride ? closest : bone.Select(closest, activeEligible, nowMs);
+            point = points.*Skeleton::kAimBones[activeBone].point;
+        } else if (activeBone == 4) {
             // Closest bone to crosshair among Head, Neck, Chest, Pelvis
             bool bestBoneFound = false;
             float bestBoneDist = 1.0e9f;
@@ -2486,6 +2590,13 @@ void Tick()
                 }
             }
         }
+        Vector2 screen{};
+        if (!RobRunReader::ProjectWorld(viewProjection, point, width, height, screen))
+            continue;
+        const float distance = std::hypot(screen.x - centerX, screen.y - centerY);
+        const bool inFov = distance <= targetRadius;
+        if (!inFov && !canKeepOutsideFov) { noteRejected(ent, "outside-fov"); continue; }
+
         int leadMs = 0;
         const char* predictionSource = "off";
 
@@ -2493,43 +2604,25 @@ void Tick()
             Vector3 adaptivePoint{};
             int adaptiveLeadMs = 0;
             if (ApplyAdaptivePrediction(point, ent.entityId, ent.position, snapshot->stampUs, nowMs,
-                    responseMs, observationAgeMs, adaptivePoint, adaptiveLeadMs, predictionSource, ent.inVehicle)) {
+                    responseMs, observationAgeMs, adaptivePoint, adaptiveLeadMs, predictionSource, ent.inVehicle) &&
+                RobRunReader::ProjectWorld(viewProjection, adaptivePoint, width, height, screen)) {
                 point = adaptivePoint;
                 leadMs = adaptiveLeadMs;
             }
         }
 
-        Vector2 screen{};
-        if (!RobRunReader::ProjectWorld(viewProjection, point, width, height, screen))
-            continue;
-
-        if (ent.entityId == g_lastTarget) {
-            lastValid = true;
-            lastScreen = screen;
-            lastPoint = point;
-            lastLeadMs = leadMs;
-            lastPredictionSource = predictionSource;
-        }
-
-        const float dx = screen.x - centerX;
-        const float dy = screen.y - centerY;
-        const float distance = std::hypot(dx, dy);
-
-        // Hard lock: the sticky target keeps its pick even when it leaves the
-        // FOV ring, mirroring the reference's locked-target behaviour.
-        const bool isLocked = cfg.HardLock && ent.entityId == g_lastTarget;
-        if (!isLocked && distance > radiusPixels) { noteRejected(ent, "outside-fov"); continue; }
+        const Candidate candidate{ent.entityId, point, screen, leadMs, predictionSource, targetRadius, bone, ent.inVehicle};
         ++dbg.candidates;
 
-        if (isLocked) {
-            found = true;
-            bestId = ent.entityId;
-            bestScreen = screen;
-            bestPoint = point;
-            bestLeadMs = leadMs;
-            bestPredictionSource = predictionSource;
+        if (isLocked || keepingAfterExit) {
+            best = candidate;
             break;
         }
+        if (!inFov) {
+            outsideHead = candidate;
+            continue;
+        }
+        if (tracked) last = candidate;
 
         float score = distance;
         if (cfg.TargetPriority == 1) {
@@ -2540,15 +2633,9 @@ void Tick()
             score = (ent.healthKnown && ent.health > 0.f) ? ent.health : (10000.f + distance);
         }
 
-        if (ent.entityId == g_lastTarget) score *= 0.75f;
-        if (!found || score < bestScore) {
-            found = true;
-            bestId = ent.entityId;
-            bestScreen = screen;
-            bestPoint = point;
+        if (best.id < 0 || score < bestScore) {
+            best = candidate;
             bestScore = score;
-            bestLeadMs = leadMs;
-            bestPredictionSource = predictionSource;
         }
     }
 
@@ -2558,7 +2645,21 @@ void Tick()
         g_lastRejected = closestRejected;
     }
 
-    if (!found) {
+    // An exit can briefly remove the occupant from the snapshot. Use the
+    // same window for that gap so another actor cannot take over the lock.
+    if (cfg.KeepLockAfterVehicleExit && !sawTrackedTarget && g_lastTargetInVehicle) {
+        g_vehicleExitLockUntilMs = nowMs + kVehicleExitLockMs;
+        g_lastTargetInVehicle = false;
+    }
+    if (nowMs < g_vehicleExitLockUntilMs && best.id != g_lastTarget) {
+        dbg.reason = "waiting for vehicle exit target";
+        stopAiming();
+        resetSmoothing();
+        return;
+    }
+
+    if (best.id < 0) best = outsideHead;
+    if (best.id < 0) {
         if (closestRejected.entityId >= 0) {
             static std::uint64_t s_lastRejLogMs = 0;
             if (nowMs - s_lastRejLogMs >= 1500) {
@@ -2573,28 +2674,33 @@ void Tick()
         dbg.reason = "no target in FOV";
         stopAiming();
         resetSmoothing();
-        g_lastTarget = -1;
+        ClearTargetLock();
         return;
     }
-    if (bestId != g_lastTarget && g_lastTarget >= 0 && cfg.TargetSwitchDelay > 0 &&
-        lastValid &&
+    if (best.id != g_lastTarget && last.id >= 0 && cfg.TargetSwitchDelay > 0 &&
         (nowMs - g_lastTargetSwitchMs) < static_cast<std::uint64_t>(cfg.TargetSwitchDelay)) {
-        bestId = g_lastTarget;
-        bestScreen = lastScreen;
-        bestPoint = lastPoint;
-        bestLeadMs = lastLeadMs;
-        bestPredictionSource = lastPredictionSource;
+        best = last;
     }
-    if (bestId != g_lastTarget)
+    const int bestId = best.id;
+    // Give the movement curves a fresh start on override changes within one target.
+    const std::uint64_t motionTarget = static_cast<std::uint64_t>(bestId) |
+        (headOverride ? (std::uint64_t{1} << 63) : 0);
+    auto& bestScreen = best.screen;
+    auto& bestPoint = best.point;
+    g_nearestBone = best.bone;
+    if (bestId != g_lastTarget) {
         g_lastTargetSwitchMs = nowMs;
+        g_vehicleExitLockUntilMs = 0;
+    }
     g_lastTarget = bestId;
+    g_lastTargetInVehicle = best.inVehicle;
     dbg.target = bestId;
-    dbg.leadMs = bestLeadMs;
-    dbg.predictionSource = bestPredictionSource;
+    dbg.leadMs = best.leadMs;
+    dbg.predictionSource = best.predictionSource;
 
     // Apply slow humanized bone wander ONLY to the chosen target (never inside
     // the candidate loop, where multiple entities would overwrite state at 250 Hz).
-    if (cfg.HumanizeOffsetCm > 0.05f) {
+    if (!headOverride && cfg.HumanizeOffsetCm > 0.05f) {
         const Vector3 hOff = g_humanize.SampleOffset(bestId, SteadyUs(), cfg.HumanizeOffsetCm);
         bestPoint.x += hOff.x;
         bestPoint.y += hOff.y;
@@ -2691,20 +2797,24 @@ void Tick()
                 : std::clamp(static_cast<float>(nowUs - g_lastWriteTick) * 0.001f, 0.5f, 25.f);
             g_lastWriteTick = nowUs;
 
-            const bool targetChanged = (!g_smoothInit || g_smoothTarget != bestId);
+            const bool useAbCurve = eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available();
+            const bool targetChanged = !g_smoothInit || g_smoothTarget != motionTarget;
             if (targetChanged) {
                 g_carryYaw = g_carryPitch = 0.f;
                 g_bezierT = 0.f;
                 g_bezierBendSign = ((static_cast<unsigned>(bestId) ^ (static_cast<unsigned>(bestId) >> 2)) & 1u) ? 1.f : -1.f;
-                const std::uint64_t abSeed = (cfg.ABCurvesSeed > 0)
-                    ? static_cast<std::uint64_t>(cfg.ABCurvesSeed)
-                    : (static_cast<std::uint64_t>(bestId) ^ nowUs);
-                g_memAbPlanner.Reset(abSeed);
                 g_smoothInit = true;
-                g_smoothTarget = bestId;
+                g_smoothTarget = motionTarget;
                 g_targetLockUs = nowUs;
                 g_haveLastInputAngles = false;
             }
+            if (useAbCurve && (targetChanged || !g_memUsesAb)) {
+                const std::uint64_t abSeed = cfg.ABCurvesSeed > 0
+                    ? static_cast<std::uint64_t>(cfg.ABCurvesSeed)
+                    : motionTarget ^ nowUs;
+                g_memAbPlanner.Reset(abSeed);
+            }
+            g_memUsesAb = useAbCurve;
 
             // Single scatter validation read (same DMA budget as before). Reading
             // PlayerRotationInputModel here lets us apply genuine user mouse deltas
@@ -2801,7 +2911,7 @@ void Tick()
                             stepYaw = (dYaw + nyaw * lat) * stepFrac + g_carryYaw;
                             stepPitch = (dPitch + npitch * lat) * stepFrac + g_carryPitch;
                         }
-                    } else if (eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available()) {
+                    } else if (useAbCurve) {
                         // ABCurves Continuous Planner: convert angular error (rad)
                         // directly into common angular count space, advance the
                         // neural ProDMP stream, and convert delta back to radians.
@@ -2825,8 +2935,8 @@ void Tick()
                             : 100.f;
                         const float u = std::clamp(lockMs / 100.f, 0.f, 1.f);
                         const float entryScale = 0.45f + 0.55f * (u * u * (3.f - 2.f * u));
-                        const float fovFrac = (radiusPixels > 1.f)
-                            ? std::clamp(screenErrPx / radiusPixels, 0.f, 1.f)
+                        const float fovFrac = (best.radius > 1.f)
+                            ? std::clamp(screenErrPx / best.radius, 0.f, 1.f)
                             : 0.f;
                         const float edgeScale = 0.65f + 0.35f * (1.f - fovFrac);
                         const float assistScale = entryScale * edgeScale;
@@ -2925,15 +3035,14 @@ void Tick()
         // cursor, which the game PC can never see.
         stopAiming();
         settings.responseMs = responseMs;
+        const bool targetChanged = std::exchange(g_cursorMotionTarget, motionTarget) != motionTarget;
+        const auto seed = settings.abcurvesSeed ? settings.abcurvesSeed
+            : motionTarget ^ static_cast<std::uint64_t>(nowTime.time_since_epoch().count());
+        if (targetChanged) g_cursorAbRenderer.Reset();
+        const bool useAbCurve = eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available();
         Base::AimMotion::Vec2 step{};
-        if (eff.smoothAlgorithm == 3 && Base::ABCurves::ContinuousStream::Available()) {
-            if (g_cursorAbTarget != bestId) {
-                g_cursorAbTarget = bestId;
-                const std::uint64_t seed = settings.abcurvesSeed ? settings.abcurvesSeed
-                    : (static_cast<std::uint64_t>(bestId) ^ static_cast<std::uint64_t>(nowTime.time_since_epoch().count()));
-                g_cursorAbPlanner.Reset(seed);
-                g_cursorAbRenderer.Reset();
-            }
+        if (useAbCurve) {
+            if (targetChanged || !g_cursorUsesAb) g_cursorAbPlanner.Reset(seed);
             const double abScale = static_cast<double>(settings.abcurvesScale);
             const auto abDelta = g_cursorAbPlanner.StepTowardError(
                 static_cast<double>(dx) * abScale,
@@ -2942,17 +3051,13 @@ void Tick()
             step.x = static_cast<float>(abDelta.dx / abScale);
             step.y = static_cast<float>(-abDelta.dy / abScale);
         } else {
-            g_cursorAbTarget = -1;
             step = Base::AimMotion::StepWithCurve(
-                g_cursorCurve, static_cast<std::uint64_t>(bestId), { dx, dy }, settings, dt);
+                g_cursorCurve, motionTarget, { dx, dy }, settings, dt);
         }
+        g_cursorUsesAb = useAbCurve;
         int mx = 0, my = 0;
         if (cfg.ABCurvesRenderer && Base::ABCurves::RendererStream::Available()) {
-            if (!g_cursorAbRenderer.Active()) {
-                const std::uint64_t seed = settings.abcurvesSeed ? settings.abcurvesSeed
-                    : (static_cast<std::uint64_t>(bestId) ^ static_cast<std::uint64_t>(nowTime.time_since_epoch().count()));
-                g_cursorAbRenderer.Begin(seed);
-            }
+            if (!g_cursorAbRenderer.Active()) g_cursorAbRenderer.Begin(seed);
             const auto rep = g_cursorAbRenderer.Step(step.x, step.y, dt, 127);
             mx = rep.dx;
             my = rep.dy;
@@ -3000,7 +3105,7 @@ void Tick()
     Base::Hardware::MotionIntent intent;
     intent.value = { dx, dy };
     intent.settings = settings;
-    intent.target = static_cast<std::uint64_t>(bestId);
+    intent.target = motionTarget;
     intent.observation = ++g_observation;
     intent.error = true;
     intent.intervalMs = cfg.ABCurvesRenderer ? 1 : 6;
@@ -3368,24 +3473,39 @@ void Draw()
 
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     if (display.x <= 0.f || display.y <= 0.f) return;
+    const int width = static_cast<int>(display.x);
+    const int height = static_cast<int>(display.y);
+    const auto snapshot = RobRunReader::GetSnapshot();
 
     float verticalFov = 60.f;
     RobRunCamera::CameraState freshCamera{};
     if (RobRunReader::GetFreshCamera(freshCamera) && freshCamera.valid)
         verticalFov = freshCamera.verticalFov;
-    else {
-        const auto snapshot = RobRunReader::GetSnapshot();
-        if (snapshot && snapshot->camera.valid) verticalFov = snapshot->camera.verticalFov;
-    }
+    else if (snapshot && snapshot->camera.valid)
+        verticalFov = snapshot->camera.verticalFov;
 
     const float activeFov = static_cast<float>(std::clamp(g_activeFov.load(std::memory_order_relaxed), 5, 180));
     Matrix4x4 viewProjection{};
-    float radius;
-    if (RobRunReader::ResolveViewProjection(viewProjection, (int)display.x, (int)display.y)) {
-        radius = ConeRadiusPixels(viewProjection, activeFov,
-            verticalFov, display.y);
-    } else {
-        radius = FovRadiusPixels(activeFov, verticalFov, display.y);
+    const bool haveProjection = RobRunReader::ResolveViewProjection(viewProjection, width, height);
+    float radius = haveProjection
+        ? ConeRadiusPixels(viewProjection, activeFov, verticalFov, display.y)
+        : FovRadiusPixels(activeFov, verticalFov, display.y);
+    if (cfg.DynamicFov && haveProjection && snapshot) {
+        const int trackedId = g_fovTarget.load(std::memory_order_relaxed);
+        const auto tracked = trackedId >= 0
+            ? std::find_if(snapshot->entities.begin(), snapshot->entities.end(),
+                [trackedId](const auto& ent) { return ent.entityId == trackedId; })
+            : snapshot->entities.end();
+        const auto* localPosition = snapshot->localPosition.IsZero() ? nullptr : &snapshot->localPosition;
+        const auto* target = tracked != snapshot->entities.end() &&
+            !AimTargetSkipReason(*tracked, cfg, localPosition, snapshot->localIsPolice)
+            ? &*tracked
+            : FindFovPreviewTarget(*snapshot, cfg, viewProjection, width, height, radius);
+        if (target) {
+            const float minimum = ConeRadiusPixels(viewProjection, static_cast<float>(cfg.MinDynamicFov),
+                verticalFov, display.y);
+            radius = TargetFovRadius(radius, ProjectedTargetWidth(*target, viewProjection, width, height), minimum);
+        }
     }
     radius = (std::min)(radius, std::hypot(display.x * 0.5f, display.y * 0.5f));
     ImDrawList* drawList = ImGui::GetBackgroundDrawList();

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <string>
 
 // Render-thread aim loop. Tick() reads the published snapshot, picks the
@@ -64,14 +65,10 @@ void StartRecoilWorker();
 void StopRecoilWorker();
 void SetDisplaySize(float width, float height);
 
-// Activation-key labels shared with the menu so the combo and the runtime
-// lookup cannot drift apart.
-const char* const* KeyNames();
-int KeyCount();
-bool IsAlwaysKey(int keyIndex);
-// Returns true while the selected key index is held (same sources as the aim
+// Returns true while the selected binding is held (same sources as the aim
 // activation key: DMA keyboard, aim device, gamepad, host keyboard).
-bool IsKeyHeld(int keyIndex);
+bool IsKeyHeld(int binding);
+std::uint32_t GamepadBindingsDown();
 
 // Weapon profile class names shared between AimConfig, AimController, and VeoxMenu.
 const char* const* WeaponClassNames();

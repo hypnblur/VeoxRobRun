@@ -27,8 +27,16 @@ int g_mapHeight = 0;
 std::vector<std::string> g_mapFiles;
 int g_currentMapIndex = -1;
 std::filesystem::path g_mapsDir;
-std::atomic<int> g_pendingMapIndex{ -1 };
-std::mutex g_radarStateMutex;
+constexpr int kNoMapRequest = -1;
+constexpr int kAutoMapRequest = -2;
+std::atomic<int> g_pendingMapIndex{ kNoMapRequest };
+std::mutex g_mapViewMutex;
+Radar::MapView g_mapView;
+bool g_manualMap = false;
+bool g_autoWasEnabled = false;
+std::uintptr_t g_mapBattle = 0;
+std::uintptr_t g_mapEntities = 0;
+std::string g_mapLocation;
 bool g_comInitialized = false;
 
 enum class MapSpriteSlot : int {
@@ -197,10 +205,6 @@ bool DrawMapSpriteRotated(ImDrawList* dl, MapSpriteSlot slot, const ImVec2& c, f
 
 bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 {
-	if (g_mapSRV) { g_mapSRV->Release(); g_mapSRV = nullptr; }
-	g_mapWidth = 0;
-	g_mapHeight = 0;
-
 	IWICImagingFactory* factory = nullptr;
 	HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
 		IID_PPV_ARGS(&factory));
@@ -264,9 +268,12 @@ bool LoadTextureFromFile(const wchar_t* path, ID3D11Device* device)
 	srvDesc.Format = desc.Format;
 	srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Texture2D.MipLevels = 1;
-	hr = device->CreateShaderResourceView(tex, &srvDesc, &g_mapSRV);
+	ID3D11ShaderResourceView* mapSRV = nullptr;
+	hr = device->CreateShaderResourceView(tex, &srvDesc, &mapSRV);
 	tex->Release();
 	if (SUCCEEDED(hr)) {
+		if (g_mapSRV) g_mapSRV->Release();
+		g_mapSRV = mapSRV;
 		g_mapWidth = (int)w;
 		g_mapHeight = (int)h;
 	}
@@ -307,6 +314,21 @@ bool LoadMapByName(const std::string& filename)
 	}
 	printf("[Radar] Failed to load map: %s\n", filename.c_str());
 	return false;
+}
+
+void PublishMapView()
+{
+	const auto& cfg = ConfigInstance.Radar;
+	const std::lock_guard<std::mutex> lock(g_mapViewMutex);
+	if (g_currentMapIndex >= 0)
+		g_mapView.name = g_mapFiles[g_currentMapIndex];
+	else
+		g_mapView.name.clear();
+	g_mapView.minX = cfg.WorldMinX;
+	g_mapView.maxX = cfg.WorldMaxX;
+	g_mapView.minZ = cfg.WorldMinZ;
+	g_mapView.maxZ = cfg.WorldMaxZ;
+	g_mapView.automatic = cfg.AutoMapSelect && !g_manualMap;
 }
 
 ImVec2 WorldToRadar(const Vector3& world, const Vector3& center,
@@ -378,31 +400,21 @@ void Init()
 
 	ScanMapFiles();
 
-	const auto& selected = ConfigInstance.Radar.SelectedMap;
-	g_currentMapIndex = -1;
-	for (int i = 0; i < (int)g_mapFiles.size(); i++) {
-		if (g_mapFiles[i] == selected) {
-			g_currentMapIndex = i;
-			break;
+	const auto selected = std::find(g_mapFiles.begin(), g_mapFiles.end(), ConfigInstance.Radar.SelectedMap);
+	const auto city = std::find(g_mapFiles.begin(), g_mapFiles.end(), "shooter_city.png");
+	const auto initial = selected != g_mapFiles.end() ? selected :
+		(city != g_mapFiles.end() ? city : g_mapFiles.begin());
+	if (initial != g_mapFiles.end()) {
+		if (LoadMapByName(*initial)) {
+			g_currentMapIndex = static_cast<int>(initial - g_mapFiles.begin());
+			ConfigInstance.Radar.SelectedMap = *initial;
+			if (ConfigInstance.Radar.AutoMapSelect)
+				CalibrateBoundsForMap(*initial);
 		}
-	}
-
-	if (g_currentMapIndex >= 0) {
-		LoadMapByName(g_mapFiles[g_currentMapIndex]);
-		if (ConfigInstance.Radar.AutoMapSelect)
-			CalibrateBoundsForMap(g_mapFiles[g_currentMapIndex]);
-	} else if (!g_mapFiles.empty()) {
-		g_currentMapIndex = 0;
-		for (int i = 0; i < (int)g_mapFiles.size(); ++i) {
-			if (g_mapFiles[i] == "shooter_city.png") { g_currentMapIndex = i; break; }
-		}
-		ConfigInstance.Radar.SelectedMap = g_mapFiles[g_currentMapIndex];
-		LoadMapByName(g_mapFiles[g_currentMapIndex]);
-		if (ConfigInstance.Radar.AutoMapSelect)
-			CalibrateBoundsForMap(g_mapFiles[g_currentMapIndex]);
 	} else {
 		printf("[Radar] No map files found in maps/ folder\n");
 	}
+	PublishMapView();
 }
 
 struct LootRenderInfo {
@@ -417,7 +429,8 @@ struct LootRenderInfo {
 	std::string text;
 };
 
-static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& localPos, bool haveLocalPos, LootRenderInfo& out)
+static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& localPos, bool haveLocalPos,
+	bool showFilteredNames, LootRenderInfo& out)
 {
 	const auto& lf = ConfigInstance.LootFilter;
 
@@ -567,26 +580,24 @@ static bool EvaluateLootEntity(const RobRunWorld::Entity& ent, const Vector3& lo
 
 	// 8. Label text, gated by the per-item render flags
 	std::string text;
-	const bool wantName  = item.Has(LootFilter::RenderName);
+	const bool wantName  = showFilteredNames && item.Has(LootFilter::RenderName);
 	const bool wantPrice = item.Has(LootFilter::RenderPrice);
 	const bool wantDist  = item.Has(LootFilter::RenderDistance);
-	if (wantName || wantDist) {
-		if (wantName)
-			text = ent.label;
-		if (wantPrice && ent.hasCashAmount) {
-			if (!text.empty())
-				text += " | ";
-			text += "$" + FormatCash(ent.cashAmount);
-			if (ent.kind == RobRunWorld::Kind::MoneyWorkbench && ent.cleanCash > 0 && ent.dirtyCash > 0) {
-				text += " (C:$" + FormatCash(ent.cleanCash) + " D:$" + FormatCash(ent.dirtyCash) + ")";
-			}
-		} else if (wantName && !lf.HideEmpty && ent.hasEmptyFlag) {
-			text += ent.empty ? " [empty]" : " [loot]";
+	if (wantName)
+		text = ent.label;
+	if (wantPrice && ent.hasCashAmount) {
+		if (!text.empty())
+			text += " | ";
+		text += "$" + FormatCash(ent.cashAmount);
+		if (ent.kind == RobRunWorld::Kind::MoneyWorkbench && ent.cleanCash > 0 && ent.dirtyCash > 0) {
+			text += " (C:$" + FormatCash(ent.cleanCash) + " D:$" + FormatCash(ent.dirtyCash) + ")";
 		}
-		if (wantDist && haveLocalPos) {
-			if (!text.empty()) text += " ";
-			text += "[" + std::to_string((int)distance) + "m]";
-		}
+	} else if (wantName && !lf.HideEmpty && ent.hasEmptyFlag) {
+		text += ent.empty ? " [empty]" : " [loot]";
+	}
+	if (wantDist && haveLocalPos) {
+		if (!text.empty()) text += " ";
+		text += "[" + std::to_string((int)distance) + "m]";
 	}
 
 	out.show = true;
@@ -816,7 +827,7 @@ void Draw()
 					// One switchboard: vehicles resolve through the catalogue too.
 					if (ConfigInstance.LootFilter.ShowOnMinimap) {
 						LootRenderInfo lootInfo;
-						if (EvaluateLootEntity(ent, localPos, haveLocal, lootInfo)) {
+						if (EvaluateLootEntity(ent, localPos, haveLocal, false, lootInfo)) {
 							show = true;
 							dotCol = lootInfo.colour;
 							dotSize = lootInfo.dotSize;
@@ -954,7 +965,7 @@ void Draw()
 	ImGui::PopStyleVar(2);
 }
 
-const char* MapFileForLocation(const std::string& id)
+static const char* MapFileForLocation(const std::string& id)
 {
 	std::string lower = id;
 	for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
@@ -1010,10 +1021,12 @@ void CalibrateBoundsForMap(const std::string& mapName)
 		ConfigInstance.Radar.WorldMinZ = -1756.02f;
 		ConfigInstance.Radar.WorldMaxZ = 1310.77f;
 	} else if (mapName == "looty_bay.png") {
-		ConfigInstance.Radar.WorldMinX = -500.f;
-		ConfigInstance.Radar.WorldMaxX = 500.f;
-		ConfigInstance.Radar.WorldMinZ = -500.f;
-		ConfigInstance.Radar.WorldMaxZ = 500.f;
+		// This image shows the city with wider margins than shooter_city.png.
+		// Match the shared roads and coastline in the city world frame.
+		ConfigInstance.Radar.WorldMinX = -1345.18f;
+		ConfigInstance.Radar.WorldMaxX = 1315.21f;
+		ConfigInstance.Radar.WorldMinZ = -1095.94f;
+		ConfigInstance.Radar.WorldMaxZ = 1566.10f;
 	} else if (mapName == "lennys_motel.png") {
 		ConfigInstance.Radar.WorldMinX = -721.99f;
 		ConfigInstance.Radar.WorldMaxX = 733.36f;
@@ -1022,32 +1035,31 @@ void CalibrateBoundsForMap(const std::string& mapName)
 	}
 }
 
-void AutoSelectMap(const std::string& locationId)
+static bool LoadSelectedMap(int index)
 {
-	if (locationId.empty()) return;
+	if (index < 0 || index >= (int)g_mapFiles.size()) return false;
+	if (index == g_currentMapIndex) return true;
+	const auto& file = g_mapFiles[index];
+	if (!LoadMapByName(file)) return false;
+
+	g_currentMapIndex = index;
+	ConfigInstance.Radar.SelectedMap = file;
+	CalibrateBoundsForMap(file);
+	return true;
+}
+
+static void AutoSelectMap(const std::string& locationId)
+{
 	const char* file = MapFileForLocation(locationId);
 	if (!file) return;
-	for (int i = 0; i < (int)g_mapFiles.size(); i++) {
-		if (g_mapFiles[i] == file) {
-			SetMap(i);
-			break;
-		}
-	}
+	const auto it = std::find(g_mapFiles.begin(), g_mapFiles.end(), file);
+	if (it != g_mapFiles.end())
+		LoadSelectedMap(static_cast<int>(it - g_mapFiles.begin()));
 }
 
 void DrawFullMap()
 {
 	if (!ConfigInstance.Radar.PopoutWindow) return;
-
-	if (ConfigInstance.Radar.AutoMapSelect)
-	{
-		static std::string lastLocationId;
-		const std::string loc = RobRunReader::GetLocationId();
-		if (!loc.empty() && loc != lastLocationId) {
-			lastLocationId = loc;
-			AutoSelectMap(loc);
-		}
-	}
 
 	const auto snapshot = RobRunReader::GetSnapshot();
 	const auto& cfg = ConfigInstance.Radar;
@@ -1159,7 +1171,7 @@ void DrawFullMap()
 
 			LootRenderInfo lootInfo;
 			if ((!ConfigInstance.LootFilter.Enabled || ConfigInstance.LootFilter.ShowOnMap) &&
-				EvaluateLootEntity(ent, localPos, haveLocal, lootInfo)) {
+				EvaluateLootEntity(ent, localPos, haveLocal, cfg.ShowFilteredLootNames, lootInfo)) {
 				ImVec2 sp = worldToScreen(ent.position.x, ent.position.z);
 				if (sp.x < clipMin.x - 8.f || sp.x > clipMax.x + 8.f ||
 					sp.y < clipMin.y - 8.f || sp.y > clipMax.y + 8.f)
@@ -2344,19 +2356,21 @@ void DrawInGameMapOverlay()
 				continue;
 			}
 
-			const float arrowR = (isFull ? 9.5f : 8.2f) * scale;
-			if (std::isfinite(entYaw)) {
-				DrawPlayerArrow(dl, pt, entYaw - rotRad, arrowR, col);
+			const bool showHeading = cfg.ShowInGameMapPlayerHeading && std::isfinite(entYaw);
+			const float markerRadius = scale * (showHeading
+				? (isFull ? 9.5f : 8.2f)
+				: (isFull ? 6.0f : 5.2f));
+			if (showHeading) {
+				DrawPlayerArrow(dl, pt, entYaw - rotRad, markerRadius, col);
 			} else {
-				const float dotR = (isFull ? 6.0f : 5.2f) * scale;
-				dl->AddCircleFilled(pt, dotR, col, 14);
-				dl->AddCircle(pt, dotR, IM_COL32(26, 28, 32, 250), 14, 1.4f);
+				dl->AddCircleFilled(pt, markerRadius, col, 14);
+				dl->AddCircle(pt, markerRadius, IM_COL32(26, 28, 32, 250), 14, 1.4f);
 			}
 
 			// Player names are only shown on the fullscreen ('M') map, never on the minimap.
 			if (isFull && cfg.InGameMapPlayerNames && font && !ent.nicknameUtf8.empty()) {
 				const ImVec2 sz = font->CalcTextSizeA(fontSize, FLT_MAX, 0.f, ent.nicknameUtf8.c_str());
-				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - arrowR - sz.y - 3.f);
+				const ImVec2 textPos(pt.x - sz.x * 0.5f, pt.y - markerRadius - sz.y - 3.f);
 				const float padX = 5.f;
 				const float padY = 2.f;
 				dl->AddRectFilled(
@@ -2527,7 +2541,6 @@ const std::vector<std::string>& GetMapFiles()
 
 int GetCurrentMapIndex()
 {
-	std::lock_guard<std::mutex> lock(g_radarStateMutex);
 	return g_currentMapIndex;
 }
 
@@ -2536,46 +2549,60 @@ void RequestSetMap(int index)
 	g_pendingMapIndex.store(index, std::memory_order_release);
 }
 
+void RequestAutoMap()
+{
+	g_pendingMapIndex.store(kAutoMapRequest, std::memory_order_release);
+}
+
 void ProcessPendingMap()
 {
-	const int pending = g_pendingMapIndex.exchange(-1, std::memory_order_acq_rel);
-	if (pending >= 0)
-		SetMap(pending);
+	auto& cfg = ConfigInstance.Radar;
+	const auto snapshot = RobRunReader::GetSnapshot();
+	const auto battle = snapshot ? snapshot->battleModel : 0;
+	const auto entities = snapshot ? snapshot->battleEntities : 0;
+	const bool inMap = battle && entities;
+	const std::string location = inMap ? RobRunReader::GetLocationId() : std::string{};
+	const bool locationChanged = !location.empty() && location != g_mapLocation;
+	// The cached location can arrive after the battle roots. Only a new entry
+	// should clear a manual pick made while the location was still loading.
+	const bool enteredMap = inMap && (battle != g_mapBattle || entities != g_mapEntities);
+	g_mapBattle = inMap ? battle : 0;
+	g_mapEntities = inMap ? entities : 0;
+	if (!inMap || !location.empty())
+		g_mapLocation = location;
 
-	if (ConfigInstance.Radar.AutoMapSelect) {
-		static std::string s_lastLoc;
-		const std::string loc = RobRunReader::GetLocationId();
-		if (!loc.empty() && loc != s_lastLoc) {
-			s_lastLoc = loc;
-			AutoSelectMap(loc);
-		}
+	const int pending = g_pendingMapIndex.exchange(kNoMapRequest, std::memory_order_acq_rel);
+	if (pending == kAutoMapRequest)
+		cfg.AutoMapSelect = true;
+	const bool resumeAuto = pending == kAutoMapRequest || (cfg.AutoMapSelect && !g_autoWasEnabled);
+	if (enteredMap || resumeAuto)
+		g_manualMap = false;
+	if (pending >= 0 && LoadSelectedMap(pending))
+		g_manualMap = true;
+	if (cfg.AutoMapSelect && !g_manualMap && (enteredMap || resumeAuto || locationChanged)) {
+		AutoSelectMap(location);
 	}
+	g_autoWasEnabled = cfg.AutoMapSelect;
+	PublishMapView();
 }
 
 void SetMap(int index)
 {
-	if (index < 0 || index >= (int)g_mapFiles.size()) return;
-	{
-		std::lock_guard<std::mutex> lock(g_radarStateMutex);
-		if (index == g_currentMapIndex) return;
+	if (LoadSelectedMap(index)) {
+		g_manualMap = true;
+		PublishMapView();
 	}
+}
 
-	if (LoadMapByName(g_mapFiles[index])) {
-		{
-			std::lock_guard<std::mutex> lock(g_radarStateMutex);
-			g_currentMapIndex = index;
-		}
-		ConfigInstance.Radar.SelectedMap = g_mapFiles[index];
-		CalibrateBoundsForMap(g_mapFiles[index]);
-	}
+MapView GetMapView()
+{
+	std::lock_guard<std::mutex> lock(g_mapViewMutex);
+	return g_mapView;
 }
 
 std::string GetCurrentMapName()
 {
-	std::lock_guard<std::mutex> lock(g_radarStateMutex);
-	if (g_currentMapIndex >= 0 && g_currentMapIndex < (int)g_mapFiles.size())
-		return g_mapFiles[g_currentMapIndex];
-	return ConfigInstance.Radar.SelectedMap;
+	return GetMapView().name;
 }
 
 std::filesystem::path GetMapsDirectory()
