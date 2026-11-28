@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "DeviceSession.h"
+#include "Diag.h"
 #include "ABCurves/ABCurvesPlanner.h"
 #include "ABCurves/ABCurvesRenderer.h"
 #include <array>
@@ -23,6 +24,17 @@ bool ValidIpv4(const std::string& value) {
         else return false;
     }
     return parts == 4;
+}
+const char* OutputLabel(OutputResult r) {
+    switch (r) {
+    case OutputResult::Accepted: return "queued";
+    case OutputResult::Written: return "written";
+    case OutputResult::Expired: return "expired";
+    case OutputResult::Cancelled: return "cancelled";
+    case OutputResult::Failed: return "failed";
+    case OutputResult::Unconfirmed: return "sent (no ack)";
+    default: return "none";
+    }
 }
 std::string Trim(std::string s) {
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
@@ -94,6 +106,7 @@ struct DeviceSession::Impl {
     DeviceConfig config;
     Status status;
     bool wanted = false, neutralize = false, refresh = true;
+    Clock::time_point testDeadline{};
     std::array<Slot, sourceCount> slots{};
     std::deque<QueuedControl> controls;
     std::array<ControlLease, 237> controlLeases{};
@@ -103,9 +116,36 @@ struct DeviceSession::Impl {
     void ClearOutput() {
         for (auto& s : slots) { s.active = false; ++s.revision; }
         controls.clear(); controlLeases = {}; ++outputEpoch;
+        testDeadline = {};
         if (status.test == OutputResult::Accepted) status.test = OutputResult::Cancelled;
     }
     void Run() {
+        // A fault inside the backend must never silently kill the only thread
+        // that can inject input: the UI would still show "Connected" while aim
+        // and Test Movement do nothing. Recover instead of terminating.
+        while (!stop) {
+            try {
+                Worker();
+                return;
+            } catch (...) {
+                backend->Close();
+                {
+                    std::lock_guard lock(mutex);
+                    if (stop) return;
+                    status.state = LinkState::Recovering;
+                    status.error = "Device worker fault; reconnecting.";
+                    ++status.failures;
+                    status.input = {};
+                    status.protocolVerified = false;
+                    ClearOutput();
+                }
+                const auto until = Clock::now() + std::chrono::milliseconds(500);
+                while (!stop && Clock::now() < until)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+    }
+    void Worker() {
         std::uint64_t active = 0, epoch = 0;
         bool opened = false, locked = false;
         unsigned attempts = 0;
@@ -168,6 +208,8 @@ struct DeviceSession::Impl {
                         status.state = LinkState::Ready; status.error.clear();
                         status.detail = status.protocolVerified ? "Protocol verified" : "Port open; device reply verification unavailable";
                         attempts = 0; motion = {}; last = {};
+                        VeoxDiag("[Device] link UP kind=%d endpoint='%s' verified=%d",
+                            int(c.kind), status.endpoint.c_str(), status.protocolVerified ? 1 : 0);
                     } else {
                         status.state = LinkState::Recovering;
                         status.error = backend->Error();
@@ -176,6 +218,7 @@ struct DeviceSession::Impl {
                         const unsigned delay = (std::min)(3000u, 500u << (std::min)(attempts++, 3u));
                         retry = Clock::now() + std::chrono::milliseconds(delay);
                         status.retryInMs = delay;
+                        VeoxDiag("[Device] link DOWN kind=%d: %s", int(c.kind), status.error.c_str());
                     }
                 }
                 if (!ok) backend->Close();
@@ -212,6 +255,13 @@ struct DeviceSession::Impl {
                     control = item.value; haveControl = true; break;
                 }
                 test = status.test == OutputResult::Accepted;
+                // A test that could not be dispatched must never gate every
+                // later movement/aim submission. Release the gate on timeout.
+                if (test && testDeadline != Clock::time_point{} && Clock::now() >= testDeadline) {
+                    status.test = OutputResult::Failed;
+                    testDeadline = {};
+                    test = false;
+                }
             }
             const auto outputCurrent = [&] { return current() && epoch == outputEpoch.load(); };
             for (const auto release : releases)
@@ -224,6 +274,8 @@ struct DeviceSession::Impl {
                 if (outputCurrent() && status.test == OutputResult::Accepted)
                     status.test = !ok ? OutputResult::Failed
                         : backend->TestMoveAcknowledged() ? OutputResult::Written : OutputResult::Unconfirmed;
+                VeoxDiag("[Device] test movement: %s%s%s", OutputLabel(status.test),
+                    status.error.empty() ? "" : " - ", status.error.c_str());
             }
             now = Clock::now();
             for (size_t i = 0; i < sourceCount; ++i) {
@@ -257,7 +309,12 @@ struct DeviceSession::Impl {
                         : (in.target ^ std::uint64_t(now.time_since_epoch().count()));
                 }
                 if (!in.error && !in.rate && oneShots[i] == in.observation) continue;
-                const int interval = std::clamp(in.intervalMs, 1, 100);
+                int interval = std::clamp(in.intervalMs, 1, 100);
+                // A Kmbox USB is an ASCII 115200-baud link and echoes every
+                // command. Its effective ceiling is a few hundred commands per
+                // second, not 1 kHz. Clamp the 1 kHz ABCurves renderer here so
+                // the device queue can never be overrun.
+                if (c.kind == DeviceKind::KmboxUsb) interval = (std::max)(interval, 4);
                 if (last[i] != Clock::time_point{} && now - last[i] < std::chrono::milliseconds(interval)) {
                     if (stick) { sum.x += stickCommands[i].x; sum.y += stickCommands[i].y; }
                     continue;
@@ -366,6 +423,7 @@ struct DeviceSession::Impl {
                 if (status.error.empty()) status.error = "Device I/O failed; reconnecting.";
                 ++status.failures; status.input = {}; status.protocolVerified = false;
                 ClearOutput(); retry = Clock::now() + std::chrono::milliseconds(500); attempts = 1;
+                VeoxDiag("[Device] output failure: %s", status.error.c_str());
             } else {
                 const auto input = backend->Input();
                 std::lock_guard lock(mutex);
@@ -395,6 +453,9 @@ bool DeviceSession::Connect(const DeviceConfig& c) {
     const auto error = Validate(cfg);
     std::lock_guard lock(impl->mutex);
     if (error.empty() && impl->wanted && impl->config == cfg) return true;
+    VeoxDiag("[Device] connect kind=%d port='%s' ip='%s' baud=%d error='%s'",
+        int(cfg.kind), cfg.port.c_str(), cfg.ip.c_str(), cfg.baud,
+        error.empty() ? "" : error.c_str());
     impl->ClearOutput(); impl->config = cfg; impl->wanted = error.empty();
     impl->status = {}; impl->status.kind = cfg.kind; impl->status.generation = ++impl->generation;
     impl->status.state = error.empty() ? LinkState::Connecting : LinkState::NeedsConfiguration;
@@ -447,7 +508,10 @@ bool DeviceSession::Button(Control c, DeviceKind owner) {
 bool DeviceSession::TestMovement() {
     std::lock_guard lock(impl->mutex);
     if (impl->status.state != LinkState::Ready || impl->status.test == OutputResult::Accepted) return false;
-    impl->ClearOutput(); impl->status.test = OutputResult::Accepted; impl->wake.notify_all(); return true;
+    impl->ClearOutput();
+    impl->status.test = OutputResult::Accepted;
+    impl->testDeadline = Clock::now() + std::chrono::milliseconds(1500);
+    impl->wake.notify_all(); return true;
 }
 Status DeviceSession::GetStatus() const { std::lock_guard lock(impl->mutex); return impl->status; }
 PhysicalInput DeviceSession::TakeInput() {
