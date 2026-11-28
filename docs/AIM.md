@@ -29,6 +29,59 @@ tab and records why "silent aim" is not part of the feature set.
 - Like Memory Aim, it moves the real view through a physical input device. It
   is not silent.
 
+### Kmbox USB serial link
+
+KMBox B+ / B Pro are ASCII links on a 115200-baud CH340, and the firmware
+echoes every command. The echo stream is wider than the command stream, so the
+device cannot absorb a 1 kHz burst even though the host UART is configured for
+it. The device output path therefore:
+
+- paces every Kmbox USB command to the wire time (with a 4 ms floor) in
+  `DeviceBackend::PaceSerial`;
+- clamps the per-source interval to 4 ms for `DeviceKind::KmboxUsb`, so the
+  1 kHz ABCurves renderer cannot overrun the link;
+- treats a short/failed write as a framing error: it purges the TX queue,
+  terminates the partial line with `\r\n`, and retries the command once;
+- verifies the selected port with `km.version()` and, for Test Movement, waits
+  for the command echo so a dead parser is reported as `sent (no ack)` instead
+  of a false `written`;
+- watches the B+ echo stream: once a reply has been seen, a `km.move` that gets
+  no reply for 1.5 s triggers a reconnect and, after a repeat, a `km.reboot()`;
+- skips neutralization on a link that already failed, so a timed-out write
+  cannot append another fragment to the parser;
+- issues `km.reboot()` only after repeated open/neutralize failures, then lets
+  the normal reconnect loop recover the port.
+
+A single test movement that used to work and then stopped after an aim burst is
+this exact failure mode: a full TX queue, a timed-out partial `km.move`, and a
+firmware parser waiting for the rest of that command.
+
+### Verifying a Kmbox USB fix
+
+1. Plug the Kmbox control cable into the overlay PC. Device Manager must show
+   `USB-SERIAL CH340 (COMx)`; `Test Movement` requires that port to be present.
+2. Select **Kmbox USB**, Connect, and click **Test Movement** twice. The panel
+   must report `Test movement: written` both times and the game-PC cursor must
+   jump 25 px.
+3. Enter the game, hold the aim key for several seconds, release it, reopen the
+   menu, and click **Test Movement** again. It must still report `written`.
+4. If it fails, keep `veox-diag.log` from the folder beside `VeoxDMA.exe`. The
+   relevant lines are:
+   - `[Device] link DOWN ...` / `[Device] output failure ...` — serial side;
+   - `[Device] test movement: ...` — the last test result;
+   - `[Aim] activation key held (source=...)` — whether the game PC saw the
+     key, which separates aim-key detection from a device wedge;
+   - `[Aim] hardware submit rejected ...` / `[Aim] hardware not ready ...`.
+
+### Memory Aim with a device connected
+
+Memory Aim is host-cursor output and a two-PC game cannot see it. If a
+mouse-type device (Kmbox USB/Net/NB Pro, Makcu, Medius) is connected and no
+memory angle write is active, `Aim::Tick` routes the same pixel error through
+hardware instead of `SendInput`. The Device panel shows this routing. Selecting
+Hardware Aim remains the explicit alternative.
+
+
 ## Target selection
 
 - Targets are filtered by distance (`MaxDistance`), dead state and the local

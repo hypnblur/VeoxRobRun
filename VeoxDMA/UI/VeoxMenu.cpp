@@ -2010,8 +2010,16 @@ void DrawAimHardwarePad()
 					Session().Disconnect();
 				if (connected) {
 					ImGui::SameLine(0.f, 8.f);
-					if (InlineButton("Test Movement", 118.f))
-						Session().TestMovement();
+					if (InlineButton("Test Movement", 118.f)) {
+						if (Session().TestMovement()) {
+							Overlay::Notify("Test movement sent", IM_COL32(70, 194, 120, 255), 1.5f);
+						} else {
+							const auto testStatus = Session().GetStatus();
+							std::string reason = "Test movement not sent: ";
+							reason += testStatus.error.empty() ? StateLabel(testStatus.state) : testStatus.error;
+							Overlay::Notify(reason.c_str(), IM_COL32(229, 83, 83, 255), 3.f);
+						}
+					}
 				}
 			}
 			if (isSerial) {
@@ -2024,6 +2032,23 @@ void DrawAimHardwarePad()
 		Note("Status: %s", StateLabel(status.state));
 		if (!status.endpoint.empty()) Note("Endpoint: %s", status.endpoint.c_str());
 		if (status.protocolVerified) Note("Protocol verified.");
+		if (connected && status.kind == DeviceKind::KmboxUsb && !status.protocolVerified)
+			Note("No reply to km.version(); check the Kmbox COM port, cable and 115200 baud.");
+		if (status.test != OutputResult::None) {
+			const char* testLabel = "queued";
+			switch (status.test) {
+			case OutputResult::Accepted: testLabel = "queued"; break;
+			case OutputResult::Written: testLabel = "written"; break;
+			case OutputResult::Failed: testLabel = "failed"; break;
+			case OutputResult::Expired: testLabel = "expired"; break;
+			case OutputResult::Cancelled: testLabel = "cancelled"; break;
+			case OutputResult::Unconfirmed: testLabel = "sent (no ack)"; break;
+			default: break;
+			}
+			Note("Test movement: %s", testLabel);
+		}
+		if (connected && ConfigInstance.Aim.AimType == 0 && !ConfigInstance.Aim.MemoryWrite)
+			Note("Memory Aim is routed through the connected device because no angle write is enabled.");
 		if (!status.error.empty()) Note("%s", status.error.c_str());
 		if (status.retryInMs > 0) Note("Retrying in %u ms", status.retryInMs);
 		EndCard();
