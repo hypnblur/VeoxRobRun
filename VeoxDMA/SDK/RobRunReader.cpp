@@ -329,6 +329,7 @@ static std::uint32_t poseScatterOkAcc = 0;
 static std::uint32_t poseScatterFailAcc = 0;
 static std::uint32_t poseFreshOkAcc = 0;
 static std::atomic<bool> readCatalog{ false };
+static std::atomic<RobRunWorld::KeyDoorVisibility> g_keyDoorVisibility{};
 static int updateCounter = 0;
 static int gameRetryCountdown = 0;
 static int updaterRetryCountdown = 0;
@@ -1300,7 +1301,8 @@ void Init(std::uintptr_t gameAssemblyBase, std::uintptr_t unityPlayerBase)
                 const std::uintptr_t lc = cachedLocalCharacter;
                 if (bm > 0x10000) {
                     auto state = std::make_shared<RobRunWorld::State>();
-                    const bool worldOk = RobRunWorld::Read(bm, be, *state);
+                    const auto keyDoors = GetKeyDoorVisibility();
+                    const bool worldOk = RobRunWorld::Read(bm, be, *state, keyDoors.gold || keyDoors.purple);
                     if ((wwCount % 100) == 1)
                         DLOG("WorldWorker #%d: Read=%d entities=%zu gen=%llu",
                              wwCount, worldOk, state->entities.size(), (unsigned long long)gen);
@@ -6616,6 +6618,15 @@ std::string GetLocationId()
 }
 
 void SetReadCatalogEnabled(bool enabled) { readCatalog.store(enabled); }
+void SetKeyDoorVisibility(RobRunWorld::KeyDoorVisibility visibility)
+{
+    g_keyDoorVisibility.store(visibility, std::memory_order_relaxed);
+}
+
+RobRunWorld::KeyDoorVisibility GetKeyDoorVisibility()
+{
+    return g_keyDoorVisibility.load(std::memory_order_relaxed);
+}
 void SetLootPreviewEnabled(bool enabled) { g_lootPreviewEnabled.store(enabled, std::memory_order_relaxed); }
 std::shared_ptr<const LootPreview> GetLootPreview() { return g_publishedLootPreview.load(); }
 void SetGrenadePredictionEnabled(bool enabled) { g_grenadePredictionEnabled.store(enabled); }

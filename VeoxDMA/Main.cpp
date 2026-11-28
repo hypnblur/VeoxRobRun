@@ -267,6 +267,10 @@ static void TickOverlay()
 	Aim::SetDisplaySize(display.x, display.y);
 	RobRunReader::SetLootPreviewEnabled(ConfigInstance.World.UnrevealedLootLabels &&
 		!ConfigInstance.Overlay.PanicMode);
+	RobRunReader::SetKeyDoorVisibility({
+		ConfigInstance.World.GoldKeyDoors && !ConfigInstance.Overlay.PanicMode,
+		ConfigInstance.World.PurpleKeyDoors && !ConfigInstance.Overlay.PanicMode
+	});
 	RobRunReader::SetGrenadePredictionEnabled(ConfigInstance.World.Enabled &&
 		ConfigInstance.World.GrenadePrediction && !ConfigInstance.Overlay.PanicMode);
 	Radar::ProcessPendingMap();

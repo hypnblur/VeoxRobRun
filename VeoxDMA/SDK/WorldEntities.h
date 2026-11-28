@@ -72,9 +72,29 @@ struct Entity {
     bool hasYaw = false;
 };
 
+enum class KeyDoorGroup { Gold, Purple };
+enum class KeyDoorStatus { Unknown, Locked, Unlocked };
+
+struct KeyDoorVisibility {
+    bool gold = false;
+    bool purple = false;
+
+    bool Shows(KeyDoorGroup group) const { return group == KeyDoorGroup::Gold ? gold : purple; }
+};
+
+struct KeyDoor {
+    int entityId;
+    Vector3 position;
+    const char* name;
+    KeyDoorGroup group;
+    KeyDoorStatus status;
+};
+
 struct State {
     bool valid = false;
     std::vector<Entity> entities;
+    std::vector<KeyDoor> keyDoors;
+    std::uint64_t keyDoorsReadMs = 0;
     int containers = 0;
     int loots = 0;
     int vehicles = 0;
@@ -87,7 +107,16 @@ struct State {
     int defenseBlocks = 0;
     std::unordered_set<int> hiddenEntityIds;
     std::uintptr_t worldPtr = 0;
+
+    KeyDoorStatus KeyDoorStatusAt(const KeyDoor& door, std::uint64_t nowMs) const
+    {
+        constexpr std::uint64_t maxAgeMs = 2000;
+        return nowMs >= keyDoorsReadMs && nowMs - keyDoorsReadMs < maxAgeMs
+            ? door.status : KeyDoorStatus::Unknown;
+    }
 };
+
+const char* KeyDoorStatusText(KeyDoorStatus status);
 
 struct GrenadeSample {
     int id = 0;
@@ -181,7 +210,7 @@ void Init(std::uintptr_t gameAssemblyBase);
 
 // Reads WorldEntitiesModel. The dump places it at BattleModel+0x510;
 // BattleEntitiesModel+0x60 and BattleModel+0x60 are validated fallbacks.
-bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out);
+bool Read(std::uintptr_t battleModel, std::uintptr_t battleEntities, State& out, bool readKeyDoors);
 
 const char* KindName(Kind kind);
 

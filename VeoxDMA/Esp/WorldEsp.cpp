@@ -295,6 +295,11 @@ static int CapWorldDistance(int range)
 	return range > 0 ? std::min(range, global) : global;
 }
 
+static bool OutsideWorldRange(float limit, bool haveOrigin, float distanceSq)
+{
+	return limit > 0.f && (!haveOrigin || distanceSq > limit * limit);
+}
+
 static Vector3 WorldRangeOrigin(const Vector3& player)
 {
 	if (RobRunMemory::Finite(player) && !player.IsZero()) return player;
@@ -439,6 +444,23 @@ void DrawWorldEntities(const RobRunReader::Snapshot* snapshot)
 			viewProjection, screenW, screenH, dl, font);
 	}
 	if (!snapshot->world) return;
+
+	const auto keyDoorVisibility = RobRunReader::GetKeyDoorVisibility();
+	const auto nowMs = GetTickCount64();
+	const float keyDoorRange = static_cast<float>(CapWorldDistance(
+		ConfigInstance.LootFilter.Enabled ? 0 : ConfigInstance.World.MaxDistance));
+	for (const auto& door : snapshot->world->keyDoors) {
+		if (!keyDoorVisibility.Shows(door.group))
+			continue;
+		if (OutsideWorldRange(keyDoorRange, haveLocalPosition, (door.position - localPos).LengthSqr()))
+			continue;
+		Vector2 screen;
+		if (!RobRunReader::ProjectWorld(viewProjection, door.position, screenW, screenH, screen) ||
+			screen.x < 0.f || screen.x > screenW || screen.y < 0.f || screen.y > screenH)
+			continue;
+		Esp::DrawKeyDoorMarker(dl, ImVec2(screen.x, screen.y), font, 13.f, door.name,
+			snapshot->world->KeyDoorStatusAt(door, nowMs));
+	}
 
 	// What the snapshot actually contains, once every few seconds. This is how we
 	// tell "cargo is filtered out" from "cargo never reached the entity list".
@@ -586,9 +608,7 @@ void DrawWorldEntities(const RobRunReader::Snapshot* snapshot)
 			continue;
 
 		// Keep items with an explicit limit hidden until an origin is available.
-		const float maxDistF = static_cast<float>(maxDist);
-		const bool outsideRange = maxDist > 0 &&
-			(!haveLocalPosition || distSq > maxDistF * maxDistF);
+		const bool outsideRange = OutsideWorldRange(static_cast<float>(maxDist), haveLocalPosition, distSq);
 		if (kProbes && (entity.label == "perfume_3" || (itemDef && std::strcmp(itemDef->id, "perfume_3") == 0))) {
 			static std::unordered_set<std::string> logged;
 			const std::string key = std::to_string(entity.id) + ":" + std::to_string(maxDist) +

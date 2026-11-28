@@ -946,6 +946,7 @@ inline const std::string& GetWebRadarHtml()
     inGameMap: { valid: false, fullscreenOpen: false, minimapCamSize: 0 },
     players: [],
     vehicles: [],
+    doors: [],
     loot: [],
     lootVer: 0,
     availableMaps: []
@@ -1211,6 +1212,7 @@ inline const std::string& GetWebRadarHtml()
   // High-Speed SSE Stream (/api/stream) with /api/state Fallback
   // -------------------------------------------------------------------------
   let lastPlayerListRender = 0;
+  let lastDoorFrameAt = 0;
 
   function applyStatePayload(data) {
     msgCount++;
@@ -1224,6 +1226,7 @@ inline const std::string& GetWebRadarHtml()
     // Preserve cached loot if delta frame omitted it
     const prevLoot = state.loot;
     state = data;
+    lastDoorFrameAt = now;
     if (!data.loot) state.loot = prevLoot;
 
     // Sync menu accent color live
@@ -1611,6 +1614,22 @@ inline const std::string& GetWebRadarHtml()
         const sp = worldToScreen(it.x, it.z);
         if (sp.x < -24 || sp.x > cw + 24 || sp.y < -24 || sp.y > ch + 24) continue;
         drawSpriteIcon(it.sprite || "generic", sp.x, sp.y, it.cat === "bag" ? halfBag : halfLoot, it.color || "#64ff8c", 0);
+      }
+    }
+
+    if (state.doors && performance.now() - lastDoorFrameAt < 2000) {
+      const radius = Math.max(2.5, 3.2 * sc);
+      for (const door of state.doors) {
+        const sp = worldToScreen(door.x, door.z);
+        if (sp.x < -24 || sp.x > cw + 24 || sp.y < -24 || sp.y > ch + 24) continue;
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = door.color;
+        ctx.fill();
+        ctx.strokeStyle = "#1a1c20";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        drawNamePill(sp.x, sp.y - radius - 2, door.name + " - " + door.status, door.color, fontPx);
       }
     }
 
